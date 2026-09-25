@@ -1,0 +1,28 @@
+# premarket-ai - per-distro settings for Ubuntu-24.04 (/etc/wsl.conf).
+# Installed by: sudo scripts/wsl/00_setup-wsl.sh  (replaces <your-linux-user>)
+# Then from Windows PowerShell: wsl --shutdown
+# Comments must be on their own lines (no comments after a value).
+
+[boot]
+# Required: podman.socket, podman-restart, linger, CI runner service
+systemd=true
+
+[user]
+# Owns ~/src/premarket-ai and runs rootless Podman
+default=<your-linux-user>
+
+[automount]
+enabled=true
+root=/mnt/
+# Sane permissions on /mnt/c, /mnt/d (only used to copy files)
+options="metadata,umask=22,fmask=11"
+
+[interop]
+# Still allows calling powershell.exe / explorer.exe when needed
+enabled=true
+# Keep Windows tools (node, python, git...) from shadowing the Linux ones
+appendWindowsPath=false
+
+[network]
+# Keep true with dnsTunneling
+generateResolvConf=true

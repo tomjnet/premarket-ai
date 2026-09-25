@@ -1,0 +1,27 @@
+# premarket-ai - global WSL2 settings (all distros share one VM).
+# Install to C:\Users\<you>\.wslconfig with 01_setup-wslconfig.ps1, then: wsl --shutdown
+# Comments must be on their own lines (no comments after a value).
+
+[wsl2]
+# WSL/Podman limit; Windows + Ollama keep the other ~16 GB of 32 GB
+memory=16GB
+# 6 of 8 threads; 2 left for Windows + Ollama
+processors=6
+# Safety net for build spikes (C++ build, Langfuse/ClickHouse)
+swap=8GB
+# WSL shares the Windows network interfaces; localhost works both ways
+networkingMode=mirrored
+# Reliable DNS with VPNs / network changes
+dnsTunneling=true
+# Windows (Hyper-V) firewall rules also apply to WSL
+firewall=true
+# Use the Windows proxy settings, if any
+autoProxy=true
+
+[experimental]
+# Containers reach Windows services (Ollama) via the host IP in mirrored mode
+hostAddressLoopback=true
+# Give unused WSL cache memory back to Windows
+autoMemoryReclaim=dropCache
+# The Ubuntu virtual disk shrinks when container images are deleted
+sparseVhd=true
