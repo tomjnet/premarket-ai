@@ -14,6 +14,17 @@ export default defineConfig({
   resolve: {
     alias: {'@': path.resolve(import.meta.dirname, 'src')},
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        // Libraries in their own chunk: an app release doesn't invalidate
+        // the browser's cached copy of React, the router and friends.
+        // Revisit when routes are lazy-loaded: this group would also pull
+        // their libraries into the eager chunk.
+        codeSplitting: {groups: [{name: 'vendor', test: /node_modules/}]},
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': {
@@ -27,6 +38,9 @@ export default defineConfig({
     environment: 'jsdom',
     // Tests run the app as `make dev` does: against the mock backend.
     env: {VITE_API_MODE: 'mock'},
+    // Page tests render ~100 feed rows twice (StrictMode) in jsdom; 5 s
+    // (the default) is too tight on a busy machine.
+    testTimeout: 15_000,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
     coverage: {

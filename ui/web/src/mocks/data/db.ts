@@ -39,7 +39,8 @@ function memorySessionStore(): SessionStore {
  */
 export class MockDb {
   tokenTtlS = ENV.mockTokenTtlS;
-  now: () => number = Date.now;
+  // Late-bound, so tests that fake Date (vi.useFakeTimers) move this clock.
+  now: () => number = () => Date.now();
   today: () => string = () => todayInNewYork();
   sessionStore: SessionStore = memorySessionStore();
   private readonly accessTokens = new Map<string, AccessToken>();
@@ -50,7 +51,7 @@ export class MockDb {
   /** Back to a fresh start: no session, no tokens, default settings. */
   reset(): void {
     this.tokenTtlS = ENV.mockTokenTtlS;
-    this.now = Date.now;
+    this.now = () => Date.now();
     this.today = () => todayInNewYork();
     this.sessionStore = memorySessionStore();
     this.accessTokens.clear();

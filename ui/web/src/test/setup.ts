@@ -13,6 +13,7 @@ beforeAll(() => server.listen({onUnhandledRequest: 'error'}));
 afterEach(() => {
   cleanup();
   window.sessionStorage.clear();
+  window.localStorage.clear();
   server.resetHandlers();
   db.reset();
   setScenario('default');

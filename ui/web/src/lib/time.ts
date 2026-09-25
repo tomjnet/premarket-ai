@@ -98,6 +98,18 @@ export function formatLongDate(date: string): string {
   return LONG_DATE.format(parseIsoDate(date));
 }
 
+const NEW_YORK_CLOCK = new Intl.DateTimeFormat('en-US', {
+  timeZone: NEW_YORK,
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/** An ISO UTC instant as New York wall-clock time, `HH:MM` (24 h). */
+export function formatEtTime(instant: string): string {
+  return NEW_YORK_CLOCK.format(new Date(instant));
+}
+
 /** New York's offset from UTC in minutes at `instant` (-240 or -300). */
 function newYorkOffsetMinutes(instant: Date): number {
   const name = NEW_YORK_OFFSET.formatToParts(instant).find(

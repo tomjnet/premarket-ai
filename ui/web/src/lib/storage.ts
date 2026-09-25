@@ -9,3 +9,15 @@ export function tabStorage(): Storage | undefined {
     return undefined;
   }
 }
+
+/**
+ * This browser's localStorage, or undefined where it is blocked. Only for
+ * UI preferences (for example keyboard shortcuts on/off); never for tokens.
+ */
+export function preferenceStorage(): Storage | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
+}

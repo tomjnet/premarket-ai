@@ -4,6 +4,7 @@ import {
   addDays,
   addSeconds,
   daysBetween,
+  formatEtTime,
   formatLongDate,
   isIsoDate,
   isWeekend,
@@ -56,6 +57,14 @@ describe('formatLongDate', () => {
   it('spells the date out, independent of the browser zone', () => {
     expect(formatLongDate('2026-09-25')).toBe('Friday, September 25, 2026');
     expect(formatLongDate('2027-01-01')).toBe('Friday, January 1, 2027');
+  });
+});
+
+describe('formatEtTime', () => {
+  it('shows New York time, 24 h, in summer and winter', () => {
+    expect(formatEtTime('2026-09-24T08:12:00Z')).toBe('04:12');
+    expect(formatEtTime('2026-12-01T13:30:00Z')).toBe('08:30');
+    expect(formatEtTime('2026-09-24T04:05:00Z')).toBe('00:05');
   });
 });
 

@@ -8,11 +8,11 @@ against a **mock backend** in the browser (MSW, Mock Service Worker) that
 serves the agreed JSON contract. Setting one environment variable,
 `VITE_API_MODE=live`, switches to the real backend without a code change.
 
-> Status: **milestone M2 (shell and auth)**. You can log in and out, the
-> session survives a reload and refreshes itself, and every page has the
-> SIMULATION ribbon, the compliance banner, a header and a footer (backend
-> status, mock scenario switcher). The news feed page is still a
-> placeholder; the feed (M3) and the detail page (M4) come next.
+> Status: **milestone M3 (news feed)**. Log in and read a trading date's
+> news: filter by date, ticker and text (all kept in the URL), show or hide
+> duplicates, follow a running or failed ingest run, and move through the
+> list with the keyboard. Clicking a headline opens a placeholder; the
+> detail page comes in M4.
 
 ## Contents
 - [Prerequisites](#prerequisites)
@@ -77,7 +77,7 @@ make -C ui check
 Pass criteria, in order:
 1. `lint`: no output from ESLint (0 errors, 0 warnings).
 2. `typecheck`: no output from `tsc`.
-3. `test`: `Test Files  17 passed`, `Tests  128 passed`, and the coverage
+3. `test`: `Test Files  20 passed`, `Tests  171 passed`, and the coverage
    summary. This step fails if `src/api`, `src/features` or `src/lib` drop
    below 80 % line coverage.
 4. `build`: `built in …ms` and no `MSW code found in dist/` line.
@@ -87,6 +87,8 @@ StrictMode against the mock backend, as `make dev` does):
 
 | Test file | Proves |
 |---|---|
+| `src/features/news/feed-page.test.tsx` | Today's feed newest first with "91 items · 9 duplicates hidden · updated 05:30 ET"; duplicates shown and marked; ticker chips (toggle) and Back; search 300 ms after the last key, Back undoes it, typing during a search keeps every key; ticker with Enter and an invalid-ticker message; a typed date makes one history entry; shared links fill the inputs; no matches; weekend, future date; every scenario (empty, running with real 30 s polling that stops at DONE, failed, server-error with Retry, contract-drift, expired-session, slow); `<script>` in vendor text stays text; `/`, `j`, `k`, Enter, and turning the shortcuts off; axe. |
+| `src/features/news/feed.test.ts`, `hooks/hooks.test.ts` | URL filter parsing and round-trip, ticker rules, sorting, summary text, the "Go to" date, poll interval, row navigation, typing detection. |
 | `src/features/auth/login-page.test.tsx` | Login with Enter goes back to `?next=`; `?next=` can't leave the site; wrong password: message, password cleared and focused; empty fields send nothing; the button is disabled while sending and a second Enter sends nothing; unreachable server message; a logged-in user skips the form; focus lands on the page after login; no axe issues. |
 | `src/app/routes.test.tsx` | No session → login with `?next=`; a reload restores the session; notices, date, user and backend status in the shell (axe); backend unreachable; MOCK API tag and scenario switcher; logout (also when the request fails); expiry and a failed proactive refresh → login with "Your session expired"; the token is refreshed before it expires; backend down at start → Try again; 404, 403 and crash pages. |
 | `src/features/auth/session.test.ts` | Refresh timing (no loop for short tokens); `?next=` safety; the tab's had-session flag. |
@@ -125,6 +127,21 @@ Open http://localhost:5173 and go through these steps in order:
 | 11 | DevTools device toolbar at 360 px wide | Nothing overflows horizontally; the header wraps. |
 | 12 | Short tokens: `make -C ui dev VITE_MOCK_TOKEN_TTL_S=60`, log in, wait | Network tab: `POST /api/auth/refresh` about every 30 s; you stay logged in. |
 | 13 | Live mode: `make -C ui dev VITE_API_MODE=live` (no backend running) | No mock hint or MOCK API tag; "Backend: unreachable"; logging in says "The server had a problem. Try again." |
+
+Then the news feed (logged in as `trader1`, mock mode, scenario `default`):
+
+| # | Do | Expected |
+|---|---|---|
+| 14 | Open http://localhost:5173/ | "News feed", today's date, "91 items · 9 duplicates hidden · updated 05:30 ET" (on a weekend: "No feed for …" with a link to Friday). Each row: time `HH:MM ET`, ticker buttons, headline link, source domain, excerpt. |
+| 15 | Click a ticker button in a row | The URL gets `ticker=…`, only that ticker's items remain, the button looks pressed. Click it again: the filter is removed. Browser Back also undoes it. |
+| 16 | Type `Zentrality` in the search box | About 300 ms after you stop typing, the URL gets `q=Zentrality` and "N matching items" (a few). Back removes the search. |
+| 17 | Look for the item with `<script>` in the headline (search `Umbrix`) | The text `<script>alert("headline")</script>` is shown literally; no alert pops up. |
+| 18 | Tick **Show duplicates** | 100 items; 9 rows have a dashed border and "Duplicate of VND-…". |
+| 19 | Pick a date in the Date field (for example yesterday) | That date's feed; the URL has `date=…`. Pick a Saturday: "No feed for …" and "Go to Friday …". |
+| 20 | Keyboard: press `/`, type, Esc, then click the page title and press `j`, `j`, `k`, Enter | `/` focuses search; `j`/`k` move a focus ring between headlines; Enter opens the item (placeholder page). "Turn off single-key shortcuts" disables them (remembered). |
+| 21 | Footer: `running` + Apply | "Today's feed is still arriving", 25 items received; every 30 s 25 more arrive; after 90 s the normal summary. |
+| 22 | Footer: `failed`, `empty`, `server-error`, `contract-drift`, `slow` + Apply (one at a time) | failed: red "The ingest run for this date failed" panel and the 40 items that arrived. empty: "No ingest run exists for this date yet." server-error: "The server had a problem. Try again." with Retry. contract-drift: "Unexpected response from the server." slow: skeleton rows for 2–3 s, then the list. Finish with `default` + Apply. |
+| 23 | Copy the URL with filters into a new tab | The same view: date, ticker, search and duplicates restored from the URL. |
 
 You can also call the mock API directly from the DevTools console (F12 >
 Console). Chrome may ask you to type `allow pasting` first. Paste:
@@ -254,7 +271,7 @@ ui/
         │   └── ui/           #   shadcn/ui components (generated)
         ├── features/
         │   ├── auth/         #   session context, login page, route guards
-        │   └── news/         #   feed page (placeholder until M3)
+        │   └── news/         #   feed page, filters, rows, hooks (detail page: M4)
         ├── lib/              # env.ts, time.ts, storage.ts, mock-scenarios.ts, utils.ts
         ├── mocks/            # the mock backend (never in the production build)
         │   ├── data/         #   seeded generator, companies, users, in-memory db
@@ -264,7 +281,7 @@ ui/
         └── test/             # Vitest setup, renderApp helper, axe check
 ```
 Tests sit next to the code they test: `client.test.ts` beside `client.ts`.
-Later milestones fill `src/features/news/` (feed and detail pages).
+The detail page (`news-detail-page.tsx`) is a placeholder until M4.
 
 ## Tech stack
 Versions are pinned exactly in `web/package.json`.

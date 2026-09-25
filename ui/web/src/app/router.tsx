@@ -6,6 +6,7 @@ import {NotFoundPage} from '@/components/pages/status-page';
 import {LoginPage} from '@/features/auth/login-page';
 import {RequireAuth} from '@/features/auth/require-auth';
 import {FeedPage} from '@/features/news/feed-page';
+import {NewsDetailPage} from '@/features/news/news-detail-page';
 
 /**
  * The route tree. Everything but `/login` needs a session; a page that needs
@@ -25,6 +26,7 @@ export const routes: RouteObject[] = [
             children: [
               {index: true, element: <FeedPage />},
               {path: 'news', element: <FeedPage />},
+              {path: 'news/:id', element: <NewsDetailPage />},
               {path: '*', element: <NotFoundPage />},
             ],
           },

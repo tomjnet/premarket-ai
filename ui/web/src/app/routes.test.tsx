@@ -1,4 +1,4 @@
-import {act, screen, waitFor} from '@testing-library/react';
+import {act, screen, waitFor, within} from '@testing-library/react';
 import {HttpResponse, http} from 'msw';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
@@ -58,9 +58,10 @@ describe('route guard and session restore', () => {
 describe('app shell', () => {
   it('shows notices, trading date, user and backend status', async () => {
     withMockSession();
-    const {container} = renderApp('/');
+    // A weekend date: the shell with a short page, so axe stays fast.
+    const {container} = renderApp('/news?date=2026-09-26');
 
-    await screen.findByRole('heading', {name: 'News feed'});
+    await screen.findByRole('heading', {name: /No feed for/});
     expect(
       screen.getByText('SIMULATION: synthetic vendor data'),
     ).toBeInTheDocument();
@@ -68,7 +69,9 @@ describe('app shell', () => {
       screen.getByText('Decision support only, not investment advice.'),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(formatLongDate(todayInNewYork())),
+      within(screen.getByRole('banner')).getByText(
+        formatLongDate(todayInNewYork()),
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByRole('link', {name: 'Skip to main content'}),

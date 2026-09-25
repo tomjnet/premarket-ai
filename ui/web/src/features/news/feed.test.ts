@@ -1,0 +1,155 @@
+import {describe, expect, it} from 'vitest';
+
+import type {NewsItem, NewsList} from '@/api/schemas/news';
+
+import {
+  feedFallbackDate,
+  feedSearch,
+  feedSummary,
+  newestFirst,
+  normalizeTicker,
+  parseFeedFilters,
+} from './feed';
+
+const TODAY = '2026-09-25';
+
+function params(query: string): URLSearchParams {
+  return new URLSearchParams(query);
+}
+
+describe('parseFeedFilters', () => {
+  it('defaults to today, no ticker, no search, duplicates hidden', () => {
+    expect(parseFeedFilters(params(''), TODAY)).toEqual({
+      date: TODAY,
+      ticker: undefined,
+      q: undefined,
+      dups: false,
+    });
+  });
+
+  it('reads every filter from the URL', () => {
+    expect(
+      parseFeedFilters(
+        params('date=2026-09-24&ticker=aapl&q=%20buyback%20&dups=1'),
+        TODAY,
+      ),
+    ).toEqual({date: '2026-09-24', ticker: 'AAPL', q: 'buyback', dups: true});
+  });
+
+  it('ignores invalid values instead of breaking', () => {
+    expect(
+      parseFeedFilters(
+        params('date=2026-02-30&ticker=%3Cscript%3E&q=%20%20&dups=yes'),
+        TODAY,
+      ),
+    ).toEqual({date: TODAY, ticker: undefined, q: undefined, dups: false});
+  });
+
+  it('caps a very long search', () => {
+    const q = 'x'.repeat(500);
+    expect(parseFeedFilters(params(`q=${q}`), TODAY).q).toHaveLength(200);
+  });
+
+  it('round-trips through the URL', () => {
+    const filters = {
+      date: '2026-09-24',
+      ticker: 'BRK.B',
+      q: 'a & b',
+      dups: true,
+    };
+    expect(
+      parseFeedFilters(new URLSearchParams(feedSearch(filters)), TODAY),
+    ).toEqual(filters);
+    expect(feedSearch({date: TODAY, dups: false})).toBe(`?date=${TODAY}`);
+  });
+});
+
+describe('normalizeTicker', () => {
+  it('accepts tickers like AAPL, BRK.B and ZNTRA', () => {
+    expect(normalizeTicker(' brk.b ')).toBe('BRK.B');
+    expect(normalizeTicker('ZNTRA')).toBe('ZNTRA');
+  });
+
+  it('rejects anything else', () => {
+    for (const value of ['', '1ABC', 'A B', 'TOOLONGTICKER', '$AAPL']) {
+      expect(normalizeTicker(value)).toBeUndefined();
+    }
+  });
+});
+
+function item(id: number, publishedAt: string): NewsItem {
+  return {
+    id,
+    vendorItemId: `VND-${id}`,
+    feedDate: '2026-09-24',
+    headline: `[SYNTHETIC] ${id}`,
+    excerpt: '',
+    sourceUrl: 'https://wire.vendornews.example/x',
+    sourceDomain: 'wire.vendornews.example',
+    publishedAt,
+    tickers: [],
+    synthetic: true,
+    isDup: false,
+    dupOf: null,
+  };
+}
+
+describe('newestFirst', () => {
+  it('sorts by time, newest first, then by id', () => {
+    const sorted = newestFirst([
+      item(1, '2026-09-24T08:00:00Z'),
+      item(3, '2026-09-24T09:00:00Z'),
+      item(2, '2026-09-24T09:00:00Z'),
+    ]);
+    expect(sorted.map(entry => entry.id)).toEqual([3, 2, 1]);
+  });
+});
+
+describe('feedSummary', () => {
+  const list: NewsList = {
+    date: '2026-09-24',
+    run: {
+      runId: 1,
+      status: 'DONE',
+      startedAt: '2026-09-24T09:30:02Z',
+      finishedAt: '2026-09-24T09:30:05Z',
+      rowsReceived: 100,
+      dups: 9,
+    },
+    count: 91,
+    items: [],
+  };
+
+  it('counts items, hidden duplicates and the update time (ET)', () => {
+    expect(feedSummary(list, {date: '2026-09-24', dups: false})).toBe(
+      '91 items · 9 duplicates hidden · updated 05:30 ET',
+    );
+  });
+
+  it('says duplicates are shown when they are', () => {
+    expect(
+      feedSummary({...list, count: 100}, {date: '2026-09-24', dups: true}),
+    ).toBe('100 items · 9 duplicates shown · updated 05:30 ET');
+  });
+
+  it('talks about matches when filtered', () => {
+    expect(
+      feedSummary(
+        {...list, count: 1},
+        {date: '2026-09-24', ticker: 'AAPL', dups: false},
+      ),
+    ).toBe('1 matching item · updated 05:30 ET');
+  });
+});
+
+describe('feedFallbackDate', () => {
+  it('goes to the trading date before a weekend or empty day', () => {
+    expect(feedFallbackDate('2026-09-26', TODAY)).toBe('2026-09-25');
+    expect(feedFallbackDate('2026-09-28', '2026-09-30')).toBe('2026-09-25');
+  });
+
+  it('goes to the latest trading date for a future date', () => {
+    expect(feedFallbackDate('2026-10-05', TODAY)).toBe(TODAY);
+    expect(feedFallbackDate('2026-10-05', '2026-09-27')).toBe('2026-09-25');
+  });
+});
