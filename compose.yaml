@@ -1,0 +1,83 @@
+# premarket-ai: run with `podman compose` in Ubuntu WSL.
+# Increment 0 (legacy baseline): postgres, vendor-sim and the C++11 legacy
+# ingester/report. Profiles: legacy (inc 0+), ai, observability, full.
+#   podman compose --profile legacy up -d
+# Ollama is not a service: it runs on the GPU host (from increment 3).
+
+name: premarket-ai
+
+x-pg-env: &pg-env
+  PGHOST: postgres
+  PGPORT: "5432"
+  PGDATABASE: premarket
+  PGUSER: premarket
+  PGPASSWORD: ${POSTGRES_PASSWORD:?copy .env.example to .env}
+
+services:
+  postgres:
+    image: docker.io/pgvector/pgvector:0.8.0-pg17
+    environment:
+      POSTGRES_DB: premarket
+      POSTGRES_USER: premarket
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?copy .env.example to .env}
+      TZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Legacy DDL + seed, run once when pgdata is first created.
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U premarket -d premarket"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  vendor-sim:
+    build:
+      context: ./python/vendor-sim
+      dockerfile: ../../podman/vendor-sim/Containerfile
+      target: runtime
+    image: localhost/premarket-ai/vendor-sim:dev
+    environment:
+      VENDOR_SEED: ${VENDOR_SEED:-42}
+      VENDOR_MIX: ${VENDOR_MIX:-}
+    volumes:
+      # labels.jsonl per day (ground truth for the eval harness, inc 2+).
+      - vendor-data:/data
+    healthcheck:
+      # No spaces inside arguments: Podman re-splits healthcheck commands.
+      test: ["CMD", "vendor-sim", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  legacy:
+    profiles: [legacy, full]
+    build:
+      context: ./cpp/legacy
+      dockerfile: ../../podman/legacy/Containerfile
+      target: runtime
+    image: localhost/premarket-ai/legacy:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vendor-sim:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+      TZ: America/New_York
+      VENDOR_FEED_URL: http://vendor-sim:8080/feed
+      LEGACY_WORKERS: ${LEGACY_WORKERS:-4}
+      LEGACY_QUEUE_CAPACITY: ${LEGACY_QUEUE_CAPACITY:-64}
+      LEGACY_DEDUP_WINDOW_DAYS: ${LEGACY_DEDUP_WINDOW_DAYS:-7}
+    volumes:
+      # Simulates the NFS share traders open the PDF from.
+      - nfs-reports:/nfs/reports
+      - ./podman/config/legacy/crontab:/etc/premarket/crontab:ro
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  vendor-data:
+  nfs-reports:

@@ -1,0 +1,4 @@
+# premarket-ai legacy schedule (supercronic, TZ=America/New_York).
+# Weekdays at 05:30 ET: load the vendor feed, then print the PDF to NFS.
+# NYSE holidays are not skipped here; the legacy job never knew about them.
+30 5 * * 1-5 premarket-legacy ingest && premarket-legacy report

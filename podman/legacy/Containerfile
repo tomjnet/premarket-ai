@@ -1,0 +1,110 @@
+# premarket-ai legacy (C++11): ingest + PDF report, scheduled by supercronic.
+# Build context: cpp/legacy
+#   podman build -f podman/legacy/Containerfile --target <stage> cpp/legacy
+# Stages:
+#   toolchain  gcc 14, CMake, Ninja and the C/C++ libraries
+#   build      release binary (no tests)
+#   test       debug build + ctest (GoogleTest 1.12.1)
+#   lint       clang-format --dry-run --Werror, cpplint, clang-tidy (LLVM 18)
+#   asan       ASan + UBSan build + ctest
+#   tsan       TSan build + ctest
+#   bench      Google Benchmark binary (run the image to benchmark)
+#   runtime    slim image: binary + runtime libraries + supercronic (default)
+
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04
+
+# ---------------------------------------------------------------------------
+FROM ${UBUNTU_IMAGE} AS toolchain
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      g++-14 cmake ninja-build pkg-config ca-certificates \
+      libpq-dev libcurl4-openssl-dev libssl-dev libhpdf-dev rapidjson-dev \
+ && rm -rf /var/lib/apt/lists/*
+# RapidJSON 1.1.0 (the last release) defines GenericStringRef::operator=
+# by assigning a const member, which GCC 14 rejects. Apply the upstream fix
+# (delete the operator); a no-op once the package ships it.
+RUN sed -i 's|GenericStringRef& operator=(const GenericStringRef& rhs) { s = rhs.s; length = rhs.length; }|GenericStringRef\& operator=(const GenericStringRef\& rhs) = delete;|' \
+      /usr/include/rapidjson/document.h \
+ && ! grep -q 'length = rhs.length' /usr/include/rapidjson/document.h
+# cpplint derives header guards from the path under /src:
+# premarket-ai/cpp/legacy/... -> PREMARKET_AI_CPP_LEGACY_..._H_
+WORKDIR /src/premarket-ai/cpp/legacy
+COPY . .
+
+# ---------------------------------------------------------------------------
+FROM toolchain AS build
+RUN cmake --preset release -DPREMARKET_BUILD_TESTS=OFF \
+ && cmake --build --preset release \
+ && strip build/release/premarket-legacy
+
+FROM toolchain AS test
+RUN cmake --preset debug \
+ && cmake --build --preset debug \
+ && ctest --preset debug
+
+FROM toolchain AS asan
+RUN cmake --preset asan \
+ && cmake --build --preset asan \
+ && ctest --preset asan
+
+FROM toolchain AS tsan
+RUN cmake --preset tsan \
+ && cmake --build --preset tsan \
+ && ctest --preset tsan
+
+FROM toolchain AS lint
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      clang-format-18 clang-tidy-18 python3-pip \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --no-cache-dir --break-system-packages cpplint==2.0.2
+RUN clang-format-18 --dry-run --Werror \
+      $(find src tests bench -name '*.h' -o -name '*.cc') \
+ && cpplint --repository=/src --recursive --quiet src tests bench \
+ && cmake --preset debug -DPREMARKET_BUILD_TESTS=OFF \
+ && clang-tidy-18 -p build/debug --quiet $(find src -name '*.cc')
+
+FROM toolchain AS bench
+RUN cmake --preset release -DPREMARKET_BUILD_TESTS=OFF \
+      -DPREMARKET_BUILD_BENCH=ON \
+ && cmake --build --preset release --target legacy_bench
+CMD ["build/release/legacy_bench", "--benchmark_counters_tabular=true"]
+
+# ---------------------------------------------------------------------------
+FROM ${UBUNTU_IMAGE} AS supercronic
+ARG SUPERCRONIC_VERSION=v0.2.29
+# Optional: set to the release's sha1sum to verify the download.
+ARG SUPERCRONIC_SHA1SUM=
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSLo /supercronic \
+      "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" \
+ && if [ -n "${SUPERCRONIC_SHA1SUM}" ]; then \
+      echo "${SUPERCRONIC_SHA1SUM}  /supercronic" | sha1sum -c -; \
+    fi \
+ && chmod 0755 /supercronic
+
+# ---------------------------------------------------------------------------
+FROM ${UBUNTU_IMAGE} AS runtime
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=America/New_York \
+    LEGACY_REPORTS_DIR=/nfs/reports \
+    LEGACY_CRONTAB=/etc/premarket/crontab
+# libharu's runtime package name changes between releases; look it up.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libpq5 libcurl4t64 libssl3t64 ca-certificates tzdata \
+      $(apt-cache pkgnames libhpdf- | grep -v -- '-dev$' | sort | tail -n 1) \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --create-home legacy \
+ && mkdir -p /nfs/reports /etc/premarket \
+ && chown legacy:legacy /nfs/reports
+COPY --from=supercronic /supercronic /usr/local/bin/supercronic
+COPY --from=build /src/premarket-ai/cpp/legacy/build/release/premarket-legacy /usr/local/bin/premarket-legacy
+USER legacy
+WORKDIR /home/legacy
+ENTRYPOINT ["premarket-legacy"]
+CMD ["cron"]

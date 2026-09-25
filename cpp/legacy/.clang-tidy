@@ -1,0 +1,11 @@
+# Legacy is C++11: modernize-* is off because it suggests C++14+ features.
+Checks: >
+  -*,
+  google-*,
+  bugprone-*,
+  performance-*,
+  -bugprone-easily-swappable-parameters,
+  -performance-enum-size
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/src/.*'
+FormatStyle: file

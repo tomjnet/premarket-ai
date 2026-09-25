@@ -1,0 +1,55 @@
+# Hosted-runner CI: no GPU, no secrets. Every job builds a Containerfile
+# stage with Podman, exactly like `make -C python <task>` does locally.
+name: ci
+
+on:
+  push:
+    branches: [main, "inc-*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vendor-sim:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [test, lint]
+    steps:
+      - uses: actions/checkout@v4
+      - name: vendor-sim ${{ matrix.stage }}
+        run: >
+          podman build -f podman/vendor-sim/Containerfile
+          --target ${{ matrix.stage }} python/vendor-sim
+
+  legacy-cpp:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [test, lint, asan, tsan, runtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Allow ThreadSanitizer's memory layout
+        if: matrix.stage == 'tsan'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: legacy ${{ matrix.stage }}
+        run: >
+          podman build -f podman/legacy/Containerfile
+          --target ${{ matrix.stage }} cpp/legacy
+
+  compose-config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose.yaml
+        run: |
+          cp .env.example .env
+          docker compose --profile full config --quiet

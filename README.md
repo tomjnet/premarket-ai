@@ -24,6 +24,108 @@ Each increment is developed on its own branch, merged to `main` through a PR onc
 | 5 | `inc-5-agents-and-skills` | The **pre-market brief** and multi-agent chat. **The PDF is retired.** |
 | 6 | `inc-6-production` | A reliable brief **before 07:30 ET** every trading day, alerts, and the vendor scorecard |
 | 7 | `inc-7-enterprise-cloud-theory` | *(Theory only)* How a large enterprise would build the same platform on **Azure, AWS and GCP** |
+
+## This branch: increment 0, legacy baseline
+The "before" system, running for real:
+- **vendor-sim** (Python, FastAPI) serves 100 synthetic, labeled news items per day: 60 real, 15 FAKE (2 carry prompt-injection text), 10 MISLEADING and 15 duplicates (exact, tracking-URL, near, paraphrase and stale copies). The same seed and date always give the same feed. The ground-truth labels go to a volume and are never served.
+- **legacy** (C++11) has two commands:
+  - `ingest` fetches the feed with libcurl. A `std::thread` pool (mutex + condition-variable queue) parses each item with RapidJSON and hashes the normalized text with SHA-256. It then flags exact duplicates (same feed, or any feed in the last 7 days) and COPYs **all** rows into PostgreSQL through libpq. Every run is recorded in `legacy.ingest_run` with p50/p99/p99.9 per-item latency.
+  - `report` renders the day's non-duplicate stories to `/nfs/reports/<date>.pdf` with libharu.
+- **supercronic** runs both commands at 05:30 ET on weekdays, inside the legacy container.
+
+Exact hashing is the legacy system's whole duplicate check. On any date it flags the 3 exact, 3 tracking-URL and 3 stale copies (9 in total) and misses the 3 near and 3 paraphrase copies. Increment 2 fixes that.
+
+### Project structure
+```
+premarket-ai/
+├── compose.yaml              # the stack: postgres, vendor-sim, legacy (profile "legacy")
+├── .env.example              # settings; copy to .env
+├── .github/workflows/        # CI: every Containerfile stage, on GitHub-hosted runners
+├── cpp/legacy/               # C++11 legacy app (CMake + CMakePresets, GoogleTest, Google Benchmark)
+│   ├── src/common/           #   Status/StatusOr, logging, env config, latency percentiles
+│   ├── src/ingest/           #   feed client, RapidJSON parser, bounded queue, thread pool, hashing, dedup
+│   ├── src/db/               #   libpq RAII wrapper, COPY row formatting, all SQL
+│   ├── src/report/           #   libharu PDF writer, word wrap
+│   ├── tests/                #   GoogleTest unit tests (also run under ASan/UBSan and TSan)
+│   └── bench/                #   Google Benchmark micro-benchmarks (the baseline for increment 2)
+├── python/
+│   ├── Makefile              # task runner: build, up, test, lint, demo, ...
+│   └── vendor-sim/           # the synthetic news vendor (FastAPI) + pytest tests
+├── sql/                      # legacy schema and company seed (PostgreSQL init scripts)
+├── podman/
+│   ├── legacy/Containerfile      # stages: build, test, lint, asan, tsan, bench, runtime
+│   ├── vendor-sim/Containerfile  # stages: test, lint, runtime
+│   └── config/legacy/crontab     # supercronic schedule (mounted read-only)
+├── scripts/                  # one-time setup for the GPU host and Ubuntu WSL
+└── docs/                     # project documents, including the Google C++ Style Guide
+```
+
+### Setup dependencies
+Increment 0 doesn't need the GPU host or any model.
+
+On the host you need only **Podman with `podman compose`, git and make**. No C++, Python or Node toolchain is used on the host: everything builds and runs in containers.
+1. One-time setup: run the scripts in `scripts/` in file-name order. Increment 0 needs only the WSL configuration and `scripts/wsl/00_setup-wsl.sh`, `01_move-repo.sh` and `02_setup-podman.sh`. The Ollama and model scripts for the GPU host can wait until increment 3.
+2. Install make: `sudo apt install -y make`.
+3. From `~/src/premarket-ai`, create your settings: `cp .env.example .env` (or `make -C python env`). Set any local `POSTGRES_PASSWORD`.
+
+The first build downloads Ubuntu 24.04, Python 3.13 and PostgreSQL 17 images, plus GoogleTest, Google Benchmark and supercronic from GitHub.
+
+### Build
+```bash
+make -C python build        # builds both images below (layers are cached)
+```
+This runs:
+```bash
+podman build -f podman/vendor-sim/Containerfile --target runtime -t localhost/premarket-ai/vendor-sim:dev python/vendor-sim
+podman build -f podman/legacy/Containerfile     --target runtime -t localhost/premarket-ai/legacy:dev     cpp/legacy
+```
+Inside the legacy image, the C++ is built with CMake presets (`debug`, `release`, `asan`, `tsan`):
+```bash
+cmake --preset release -DPREMARKET_BUILD_TESTS=OFF && cmake --build --preset release
+```
+`make -C python help` lists every task. Add `ENGINE=docker` to any task to use Docker instead of Podman.
+
+### Run
+```bash
+make -C python up                         # postgres + vendor-sim + legacy (cron), waits until healthy
+make -C python demo DATE=2026-09-24       # a whole legacy day, right now
+```
+`demo` ingests the 5 days before `DATE` (so stale copies can be recognized), then ingests `DATE`, renders its PDF, prints `legacy.ingest_run` and copies the PDF to `out/<DATE>.pdf` (gitignored).
+
+Single steps (the date defaults to today in New York):
+```bash
+podman compose run --rm legacy ingest --date 2026-09-24
+podman compose run --rm legacy report --date 2026-09-24
+make -C python runs                        # last 10 ingest runs with latencies
+make -C python feed-summary DATE=2026-09-24  # what the vendor sent, by label kind
+make -C python pdf DATE=2026-09-24         # copy the PDF from the NFS volume to out/
+make -C python psql                        # SQL shell on the premarket database
+make -C python logs | down | reset         # logs; stop; stop and delete all volumes
+```
+| Service | Address (inside the compose network) | Published port |
+|---|---|---|
+| postgres | `postgres:5432`, database `premarket`, user `premarket` | none |
+| vendor-sim | `http://vendor-sim:8080/feed?date=YYYY-MM-DD`, `/health` | none |
+| legacy | runs supercronic (05:30 ET, Mon–Fri) | none |
+
+There's no web UI and no login in this increment. The PDF is the product.
+
+### Test
+```bash
+make -C python test         # pytest (vendor-sim) + GoogleTest via ctest (legacy, debug build)
+make -C python lint         # ruff + clang-format --dry-run --Werror, cpplint, clang-tidy (LLVM 18)
+make -C python sanitizers   # GoogleTest under ASan + UBSan, and under TSan
+make -C python cpp-bench    # Google Benchmark: parse, hash, queue, whole feed by worker count
+make -C python check        # test + lint + sanitizers (what CI runs)
+```
+Each target builds one Containerfile stage, for example `podman build -f podman/legacy/Containerfile --target tsan cpp/legacy`. If TSan stops with "unexpected memory mapping", run `sudo sysctl -w vm.mmap_rnd_bits=28` and retry.
+
+**Done when** (increment 0):
+1. `make -C python demo DATE=2026-09-24` ends by printing `PDF: .../out/2026-09-24.pdf`, and the PDF lists **91 stories** (100 received, 9 duplicates removed), with the "SIMULATION" disclaimer.
+2. `make -C python runs` shows the 2026-09-24 run with `status = DONE`, `received = 100` and `dups = 9`, plus its p50/p99/p99.9 latencies.
+3. `podman compose exec legacy ls -l /nfs/reports` shows `2026-09-24.pdf` on the NFS volume.
+4. `make -C python lint sanitizers` passes with zero warnings (clang-format, cpplint, clang-tidy, ASan/UBSan and TSan).
+
 ## Architecture by increment
 **Legend:** 🟩 green = new in this increment · ⬜ grey = already there · 🟥 red dashed = retired
 
@@ -38,7 +140,7 @@ flowchart LR
   VS["vendor-sim<br/>100 synthetic items/day<br/>(real + fake + duplicates)"]:::new
   CRON["supercronic<br/>05:30 ET"]:::new
   ING["legacy ingest (C++11)<br/>std::thread pool · libcurl · RapidJSON"]:::new
-  PG[("PostgreSQL 17<br/>legacy.vendor_news_raw")]:::new
+  PG[("PostgreSQL 17<br/>legacy.vendor_news_raw<br/>legacy.ingest_run")]:::new
   REP["legacy report (C++11)<br/>libharu"]:::new
   PDF[/"PDF on NFS volume"/]:::new
   T(["Trader"])
@@ -264,18 +366,19 @@ No code or deployment. It maps every component above to managed cloud services, 
 | Observability | Langfuse, OpenTelemetry, Prometheus, Grafana |
 | Runtime | Podman (rootless) in Ubuntu 24.04 on WSL2 · Ollama on a host with an NVIDIA GPU |
 
-## Getting started
+## Full setup (including the GPU host, needed from increment 3)
 The setup is one-time and scripted:
 1. **GPU host:** Ollama settings, firewall rule, and model pull.
-2. **Ubuntu Linux or WSL:** `.wslconfig` and `/etc/wsl.conf`, then move the repo to `~/src/premarket-ai`, then Podman.
-3. `scripts/wsl/check-ollama.sh` confirms that containers can reach Ollama.
+2. **Ubuntu WSL:** `.wslconfig` and `/etc/wsl.conf`, then move the repo to `~/src/premarket-ai`, then Podman.
+3. `scripts/wsl/03_check-ollama.sh` confirms that containers can reach Ollama.
 
-Tested hardware: NVIDIA GTX 1650 (4 GB VRAM), 32 GB RAM. Run `scripts/hw-check.sh` / `scripts/hw-check.ps1` to see yours.
+Tested hardware: NVIDIA GTX 1650 (4 GB VRAM), 32 GB RAM. Run `scripts/wsl/04_hw-check.sh` / `scripts/windows/00_hw-check.ps1` to see yours.
 
 ## C++ style guide
-All C++ code follows the Google C++ Style Guide:
+All C++ code follows the Google C++ Style Guide, checked by clang-format, cpplint and clang-tidy:
 - [docs/Google_Cpp_Style_Guide_20260925.md](docs/Google_Cpp_Style_Guide_20260925.md): searchable Markdown copy with a table of contents
-- [docs/Google_Cpp_Style_Guide_20260925.pdf](docs/Google_Cpp_Style_Guide_20260925.pdf): original print (2026-09-25)
+
+The legacy code is C++11, so the guide's rules about newer language features don't apply to it. Everything else does: naming, formatting, headers, no exceptions, no RTTI, ownership and casts.
 
 ## License
 MIT © 2026 premarket-ai contributors. The Google C++ Style Guide copy in `docs/` is © Google; see its header for source and license.
