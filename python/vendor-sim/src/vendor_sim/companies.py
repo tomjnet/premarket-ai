@@ -7,11 +7,20 @@ registry.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import dataclasses
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Company:
+    """A listed company, real or invented.
+
+    Attributes:
+        ticker: The exchange ticker, for example ``AAPL``.
+        name: The full legal name, for example ``Apple Inc.``.
+        short: The name used in headlines, for example ``Apple``.
+        sector: The GICS sector.
+    """
+
     ticker: str
     name: str
     short: str
@@ -20,7 +29,9 @@ class Company:
 
 REAL_COMPANIES: tuple[Company, ...] = (
     Company("AAPL", "Apple Inc.", "Apple", "Information Technology"),
-    Company("MSFT", "Microsoft Corporation", "Microsoft", "Information Technology"),
+    Company(
+        "MSFT", "Microsoft Corporation", "Microsoft", "Information Technology"
+    ),
     Company("NVDA", "NVIDIA Corporation", "NVIDIA", "Information Technology"),
     Company("AMZN", "Amazon.com, Inc.", "Amazon", "Consumer Discretionary"),
     Company("GOOGL", "Alphabet Inc.", "Alphabet", "Communication Services"),
@@ -33,19 +44,35 @@ REAL_COMPANIES: tuple[Company, ...] = (
     Company("XOM", "Exxon Mobil Corporation", "Exxon Mobil", "Energy"),
     Company("UNH", "UnitedHealth Group Inc.", "UnitedHealth", "Health Care"),
     Company("MA", "Mastercard Incorporated", "Mastercard", "Financials"),
-    Company("COST", "Costco Wholesale Corporation", "Costco", "Consumer Staples"),
+    Company(
+        "COST", "Costco Wholesale Corporation", "Costco", "Consumer Staples"
+    ),
     Company("WMT", "Walmart Inc.", "Walmart", "Consumer Staples"),
     Company("JNJ", "Johnson & Johnson", "Johnson & Johnson", "Health Care"),
-    Company("PG", "The Procter & Gamble Company", "Procter & Gamble", "Consumer Staples"),
-    Company("HD", "The Home Depot, Inc.", "Home Depot", "Consumer Discretionary"),
+    Company(
+        "PG",
+        "The Procter & Gamble Company",
+        "Procter & Gamble",
+        "Consumer Staples",
+    ),
+    Company(
+        "HD", "The Home Depot, Inc.", "Home Depot", "Consumer Discretionary"
+    ),
     Company("ORCL", "Oracle Corporation", "Oracle", "Information Technology"),
 )
 
 FAKE_COMPANIES: tuple[Company, ...] = (
-    Company("QVXH", "Quantavex Holdings Inc.", "Quantavex", "Information Technology"),
+    Company(
+        "QVXH", "Quantavex Holdings Inc.", "Quantavex", "Information Technology"
+    ),
     Company("BRLQ", "Borealiq Therapeutics Corp.", "Borealiq", "Health Care"),
     Company("ZNTRA", "Zentrality Energy Ltd.", "Zentrality", "Energy"),
-    Company("KLVM", "Kalvimo Semiconductor Inc.", "Kalvimo", "Information Technology"),
+    Company(
+        "KLVM",
+        "Kalvimo Semiconductor Inc.",
+        "Kalvimo",
+        "Information Technology",
+    ),
     Company("PXWD", "Praxwood Financial Group", "Praxwood", "Financials"),
     Company("UMBX", "Umbrix Robotics Corp.", "Umbrix", "Industrials"),
 )

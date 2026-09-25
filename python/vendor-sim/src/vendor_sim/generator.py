@@ -3,123 +3,205 @@
 The same (seed, date) always gives the same 100 items and labels. Duplicates
 point at the item they copy (``dup_of``); stale duplicates copy a real item
 from an earlier day's feed, so the legacy 7-day hash lookup can catch them.
+
+Typical usage:
+
+    feed = generator.generate_feed(datetime.date(2026, 9, 24), seed=42)
+    for item, label in zip(feed.items, feed.labels, strict=True):
+        ...
 """
 
 from __future__ import annotations
 
+import dataclasses
+import datetime
+import itertools
 import random
 import re
-from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, date, datetime, time, timedelta
-from itertools import cycle
-from zoneinfo import ZoneInfo
+from typing import Any
+import zoneinfo
 
-from vendor_sim import companies as co
-from vendor_sim import templates as tpl
+from vendor_sim import companies
+from vendor_sim import templates
 
-NEW_YORK = ZoneInfo("America/New_York")
-DUP_TYPES = ("exact", "url", "near", "paraphrase", "stale")
-FAKE_KINDS = ("fake_company", "fabricated", "spoofed", "fake_ticker")
-MISLEADING_KINDS = ("number_mismatch", "sensational", "old_news")
+_NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
+_DUP_TYPES = ("exact", "url", "near", "paraphrase", "stale")
+_FAKE_KINDS = ("fake_company", "fabricated", "spoofed", "fake_ticker")
+_MISLEADING_KINDS = ("number_mismatch", "sensational", "old_news")
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class FeedMix:
-    """How many items of each kind one day's feed has."""
+    """How many items of each kind one day's feed has.
+
+    Attributes:
+        real: Real stories about real companies.
+        fake: FAKE stories: invented company or ticker, fabricated claim, or
+            spoofed source.
+        injection: FAKE stories that also carry prompt-injection text. A
+            subset of ``fake``.
+        misleading: MISLEADING stories: wrong number, sensational headline or
+            old news.
+        duplicates: Copies of other stories: exact, url, near, paraphrase and
+            stale.
+    """
 
     real: int = 60
     fake: int = 15
-    injection: int = 2  # a subset of ``fake``
+    injection: int = 2
     misleading: int = 10
     duplicates: int = 15
 
     @property
     def total(self) -> int:
+        """The number of items in the feed."""
         return self.real + self.fake + self.misleading + self.duplicates
 
     @classmethod
     def parse(cls, text: str) -> FeedMix:
-        """Parses ``"real=60,fake=15,injection=2,misleading=10,duplicates=15"``."""
+        """Parses a mix such as ``"real=60,fake=15,injection=2"``.
+
+        Args:
+            text: Comma-separated ``key=count`` pairs. Missing keys keep their
+                defaults, so an empty string gives the default mix.
+
+        Returns:
+            The parsed mix.
+
+        Raises:
+            ValueError: A key is unknown, a count is not an integer or is
+                negative, or ``injection`` is larger than ``fake``.
+        """
+        names = {f.name for f in dataclasses.fields(cls)}
         values: dict[str, int] = {}
-        for part in filter(None, (p.strip() for p in text.split(","))):
+        parts = (part.strip() for part in text.split(","))
+        for part in filter(None, parts):
             key, _, value = part.partition("=")
-            if key not in cls.__dataclass_fields__:
+            if key not in names:
                 raise ValueError(f"unknown mix key: {key!r}")
             values[key] = int(value)
         mix = cls(**values)
         if mix.injection > mix.fake:
             raise ValueError("injection must be <= fake")
-        if min(asdict(mix).values()) < 0:
+        if min(dataclasses.astuple(mix)) < 0:
             raise ValueError("mix values must be >= 0")
         return mix
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class NewsItem:
+    """One news item as the vendor sends it.
+
+    Attributes:
+        id: The vendor's item ID, ``VND-<yyyymmdd>-<nnn>``.
+        headline: The headline, starting with ``[SYNTHETIC]``.
+        body: Dateline, story and the synthetic-data footer.
+        source_url: Where the story claims to come from.
+        source_domain: The host part of ``source_url``.
+        published_at: The publication time (timezone-aware).
+        tickers: The tickers the story is about.
+        synthetic: Always True: every item is generated.
+    """
+
     id: str
     headline: str
     body: str
     source_url: str
     source_domain: str
-    published_at: datetime
+    published_at: datetime.datetime
     tickers: tuple[str, ...]
     synthetic: bool = True
 
-    def to_json(self) -> dict:
+    def to_json(self) -> dict[str, Any]:
+        """Returns the item as the feed API serves it."""
+        published = self.published_at.astimezone(datetime.UTC)
         return {
             "id": self.id,
             "headline": self.headline,
             "body": self.body,
             "source_url": self.source_url,
             "source_domain": self.source_domain,
-            "published_at": self.published_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "published_at": published.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "tickers": list(self.tickers),
             "synthetic": self.synthetic,
         }
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Label:
-    """Ground truth for one item. Never served by the feed API."""
+    """Ground truth for one item. Never served by the feed API.
+
+    Attributes:
+        id: The ID of the item this label describes.
+        kind: ``real``, ``fake``, ``misleading`` or ``duplicate``.
+        subtype: The template or trick used, for example ``earnings`` or
+            ``spoofed``.
+        expected_verdict: ``VERIFIED``, ``UNVERIFIED``, ``MISLEADING`` or
+            ``FAKE``.
+        reason_codes: The reason codes a correct verdict carries.
+        dup_of: For a duplicate, the ID of the item it copies.
+        dup_type: For a duplicate, ``exact``, ``url``, ``near``,
+            ``paraphrase`` or ``stale``.
+    """
 
     id: str
-    kind: str  # real | fake | misleading | duplicate
+    kind: str
     subtype: str
-    expected_verdict: str  # VERIFIED | UNVERIFIED | MISLEADING | FAKE
+    expected_verdict: str
     reason_codes: tuple[str, ...] = ()
     dup_of: str | None = None
     dup_type: str | None = None
 
-    def to_json(self) -> dict:
-        data = asdict(self)
+    def to_json(self) -> dict[str, Any]:
+        """Returns the label as one line of ``labels.jsonl``."""
+        data = dataclasses.asdict(self)
         data["reason_codes"] = list(self.reason_codes)
         return data
 
 
-@dataclass
+@dataclasses.dataclass
 class Feed:
-    feed_date: date
-    items: list[NewsItem] = field(default_factory=list)
-    labels: list[Label] = field(default_factory=list)
+    """One day's feed.
+
+    Attributes:
+        feed_date: The day the feed is for.
+        items: The items, in the order the vendor sends them.
+        labels: The ground truth; ``labels[i]`` describes ``items[i]``.
+    """
+
+    feed_date: datetime.date
+    items: list[NewsItem] = dataclasses.field(default_factory=list)
+    labels: list[Label] = dataclasses.field(default_factory=list)
 
 
-def _item_id(day: date, n: int) -> str:
-    return f"VND-{day:%Y%m%d}-{n:03d}"
+# Paraphrase inputs are kept per original, so a paraphrase can reuse the facts.
+_Facts = dict[str, tuple[templates.Template, dict[str, Any]]]
+
+
+def _item_id(day: datetime.date, number: int) -> str:
+    return f"VND-{day:%Y%m%d}-{number:03d}"
 
 
 def _slug(text: str) -> str:
-    text = text.removeprefix(tpl.HEADLINE_PREFIX).lower()
+    text = text.removeprefix(templates.HEADLINE_PREFIX).lower()
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:60]
 
 
-def _published_at(day: date, rng: random.Random) -> datetime:
+def _published_at(day: datetime.date, rng: random.Random) -> datetime.datetime:
     """A time between 16:00 ET the day before and 05:15 ET on ``day``."""
-    start = datetime.combine(day - timedelta(days=1), time(16, 0), NEW_YORK)
+    start = datetime.datetime.combine(
+        day - datetime.timedelta(days=1), datetime.time(16, 0), _NEW_YORK
+    )
     offset = rng.randint(0, 13 * 60 + 15)
-    return (start + timedelta(minutes=offset)).astimezone(UTC)
+    return (start + datetime.timedelta(minutes=offset)).astimezone(datetime.UTC)
 
 
-def _params(rng: random.Random, company: co.Company, other: co.Company) -> dict:
+def _params(
+    rng: random.Random,
+    company: companies.Company,
+    other: companies.Company,
+) -> dict[str, Any]:
+    """Random facts that fill a template's placeholders."""
     pct = rng.randint(3, 24)
     return {
         "name": company.name,
@@ -136,42 +218,47 @@ def _params(rng: random.Random, company: co.Company, other: co.Company) -> dict:
         "dividend": f"{rng.uniform(0.2, 3.5):.2f}",
         "buyback": f"{rng.uniform(1, 90):.1f}",
         "deal": rng.randint(2, 40),
-        "person": rng.choice(tpl.PEOPLE),
-        "area": rng.choice(tpl.AREAS),
-        "system": rng.choice(tpl.SYSTEMS),
+        "person": rng.choice(templates.PEOPLE),
+        "area": rng.choice(templates.AREAS),
+        "system": rng.choice(templates.SYSTEMS),
         "parts": rng.choice(("two", "three", "four")),
         "weeks": rng.randint(2, 12),
-        "meeting": f"{rng.choice(tpl.MONTHS)} {rng.randint(1, 28)}",
+        "meeting": f"{rng.choice(templates.MONTHS)} {rng.randint(1, 28)}",
     }
 
 
-def _body(day: date, text: str) -> str:
+def _body(day: datetime.date, text: str) -> str:
     """Dateline + story + synthetic footer, as the vendor formats every item."""
-    return f"NEW YORK, {day:%B} {day.day} (Acme Market Wire) -- {text}\n\n{tpl.FOOTER}"
+    dateline = f"NEW YORK, {day:%B} {day.day} (Acme Market Wire) --"
+    return f"{dateline} {text}\n\n{templates.FOOTER}"
 
 
 def _make_item(
-    day: date,
-    n: int,
+    day: datetime.date,
+    number: int,
     rng: random.Random,
     headline: str,
     body: str,
     domain: str,
     tickers: tuple[str, ...],
 ) -> NewsItem:
-    headline = tpl.HEADLINE_PREFIX + headline
+    """Builds item ``number`` of ``day`` with a random publication time."""
+    headline = templates.HEADLINE_PREFIX + headline
+    slug = _slug(headline)
     return NewsItem(
-        id=_item_id(day, n),
+        id=_item_id(day, number),
         headline=headline,
         body=_body(day, body),
-        source_url=f"https://{domain}/{day:%Y/%m/%d}/{_slug(headline)}-{n:03d}",
+        source_url=f"https://{domain}/{day:%Y/%m/%d}/{slug}-{number:03d}",
         source_domain=domain,
         published_at=_published_at(day, rng),
         tickers=tickers,
     )
 
 
-def _pick_two(rng: random.Random, pool: tuple[co.Company, ...]):
+def _pick_two(
+    rng: random.Random, pool: tuple[companies.Company, ...]
+) -> tuple[companies.Company, companies.Company]:
     first, second = rng.sample(pool, 2)
     return first, second
 
@@ -190,123 +277,186 @@ def _claim(used: set[str], item: NewsItem) -> bool:
     return True
 
 
-# Paraphrase inputs are kept per original, so a paraphrase can reuse the facts.
-_Facts = dict[str, tuple[tpl.Template, dict]]
+@dataclasses.dataclass
+class _Originals:
+    """One day's original items while they are generated.
+
+    Attributes:
+        day: The feed date.
+        rng: The random source shared by every original of the day.
+        items: The items kept so far; item N has ID number N.
+        labels: The labels of ``items``, in the same order.
+        facts: The template and facts behind each real item.
+        used: The text keys of ``items``, so no two items share text.
+    """
+
+    day: datetime.date
+    rng: random.Random
+    items: list[NewsItem] = dataclasses.field(default_factory=list)
+    labels: list[Label] = dataclasses.field(default_factory=list)
+    facts: _Facts = dataclasses.field(default_factory=dict)
+    used: set[str] = dataclasses.field(default_factory=set)
+
+    def new_item(
+        self, headline: str, body: str, domain: str, tickers: tuple[str, ...]
+    ) -> NewsItem:
+        """Builds the next item. It is kept only if ``keep`` accepts it."""
+        return _make_item(
+            self.day,
+            len(self.items) + 1,
+            self.rng,
+            headline,
+            body,
+            domain,
+            tickers,
+        )
+
+    def keep(self, item: NewsItem, label: Label) -> bool:
+        """Keeps ``item`` unless an earlier item has the same text."""
+        if not _claim(self.used, item):
+            return False
+        self.items.append(item)
+        self.labels.append(label)
+        return True
 
 
-def _originals(day: date, seed: int, mix: FeedMix) -> tuple[list[NewsItem], list[Label], _Facts]:
-    """Real, FAKE and MISLEADING items for ``day`` (ids 1..N, no duplicates)."""
-    rng = random.Random(f"{seed}:{day.isoformat()}:originals")
-    items: list[NewsItem] = []
-    labels: list[Label] = []
-    facts: _Facts = {}
-    used: set[str] = set()
-    n = 0
-
-    while n < mix.real:
-        company, other = _pick_two(rng, co.REAL_COMPANIES)
-        template = rng.choice(tpl.REAL_TEMPLATES)
+def _add_real(originals: _Originals, count: int) -> None:
+    """Adds ``count`` real stories about real companies."""
+    rng = originals.rng
+    added = 0
+    while added < count:
+        company, other = _pick_two(rng, companies.REAL_COMPANIES)
+        template = rng.choice(templates.REAL_TEMPLATES)
         params = _params(rng, company, other)
         tickers = (company.ticker,)
         if template.kind == "partnership":
             tickers = (company.ticker, other.ticker)
-        item = _make_item(
-            day,
-            n + 1,
-            rng,
+        item = originals.new_item(
             template.headlines[0].format(**params),
             template.bodies[0].format(**params),
-            rng.choice(co.TRUSTED_DOMAINS),
+            rng.choice(companies.TRUSTED_DOMAINS),
             tickers,
         )
-        if not _claim(used, item):
-            continue
-        n += 1
-        items.append(item)
-        labels.append(Label(item.id, "real", template.kind, "VERIFIED"))
-        facts[item.id] = (template, params)
+        label = Label(item.id, "real", template.kind, "VERIFIED")
+        if originals.keep(item, label):
+            originals.facts[item.id] = (template, params)
+            added += 1
 
-    fake_kinds = cycle(FAKE_KINDS)
-    i = 0
+
+def _fake_story(
+    rng: random.Random, kind: str
+) -> tuple[str, str, str, tuple[str, ...], tuple[str, ...]]:
+    """Writes one FAKE story of ``kind``.
+
+    Args:
+        rng: The day's random source.
+        kind: One of ``_FAKE_KINDS``.
+
+    Returns:
+        The headline, body, source domain, tickers and reason codes.
+    """
+    real, other = _pick_two(rng, companies.REAL_COMPANIES)
+    fake = rng.choice(companies.FAKE_COMPANIES)
+    if kind == "fake_company":
+        params = _params(rng, fake, real)
+        headline, body = rng.choice(templates.FAKE_COMPANY_TEMPLATES)
+        domain = rng.choice(companies.LOW_QUALITY_DOMAINS)
+        tickers = (fake.ticker,)
+        reasons = ("FAKE_COMPANY", "FAKE_TICKER")
+    elif kind == "fake_ticker":
+        # A real company name with a ticker that doesn't exist ("QZ" suffix).
+        bogus = companies.Company(
+            real.ticker + "QZ", real.name, real.short, real.sector
+        )
+        params = _params(rng, bogus, other)
+        earnings = templates.REAL_TEMPLATES[0]
+        headline, body = earnings.headlines[0], earnings.bodies[0]
+        domain = rng.choice(companies.LOW_QUALITY_DOMAINS)
+        tickers = (bogus.ticker,)
+        reasons = ("FAKE_TICKER",)
+    elif kind == "spoofed":
+        params = _params(rng, real, other)
+        headline, body = rng.choice(templates.FABRICATED_TEMPLATES)
+        domain = rng.choice(companies.SPOOFED_DOMAINS)
+        tickers = (real.ticker,)
+        reasons = ("SPOOFED_SOURCE", "FABRICATED_CLAIM")
+    else:  # fabricated
+        params = _params(rng, real, other)
+        headline, body = rng.choice(templates.FABRICATED_TEMPLATES)
+        domain = rng.choice(companies.LOW_QUALITY_DOMAINS)
+        tickers = (real.ticker,)
+        reasons = ("FABRICATED_CLAIM", "NO_CORROBORATION")
+    return (
+        headline.format(**params),
+        body.format(**params),
+        domain,
+        tickers,
+        reasons,
+    )
+
+
+def _add_fake(originals: _Originals, count: int, injection: int) -> None:
+    """Adds ``count`` FAKE stories; the first ``injection`` carry injections."""
+    fake_kinds = itertools.cycle(_FAKE_KINDS)
     kind = next(fake_kinds)
-    while i < mix.fake:
-        real, other = _pick_two(rng, co.REAL_COMPANIES)
-        fake = rng.choice(co.FAKE_COMPANIES)
-        if kind == "fake_company":
-            params = _params(rng, fake, real)
-            headline, body = rng.choice(tpl.FAKE_COMPANY_TEMPLATES)
-            domain = rng.choice(co.LOW_QUALITY_DOMAINS)
-            tickers = (fake.ticker,)
-            reasons = ("FAKE_COMPANY", "FAKE_TICKER")
-        elif kind == "fake_ticker":
-            # A real company name with a ticker that doesn't exist ("QZ" suffix).
-            bogus = co.Company(real.ticker + "QZ", real.name, real.short, real.sector)
-            params = _params(rng, bogus, other)
-            earnings = tpl.REAL_TEMPLATES[0]
-            headline, body = earnings.headlines[0], earnings.bodies[0]
-            domain = rng.choice(co.LOW_QUALITY_DOMAINS)
-            tickers = (bogus.ticker,)
-            reasons = ("FAKE_TICKER",)
-        elif kind == "spoofed":
-            params = _params(rng, real, other)
-            headline, body = rng.choice(tpl.FABRICATED_TEMPLATES)
-            domain = rng.choice(co.SPOOFED_DOMAINS)
-            tickers = (real.ticker,)
-            reasons = ("SPOOFED_SOURCE", "FABRICATED_CLAIM")
-        else:  # fabricated
-            params = _params(rng, real, other)
-            headline, body = rng.choice(tpl.FABRICATED_TEMPLATES)
-            domain = rng.choice(co.LOW_QUALITY_DOMAINS)
-            tickers = (real.ticker,)
-            reasons = ("FABRICATED_CLAIM", "NO_CORROBORATION")
-        body = body.format(**params)
-        if i < mix.injection:
-            body = f"{body} {tpl.INJECTION_LINES[i % len(tpl.INJECTION_LINES)]}"
+    added = 0
+    while added < count:
+        headline, body, domain, tickers, reasons = _fake_story(
+            originals.rng, kind
+        )
+        if added < injection:
+            lines = templates.INJECTION_LINES
+            body = f"{body} {lines[added % len(lines)]}"
             reasons = (*reasons, "INJECTION_ATTEMPT")
-        item = _make_item(day, n + 1, rng, headline.format(**params), body, domain, tickers)
-        if not _claim(used, item):
-            continue
-        n += 1
-        i += 1
-        items.append(item)
-        labels.append(Label(item.id, "fake", kind, "FAKE", reasons))
-        kind = next(fake_kinds)
+        item = originals.new_item(headline, body, domain, tickers)
+        label = Label(item.id, "fake", kind, "FAKE", reasons)
+        if originals.keep(item, label):
+            added += 1
+            kind = next(fake_kinds)
 
-    misleading_kinds = cycle(MISLEADING_KINDS)
-    made = 0
+
+def _add_misleading(originals: _Originals, count: int) -> None:
+    """Adds ``count`` MISLEADING stories about real companies."""
+    rng = originals.rng
+    misleading_kinds = itertools.cycle(_MISLEADING_KINDS)
     kind = next(misleading_kinds)
-    while made < mix.misleading:
-        company, other = _pick_two(rng, co.REAL_COMPANIES)
+    added = 0
+    while added < count:
+        company, other = _pick_two(rng, companies.REAL_COMPANIES)
         params = _params(rng, company, other)
+        reasons: tuple[str, ...]
         if kind == "number_mismatch":
-            headline, body = tpl.NUMBER_MISMATCH
-            reasons: tuple[str, ...] = ("NUMBER_MISMATCH", "SENSATIONAL_HEADLINE")
+            headline, body = templates.NUMBER_MISMATCH
+            reasons = ("NUMBER_MISMATCH", "SENSATIONAL_HEADLINE")
         elif kind == "sensational":
-            headline, body = tpl.SENSATIONAL
+            headline, body = templates.SENSATIONAL
             reasons = ("SENSATIONAL_HEADLINE",)
-        else:
-            old = day - timedelta(days=rng.randint(60, 300))
+        else:  # old_news
+            days_ago = rng.randint(60, 300)
+            old = originals.day - datetime.timedelta(days=days_ago)
             params["old_date"] = f"{old:%B} {old.day}, {old.year}"
-            headline, body = tpl.OLD_NEWS
+            headline, body = templates.OLD_NEWS
             reasons = ("STALE",)
-        item = _make_item(
-            day,
-            n + 1,
-            rng,
+        item = originals.new_item(
             headline.format(**params),
             body.format(**params),
-            rng.choice(co.TRUSTED_DOMAINS),
+            rng.choice(companies.TRUSTED_DOMAINS),
             (company.ticker,),
         )
-        if not _claim(used, item):
-            continue
-        n += 1
-        made += 1
-        items.append(item)
-        labels.append(Label(item.id, "misleading", kind, "MISLEADING", reasons))
-        kind = next(misleading_kinds)
+        label = Label(item.id, "misleading", kind, "MISLEADING", reasons)
+        if originals.keep(item, label):
+            added += 1
+            kind = next(misleading_kinds)
 
-    return items, labels, facts
+
+def _originals(day: datetime.date, seed: int, mix: FeedMix) -> _Originals:
+    """Real, FAKE and MISLEADING items for ``day`` (IDs 1..N, no copies)."""
+    rng = random.Random(f"{seed}:{day.isoformat()}:originals")
+    originals = _Originals(day, rng)
+    _add_real(originals, mix.real)
+    _add_fake(originals, mix.fake, mix.injection)
+    _add_misleading(originals, mix.misleading)
+    return originals
 
 
 def _near_copy(item: NewsItem, rng: random.Random) -> tuple[str, str]:
@@ -332,9 +482,9 @@ def _copy(
     dup_type: str,
     source: NewsItem,
     new_id: str,
-    n: int,
-    day: date,
-    published: datetime,
+    number: int,
+    day: datetime.date,
+    published: datetime.datetime,
     facts: _Facts,
     rng: random.Random,
 ) -> NewsItem:
@@ -342,93 +492,156 @@ def _copy(
     if dup_type == "exact":
         # Same text after case and whitespace normalization.
         body = source.body.replace(" ", "  ", 3).replace("\n\n", "\n \n", 1)
-        return replace(source, id=new_id, headline=source.headline.upper(), body=body)
+        return dataclasses.replace(
+            source, id=new_id, headline=source.headline.upper(), body=body
+        )
     if dup_type == "url":
-        return replace(
-            source,
-            id=new_id,
-            source_url=f"{source.source_url}?utm_source=vendorfeed&utm_medium=api",
+        tracking = "?utm_source=vendorfeed&utm_medium=api"
+        return dataclasses.replace(
+            source, id=new_id, source_url=source.source_url + tracking
         )
     if dup_type == "near":
         headline, body = _near_copy(source, rng)
-        return replace(source, id=new_id, headline=headline, body=body, published_at=published)
+        return dataclasses.replace(
+            source,
+            id=new_id,
+            headline=headline,
+            body=body,
+            published_at=published,
+        )
     template, params = facts[source.id]  # paraphrase
     headline = template.headlines[1].format(**params)
-    domain = rng.choice(co.TRUSTED_DOMAINS)
-    return replace(
+    domain = rng.choice(companies.TRUSTED_DOMAINS)
+    slug = _slug(headline)
+    return dataclasses.replace(
         source,
         id=new_id,
-        headline=tpl.HEADLINE_PREFIX + headline,
+        headline=templates.HEADLINE_PREFIX + headline,
         body=_body(day, template.bodies[1].format(**params)),
         source_domain=domain,
-        source_url=f"https://{domain}/{day:%Y/%m/%d}/{_slug(headline)}-{n:03d}",
+        source_url=f"https://{domain}/{day:%Y/%m/%d}/{slug}-{number:03d}",
         published_at=published,
     )
 
 
-def generate_feed(day: date, seed: int = 42, mix: FeedMix | None = None) -> Feed:
-    """Builds the full feed (originals + duplicates, shuffled) for ``day``."""
-    mix = mix or FeedMix()
-    items, labels, facts = _originals(day, seed, mix)
-    label_by_id = {label.id: label for label in labels}
-    rng = random.Random(f"{seed}:{day.isoformat()}:duplicates")
-    real_ids = [label.id for label in labels if label.kind == "real"]
-    copyable = [
-        item for item in items if "INJECTION_ATTEMPT" not in label_by_id[item.id].reason_codes
-    ]
-    by_id = {item.id: item for item in items}
-    used = {_text_key(item) for item in items}
+def _stale_copy(
+    day: datetime.date,
+    seed: int,
+    mix: FeedMix,
+    new_id: str,
+    published: datetime.datetime,
+    rng: random.Random,
+) -> tuple[NewsItem, Label] | None:
+    """Re-sends a real item from 1 to 5 days earlier as news of ``day``.
 
-    n = len(items)
-    dup_types = cycle(DUP_TYPES)
+    Returns:
+        The copy and its label, or None if that day's feed has no real items.
+    """
+    old_day = day - datetime.timedelta(days=rng.randint(1, 5))
+    old = _originals(old_day, seed, mix)
+    pairs = zip(old.items, old.labels, strict=True)
+    old_real = [item for item, label in pairs if label.kind == "real"]
+    if not old_real:
+        return None
+    source = rng.choice(old_real)
+    duplicate = dataclasses.replace(source, id=new_id, published_at=published)
+    label = Label(
+        new_id,
+        "duplicate",
+        "stale",
+        "MISLEADING",
+        ("STALE",),
+        source.id,
+        "stale",
+    )
+    return duplicate, label
+
+
+def _duplicates(
+    day: datetime.date, seed: int, mix: FeedMix, originals: _Originals
+) -> list[tuple[NewsItem, Label]]:
+    """The day's duplicates, cycling through every duplicate type."""
+    rng = random.Random(f"{seed}:{day.isoformat()}:duplicates")
+    label_by_id = {label.id: label for label in originals.labels}
+    real_ids = [label.id for label in originals.labels if label.kind == "real"]
+    copyable = [
+        item
+        for item in originals.items
+        if "INJECTION_ATTEMPT" not in label_by_id[item.id].reason_codes
+    ]
+    by_id = {item.id: item for item in originals.items}
+    used = {_text_key(item) for item in originals.items}
+
+    duplicates: list[tuple[NewsItem, Label]] = []
+    number = len(originals.items)
+    dup_types = itertools.cycle(_DUP_TYPES)
     for _ in range(mix.duplicates):
         if not copyable:
             break
-        n += 1
+        number += 1
         dup_type = next(dup_types)
         if dup_type == "paraphrase" and not real_ids:
             dup_type = "exact"
-        new_id = _item_id(day, n)
+        new_id = _item_id(day, number)
         published = _published_at(day, rng)
         if dup_type == "stale":
-            old_day = day - timedelta(days=rng.randint(1, 5))
-            old_items, old_labels, _ = _originals(old_day, seed, mix)
-            pairs = zip(old_items, old_labels, strict=True)
-            old_real = [it for it, lb in pairs if lb.kind == "real"]
-            if not old_real:
-                n -= 1
+            stale = _stale_copy(day, seed, mix, new_id, published, rng)
+            if stale is None:
+                number -= 1
                 continue
-            source = rng.choice(old_real)
-            copy = replace(source, id=new_id, published_at=published)
-            label = Label(
-                new_id, "duplicate", "stale", "MISLEADING", ("STALE",), source.id, "stale"
-            )
-        else:
-            for _attempt in range(50):
-                if dup_type == "paraphrase":
-                    source = by_id[rng.choice(real_ids)]
-                else:
-                    source = rng.choice(copyable)
-                copy = _copy(dup_type, source, new_id, n, day, published, facts, rng)
-                # exact/url copies share text on purpose; the others must not.
-                if dup_type in ("exact", "url") or _claim(used, copy):
-                    break
-            canonical = label_by_id[source.id]
-            label = Label(
+            duplicates.append(stale)
+            continue
+        for _attempt in range(50):
+            if dup_type == "paraphrase":
+                source = by_id[rng.choice(real_ids)]
+            else:
+                source = rng.choice(copyable)
+            duplicate = _copy(
+                dup_type,
+                source,
                 new_id,
-                "duplicate",
-                dup_type,
-                canonical.expected_verdict,
-                canonical.reason_codes,
-                source.id,
-                dup_type,
+                number,
+                day,
+                published,
+                originals.facts,
+                rng,
             )
-        items.append(copy)
-        labels.append(label)
+            # exact/url copies share text on purpose; the others must not.
+            if dup_type in ("exact", "url") or _claim(used, duplicate):
+                break
+        canonical = label_by_id[source.id]
+        label = Label(
+            new_id,
+            "duplicate",
+            dup_type,
+            canonical.expected_verdict,
+            canonical.reason_codes,
+            source.id,
+            dup_type,
+        )
+        duplicates.append((duplicate, label))
+    return duplicates
 
-    order = random.Random(f"{seed}:{day.isoformat()}:order")
-    paired = list(zip(items, labels, strict=True))
-    order.shuffle(paired)
+
+def generate_feed(
+    day: datetime.date, seed: int = 42, mix: FeedMix | None = None
+) -> Feed:
+    """Builds one day's feed: originals and duplicates, shuffled.
+
+    Args:
+        day: The feed date.
+        seed: The random seed. The same seed and day give the same feed.
+        mix: How many items of each kind. None means ``FeedMix()``.
+
+    Returns:
+        The feed, with ``labels[i]`` describing ``items[i]``.
+    """
+    if mix is None:
+        mix = FeedMix()
+    originals = _originals(day, seed, mix)
+    paired = list(zip(originals.items, originals.labels, strict=True))
+    paired += _duplicates(day, seed, mix, originals)
+    random.Random(f"{seed}:{day.isoformat()}:order").shuffle(paired)
     return Feed(
         feed_date=day,
         items=[item for item, _ in paired],
@@ -436,5 +649,6 @@ def generate_feed(day: date, seed: int = 42, mix: FeedMix | None = None) -> Feed
     )
 
 
-def today_new_york() -> date:
-    return datetime.now(NEW_YORK).date()
+def today_new_york() -> datetime.date:
+    """Returns today's date in New York, the market's time zone."""
+    return datetime.datetime.now(_NEW_YORK).date()
