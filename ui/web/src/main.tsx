@@ -15,7 +15,8 @@ async function startMockBackend(): Promise<boolean> {
     return true;
   }
   try {
-    const {worker} = await import('@/mocks/browser');
+    const {prepareMockBackend, worker} = await import('@/mocks/browser');
+    prepareMockBackend();
     await worker.start({onUnhandledRequest: 'bypass'});
     return true;
   } catch (error: unknown) {

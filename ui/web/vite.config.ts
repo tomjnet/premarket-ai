@@ -25,6 +25,8 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // Tests run the app as `make dev` does: against the mock backend.
+    env: {VITE_API_MODE: 'mock'},
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
     coverage: {

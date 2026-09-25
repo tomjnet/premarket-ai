@@ -8,15 +8,18 @@ against a **mock backend** in the browser (MSW, Mock Service Worker) that
 serves the agreed JSON contract. Setting one environment variable,
 `VITE_API_MODE=live`, switches to the real backend without a code change.
 
-> Status: **milestone M0 (scaffold and tooling)**. The app is a placeholder
-> page that proves the toolchain. Login, the feed and the detail page come in
-> the next milestones.
+> Status: **milestone M2 (shell and auth)**. You can log in and out, the
+> session survives a reload and refreshes itself, and every page has the
+> SIMULATION ribbon, the compliance banner, a header and a footer (backend
+> status, mock scenario switcher). The news feed page is still a
+> placeholder; the feed (M3) and the detail page (M4) come next.
 
 ## Contents
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
 - [Tasks](#tasks)
 - [How to test](#how-to-test)
+- [Mock backend](#mock-backend)
 - [Configuration](#configuration)
 - [Project structure](#project-structure)
 - [Tech stack](#tech-stack)
@@ -74,10 +77,24 @@ make -C ui check
 Pass criteria, in order:
 1. `lint`: no output from ESLint (0 errors, 0 warnings).
 2. `typecheck`: no output from `tsc`.
-3. `test`: `Test Files  4 passed`, and the coverage summary. This step
-   fails if `src/api`, `src/features` or `src/lib` drop below 80 % line
-   coverage.
+3. `test`: `Test Files  17 passed`, `Tests  128 passed`, and the coverage
+   summary. This step fails if `src/api`, `src/features` or `src/lib` drop
+   below 80 % line coverage.
 4. `build`: `built in …ms` and no `MSW code found in dist/` line.
+
+What the tests cover (component tests render the real app in React
+StrictMode against the mock backend, as `make dev` does):
+
+| Test file | Proves |
+|---|---|
+| `src/features/auth/login-page.test.tsx` | Login with Enter goes back to `?next=`; `?next=` can't leave the site; wrong password: message, password cleared and focused; empty fields send nothing; the button is disabled while sending and a second Enter sends nothing; unreachable server message; a logged-in user skips the form; focus lands on the page after login; no axe issues. |
+| `src/app/routes.test.tsx` | No session → login with `?next=`; a reload restores the session; notices, date, user and backend status in the shell (axe); backend unreachable; MOCK API tag and scenario switcher; logout (also when the request fails); expiry and a failed proactive refresh → login with "Your session expired"; the token is refreshed before it expires; backend down at start → Try again; 404, 403 and crash pages. |
+| `src/features/auth/session.test.ts` | Refresh timing (no loop for short tokens); `?next=` safety; the tab's had-session flag. |
+| `src/api/client.test.ts` | Bearer token sent; one shared refresh for concurrent `401`s (and no second refresh if another call already refreshed); exactly one retry with the new token; a failed refresh ends the session once; a refresh finishing after logout is dropped; network errors don't log you out; caller cancel is an `AbortError`; `HttpError`, `NetworkError` (offline and 15 s timeout) and `ContractError`. |
+| `src/api/schemas/schemas.test.ts` | The contract example maps snake_case → camelCase; wrong types, unknown statuses, a count mismatch and time offsets are rejected. |
+| `src/mocks/handlers/handlers.test.ts` | Every mock endpoint and every scenario returns what the contract says (raw `fetch`, checked against the schemas). |
+| `src/mocks/data/generator.test.ts` | Same date → same items; 100 items with 9 duplicates on weekdays, none on weekends; duplicates point at real first copies; reserved domains only; the awkward items exist. |
+| `src/lib/*.test.ts`, `src/app/query-client.test.ts` | Settings parsing, New York dates and times (DST included), scenario URLs, retry rules, error messages. |
 
 Run only the tests, or keep them running while you edit (watch mode needs
 the WSL copy, see [Troubleshooting](#troubleshooting)):
@@ -87,21 +104,47 @@ make -C ui test-watch
 ```
 The HTML coverage report is written to `web/coverage/index.html`.
 
-### 2. Manual check in the browser (M0)
+### 2. Manual check in the browser
 ```bash
 make -C ui dev
 ```
-Open http://localhost:5173 and check:
+Open http://localhost:5173 and go through these steps in order:
 
-| Check | Expected |
-|---|---|
-| The page loads | Yellow "SIMULATION: synthetic vendor data" ribbon at the top, the heading "premarket-ai", the line "Decision support only, not investment advice." and "API mode: mock". |
-| Mock backend started | DevTools console shows `[MSW] Mocking enabled.` |
-| Keyboard only | Press Tab: the "Show toolchain" button gets a visible focus ring. Press Enter: the list appears and the button reads "Hide toolchain". |
-| Dark mode | Switch the OS (or DevTools > Rendering > prefers-color-scheme) to dark: the page turns dark. |
-| Narrow screen | DevTools device toolbar at 360 px wide: no horizontal scrollbar. |
-| Live mode | Stop the server, run `make -C ui dev VITE_API_MODE=live`: the page shows "API mode: live" and the console has no MSW line. |
-| Mock start failure | In a browser that blocks service workers, the page says "The mock backend didn't start" instead of staying blank. |
+| # | Do | Expected |
+|---|---|---|
+| 1 | Open http://localhost:5173/news | You land on `/login?next=%2Fnews`. Yellow SIMULATION ribbon and the "Decision support only, not investment advice." banner at the top; the mock users hint under the form; footer: "Backend: ok", a MOCK API tag and the scenario switcher. DevTools console: `[MSW] Mocking enabled.` |
+| 2 | Press Enter with empty fields | "Enter your username and password." Nothing is sent (Network tab). |
+| 3 | Log in as `trader1` / `wrong` | "Wrong username or password.", the password is cleared and focused. |
+| 4 | Log in as `trader1` / `demo` (keyboard only: Tab, type, Enter) | You are on `/news` with the header: "premarket-ai", "Today in New York: <date>", "Signed in as trader1", a TRADER badge and Log out. |
+| 5 | Reload the page (F5) | You stay logged in ("Restoring your session…" flashes first). |
+| 6 | Open http://localhost:5173/no-such-page | "Page not found" with a link back to the feed. |
+| 7 | Click Log out | Back on the login page, no "session expired" notice. |
+| 8 | Log in again, then in the footer pick `logged-out` and click **Apply (reloads)** | The reload can't restore the session: login page with "Your session expired. Please log in again." Pick `default` + Apply to go back. |
+| 9 | Keyboard: reload, press Tab once | "Skip to main content" appears top left; Enter jumps into the page. |
+| 10 | Dark mode (OS setting, or DevTools > Rendering > prefers-color-scheme) | The page turns dark; ribbon and banner stay readable. |
+| 11 | DevTools device toolbar at 360 px wide | Nothing overflows horizontally; the header wraps. |
+| 12 | Short tokens: `make -C ui dev VITE_MOCK_TOKEN_TTL_S=60`, log in, wait | Network tab: `POST /api/auth/refresh` about every 30 s; you stay logged in. |
+| 13 | Live mode: `make -C ui dev VITE_API_MODE=live` (no backend running) | No mock hint or MOCK API tag; "Backend: unreachable"; logging in says "The server had a problem. Try again." |
+
+You can also call the mock API directly from the DevTools console (F12 >
+Console). Chrome may ask you to type `allow pasting` first. Paste:
+```js
+const auth = await fetch('/api/auth/login', {
+  method: 'POST',
+  body: new URLSearchParams({username: 'trader1', password: 'demo'}),
+}).then(r => r.json());
+const news = await fetch('/api/news?date=2026-09-24', {
+  headers: {Authorization: `Bearer ${auth.access_token}`},
+}).then(r => r.json());
+console.log(auth.user, news.run.status, news.count, news.items[0].headline);
+```
+Expected: `{username: 'trader1', role: 'TRADER'} 'DONE' 91 '[SYNTHETIC] …'`.
+The Network tab shows the calls as handled by the service worker.
+
+To check a scenario, open the page with `?scenario=<name>` (for example
+http://localhost:5173/?scenario=failed), paste the snippet again and compare
+with the [scenario table](#scenarios). The choice is remembered for the tab;
+open `?scenario=default` to go back.
 
 ### 3. The production bundle has no mocks
 `make -C ui build` does this for you: the live build drops the mock code, the
@@ -112,6 +155,49 @@ To see it yourself:
 make -C ui build && ls ui/web/dist/assets
 ```
 There is a single `index-*.js` and no `browser-*.js` chunk.
+
+## Mock backend
+In mock mode, MSW answers every API call inside the browser (and inside
+Vitest). The app code calls the real URLs with `fetch` and doesn't know it's
+mocked.
+
+**Users** (password `demo` for all): `trader1` (TRADER), `analyst1`
+(ANALYST), `admin1` (ADMIN).
+
+**Endpoints:** `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`,
+`GET /news?date=&ticker=&q=&include_duplicates=`, `GET /news/{id}`,
+`GET /health`, all under `/api`. Errors look like FastAPI's
+(`{"detail": ...}`).
+
+**Data:** a seeded generator, so the same date always gives the same items.
+Each weekday has 100 items, 9 of them duplicates (exact copies, same-URL
+copies and stale copies of the previous trading day). Weekends and future
+dates have no feed. Every headline starts with `[SYNTHETIC]`, and every
+source is a reserved `.example` or `.test` domain. Some items are awkward on
+purpose (a 200+ character headline, Unicode, `<script>` text, "Ignore
+previous instructions", a `javascript:` source URL, an item without tickers),
+to prove the UI renders untrusted text safely.
+
+**Session:** browsers can't let the mock set a real `httpOnly` refresh
+cookie, so the mock keeps the session itself: only the username, in the
+tab's `sessionStorage`, so it survives a reload like a cookie would. The
+app's access token is never stored. Access tokens expire after
+`VITE_MOCK_TOKEN_TTL_S`.
+
+### Scenarios
+Pick one with `?scenario=<name>` in the page URL.
+
+| Scenario | What happens |
+|---|---|
+| `default` | Normal day |
+| `empty` | No ingest run: `run: null`, no items |
+| `running` | Run still `RUNNING`: 25 more items (oldest first) every 30 s; after 90 s the whole day is `DONE` |
+| `failed` | Run `FAILED` with the first 40 items |
+| `slow` | Every call takes 2–3 s |
+| `server-error` | `/news` and `/news/{id}` answer `500` |
+| `expired-session` | The next authenticated call answers `401`; the refresh then works |
+| `logged-out` | Refresh answers `401`; logging in again still works |
+| `contract-drift` | `/news` sends `count` as a string, so the UI must say "Unexpected response from the server" |
 
 ## Configuration
 The settings are `VITE_*` variables (see `web/.env.example`). They end up in
@@ -156,15 +242,29 @@ ui/
         ├── main.tsx          # starts MSW in mock mode, then renders
         ├── index.css         # Tailwind + shadcn/ui theme (light and dark)
         ├── env.d.ts          # types of the VITE_* variables
-        ├── app/              # the app (M0: placeholder page)
-        ├── components/ui/    # shadcn/ui components (generated)
-        ├── lib/              # small shared helpers (cn for class names)
-        ├── mocks/            # MSW: browser worker, Node server, handlers
-        └── test/             # Vitest setup and test helpers (axe)
+        ├── app/              # app, routes, providers, query client, mock-start page
+        ├── api/              # the backend contract
+        │   ├── schemas/      #   zod schemas: the wire format and the UI types
+        │   ├── client.ts     #   fetch wrapper: token, refresh, timeout, parsing
+        │   ├── errors.ts     #   HttpError, NetworkError, ContractError, SessionExpiredError
+        │   └── auth.ts, news.ts, health.ts   # one function per endpoint
+        ├── components/
+        │   ├── layout/       #   root layout, app shell, header, footer, notices, PageMain
+        │   ├── pages/        #   403, 404 and crash pages
+        │   └── ui/           #   shadcn/ui components (generated)
+        ├── features/
+        │   ├── auth/         #   session context, login page, route guards
+        │   └── news/         #   feed page (placeholder until M3)
+        ├── lib/              # env.ts, time.ts, storage.ts, mock-scenarios.ts, utils.ts
+        ├── mocks/            # the mock backend (never in the production build)
+        │   ├── data/         #   seeded generator, companies, users, in-memory db
+        │   ├── handlers/     #   MSW handlers per endpoint
+        │   ├── scenarios.ts  #   the scenarios above
+        │   └── browser.ts, page-setup.ts, node.ts
+        └── test/             # Vitest setup, renderApp helper, axe check
 ```
-Tests sit next to the code they test: `app.test.tsx` beside `app.tsx`.
-Later milestones add `src/api/` (contract schemas and API client) and
-`src/features/` (auth and news).
+Tests sit next to the code they test: `client.test.ts` beside `client.ts`.
+Later milestones fill `src/features/news/` (feed and detail pages).
 
 ## Tech stack
 Versions are pinned exactly in `web/package.json`.
@@ -173,6 +273,8 @@ Versions are pinned exactly in `web/package.json`.
 |---|---|
 | Runtime | Node 22 in a container |
 | Build | Vite 8, React 19, TypeScript 6 (`strict`) |
+| Routing, server state | React Router 8 (library mode), TanStack Query 5 |
+| Validation | zod 4 |
 | UI | Tailwind CSS 4, shadcn/ui (Radix), lucide icons |
 | Mocks | MSW 2 (browser in dev, Node in tests) |
 | Tests | Vitest 5, jsdom, Testing Library, user-event, jest-dom, vitest-axe |

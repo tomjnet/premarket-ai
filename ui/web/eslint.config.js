@@ -33,6 +33,11 @@ export default defineConfig([
       // Style guide: handle the case instead of asserting non-null.
       '@typescript-eslint/no-non-null-assertion': 'error',
       '@typescript-eslint/consistent-type-imports': 'error',
+      // `const {body, ...rest} = item` is the plain way to drop a field.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {ignoreRestSiblings: true},
+      ],
       'no-restricted-syntax': [
         'error',
         {

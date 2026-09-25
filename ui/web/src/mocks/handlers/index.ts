@@ -1,7 +1,6 @@
-import type {RequestHandler} from 'msw';
+import {authHandlers} from './auth';
+import {healthHandlers} from './health';
+import {newsHandlers} from './news';
 
-/**
- * Every mock endpoint. Milestone M1 fills this with the auth, news and health
- * handlers from the contract in PLAN.md section 5.
- */
-export const handlers: RequestHandler[] = [];
+/** Every mock endpoint of the contract. */
+export const handlers = [...authHandlers, ...newsHandlers, ...healthHandlers];
