@@ -1,0 +1,31 @@
+C++ Coding Standard
+        |
+        + Google C++ Style Guide
+        |   naming
+        |   formatting
+        |   headers
+        |   const correctness
+        |   ownership
+        |   casts
+        |   readability
+        |
+        + Low Latency Rules
+            no allocation on hot path
+            no exceptions
+            avoid RTTI
+            avoid shared_ptr on hot path
+            avoid locks when possible
+            avoid syscalls on hot path
+            avoid blocking I/O
+            avoid iostream on hot path
+            preallocate memory
+            use memory pools
+            cache friendly structures
+            minimize pointer chasing
+            static polymorphism where appropriate
+            bounded predictable loops
+            CPU affinity
+            NUMA awareness
+            cache line alignment
+            measure p50 p99 p99.9 latency
+            benchmark every optimization

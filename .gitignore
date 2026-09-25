@@ -1,0 +1,217 @@
+# =============================================================================
+# premarket-ai .gitignore
+# Written once to cover every increment (0-7) and every technology in the
+# project, so branches add code without editing this file. Use generic
+# patterns; don't add per-branch paths.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Secrets and local configuration: never commit
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+.secrets/
+# Local-only Compose overrides (the shared compose.yaml is committed)
+compose.override.yaml
+compose.override.yml
+# Claude Code: keep .claude/CLAUDE.md, ignore personal settings
+.claude/settings.local.json
+
+# -----------------------------------------------------------------------------
+# Generated project data (only generators, seeds and configs are committed)
+# -----------------------------------------------------------------------------
+/data/
+python/vendor-sim/data/
+**/labels.jsonl
+# Legacy PDF reports produced outside the nfs-reports volume
+out/
+nfs-reports/
+# Eval / benchmark run outputs (curated results go in docs/benchmarks/)
+**/evals/results/
+**/evals/reports/
+.promptfoo/
+promptfoo-output*
+.benchmarks/
+# Local vector stores and model files (models live on the GPU host).
+# Only the root /models/ folder is ignored; app/models/ code packages are not.
+.chroma/
+chroma_db/
+/models/
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+mlruns/
+wandb/
+
+# -----------------------------------------------------------------------------
+# C / C++ (CMake, GoogleTest, Google Benchmark, sanitizers, coverage)
+# -----------------------------------------------------------------------------
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+_deps/
+install_manifest.txt
+CMakeUserPresets.json
+compile_commands.json
+# Objects, libraries, executables, precompiled headers
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.pdb
+*.ilk
+*.gch
+*.pch
+# Coverage and profiling
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+perf.data*
+callgrind.out.*
+# Tool caches (clangd, ccache)
+.cache/
+.ccache/
+
+# -----------------------------------------------------------------------------
+# Python 3 (FastAPI, LangChain/LangGraph, pytest, ruff, mypy, nanobind wheels)
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+wheels/
+_skbuild/
+pip-wheel-metadata/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ipynb_checkpoints/
+celerybeat-schedule
+
+# -----------------------------------------------------------------------------
+# Node / React / Vite / TypeScript
+# -----------------------------------------------------------------------------
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+.vite/
+vite.config.*.timestamp-*
+coverage/
+playwright-report/
+test-results/
+blob-report/
+
+# -----------------------------------------------------------------------------
+# Infrastructure-as-code examples (theory in increment 7)
+# -----------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# -----------------------------------------------------------------------------
+# Logs and temporary files
+# -----------------------------------------------------------------------------
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# -----------------------------------------------------------------------------
+# Editors and IDEs
+# -----------------------------------------------------------------------------
+# VS Code: share only the recommended-extensions list
+.vscode/*
+!.vscode/extensions.json
+.history/
+# JetBrains (CLion, PyCharm, WebStorm)
+.idea/
+*.iml
+# Vim / Emacs
+*.swp
+*.swo
+*~
+.#*
+\#*\#
+.netrwhist
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# -----------------------------------------------------------------------------
+# Operating systems
+# -----------------------------------------------------------------------------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+*:Zone.Identifier
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.TemporaryItems
+.DocumentRevisions-V100
+# Linux
+.directory
+.Trash-*
+.nfs*
+.fuse_hidden*
