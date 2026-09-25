@@ -375,6 +375,18 @@ const AWKWARD_STORIES: ReadonlyMap<number, Story> = new Map([
     },
   ],
   [
+    51,
+    {
+      headline: 'Borealiq Therapeutics shares halted pending news',
+      text: 'Trading in Borealiq Therapeutics Corp. (BRLQ) was halted pending an announcement, the report said.',
+      tickers: ['BRLQ'],
+      // Claims a look-alike outlet, but the URL goes elsewhere: the detail
+      // page must show where the link really leads.
+      domain: 'reuters-news.test',
+      sourceUrl: 'https://pennyrocket.example/2026/brlq-halt',
+    },
+  ],
+  [
     43,
     {
       headline: 'US stock index futures little changed ahead of jobs report',

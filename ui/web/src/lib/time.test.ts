@@ -6,8 +6,11 @@ import {
   daysBetween,
   formatEtTime,
   formatLongDate,
+  formatUtcDateTime,
+  formatUtcTime,
   isIsoDate,
   isWeekend,
+  newYorkDateOf,
   newYorkTimeToUtc,
   previousTradingDate,
   todayInNewYork,
@@ -65,6 +68,22 @@ describe('formatEtTime', () => {
     expect(formatEtTime('2026-09-24T08:12:00Z')).toBe('04:12');
     expect(formatEtTime('2026-12-01T13:30:00Z')).toBe('08:30');
     expect(formatEtTime('2026-09-24T04:05:00Z')).toBe('00:05');
+  });
+});
+
+describe('formatUtcTime and newYorkDateOf', () => {
+  it('shows UTC time and the New York date of an instant', () => {
+    expect(formatUtcTime('2026-09-24T02:05:00Z')).toBe('02:05');
+    // 02:05 UTC on the 24th is still the 23rd in New York.
+    expect(newYorkDateOf('2026-09-24T02:05:00Z')).toBe('2026-09-23');
+    expect(newYorkDateOf('2026-09-24T08:12:00Z')).toBe('2026-09-24');
+  });
+
+  it('gives the UTC date with the UTC time', () => {
+    // 21:30 ET on the 24th is 01:30 UTC on the 25th.
+    expect(formatUtcDateTime('2026-09-25T01:30:00Z')).toBe(
+      '2026-09-25 01:30 UTC',
+    );
   });
 });
 

@@ -110,6 +110,32 @@ export function formatEtTime(instant: string): string {
   return NEW_YORK_CLOCK.format(new Date(instant));
 }
 
+const UTC_CLOCK = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/** An ISO UTC instant as UTC wall-clock time, `HH:MM` (24 h). */
+export function formatUtcTime(instant: string): string {
+  return UTC_CLOCK.format(new Date(instant));
+}
+
+/**
+ * An ISO UTC instant as `YYYY-MM-DD HH:MM UTC`. With the date, because the
+ * UTC day can differ from the New York day (evening news).
+ */
+export function formatUtcDateTime(instant: string): string {
+  const date = new Date(instant).toISOString().slice(0, 10);
+  return `${date} ${formatUtcTime(instant)} UTC`;
+}
+
+/** The New York calendar date of an ISO UTC instant, `YYYY-MM-DD`. */
+export function newYorkDateOf(instant: string): string {
+  return todayInNewYork(new Date(instant));
+}
+
 /** New York's offset from UTC in minutes at `instant` (-240 or -300). */
 function newYorkOffsetMinutes(instant: Date): number {
   const name = NEW_YORK_OFFSET.formatToParts(instant).find(

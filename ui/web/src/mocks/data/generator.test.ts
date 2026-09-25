@@ -35,9 +35,9 @@ describe('generateDay', () => {
     }).toMatchInlineSnapshot(`
       {
         "headline": "[SYNTHETIC] Umbrix to be acquired by Quantavex for $40B in all-cash deal",
-        "id": 2458087,
+        "id": 2458088,
         "publishedAt": "2026-09-24T08:58:00Z",
-        "vendorItemId": "VND-20260924-087",
+        "vendorItemId": "VND-20260924-088",
       }
     `);
   });
@@ -115,6 +115,13 @@ describe('generateDay', () => {
       true,
     );
     expect(items.some(item => item.tickers.length === 0)).toBe(true);
+    expect(
+      items.some(
+        item =>
+          item.source_url.startsWith('https://') &&
+          new URL(item.source_url).hostname !== item.source_domain,
+      ),
+    ).toBe(true);
   });
 
   it('matches the contract for a month of dates', () => {

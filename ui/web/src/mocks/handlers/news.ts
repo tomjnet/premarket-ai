@@ -109,7 +109,14 @@ export const newsHandlers = [
       scenarioFeed(db.day(item.feed_date)).items.some(
         candidate => candidate.id === item.id,
       );
-    return arrived ? HttpResponse.json(item) : notFound();
+    if (!arrived) {
+      return notFound();
+    }
+    if (activeScenario() === 'contract-drift') {
+      // `id` as a string: the client must answer with a ContractError.
+      return HttpResponse.json({...item, id: String(item.id)});
+    }
+    return HttpResponse.json(item);
   }),
 ];
 

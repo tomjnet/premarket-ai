@@ -4,5 +4,5 @@ import type {FeedFilters} from './feed';
 export const newsKeys = {
   all: ['news'] as const,
   list: (filters: FeedFilters) => ['news', 'list', filters] as const,
-  detail: (id: number) => ['news', 'detail', id] as const,
+  detail: (id: number | undefined) => ['news', 'detail', id] as const,
 };

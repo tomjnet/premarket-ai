@@ -1,15 +1,11 @@
 import {useCallback, useMemo, useRef} from 'react';
 import {useLocation, useNavigate, useSearchParams} from 'react-router';
 
+import {LoadError} from '@/components/load-error';
 import {formatLongDate, todayInNewYork} from '@/lib/time';
 
 import {FeedFiltersBar} from './components/feed-filters-bar';
-import {
-  FeedError,
-  FeedSkeleton,
-  NoFeed,
-  RunStatus,
-} from './components/feed-states';
+import {FeedSkeleton, NoFeed, RunStatus} from './components/feed-states';
 import {NewsRow} from './components/news-row';
 import {feedSearch, newestFirst, parseFeedFilters} from './feed';
 import type {FeedFilters} from './feed';
@@ -117,7 +113,11 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
   if (list === undefined) {
     if (feed.isError) {
       return (
-        <FeedError error={feed.error} onRetry={() => void feed.refetch()} />
+        <LoadError
+          title="Couldn't load the feed"
+          error={feed.error}
+          onRetry={() => void feed.refetch()}
+        />
       );
     }
     return <FeedSkeleton />;
@@ -136,7 +136,11 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
   return (
     <>
       {feed.isError && (
-        <FeedError error={feed.error} onRetry={() => void feed.refetch()} />
+        <LoadError
+          title="Couldn't load the feed"
+          error={feed.error}
+          onRetry={() => void feed.refetch()}
+        />
       )}
       {feed.isPlaceholderData ? (
         // The list on screen is from the previous filters: no summary for it.

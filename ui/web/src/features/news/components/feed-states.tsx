@@ -1,9 +1,7 @@
 import {Link} from 'react-router';
 
-import {errorMessage} from '@/api/errors';
 import type {NewsList} from '@/api/schemas/news';
 import {Alert, AlertDescription, AlertTitle} from '@/components/ui/alert';
-import {Button} from '@/components/ui/button';
 import {Skeleton} from '@/components/ui/skeleton';
 import {formatLongDate, isWeekend} from '@/lib/time';
 
@@ -29,26 +27,6 @@ export function FeedSkeleton() {
         ))}
       </ul>
     </div>
-  );
-}
-
-interface FeedErrorProps {
-  error: unknown;
-  onRetry(): void;
-}
-
-/** The request failed: a plain message and a retry. */
-export function FeedError({error, onRetry}: FeedErrorProps) {
-  return (
-    <Alert variant="destructive">
-      <AlertTitle>Couldn't load the feed</AlertTitle>
-      <AlertDescription className="flex flex-col items-start gap-2">
-        {errorMessage(error)}
-        <Button variant="outline" size="sm" onClick={onRetry}>
-          Retry
-        </Button>
-      </AlertDescription>
-    </Alert>
   );
 }
 

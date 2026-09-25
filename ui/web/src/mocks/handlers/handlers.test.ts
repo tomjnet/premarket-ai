@@ -284,4 +284,14 @@ describe('scenarios', () => {
     expect(result.success).toBe(false);
     expect(result.error?.issues[0]?.path).toEqual(['count']);
   });
+
+  it('contract-drift: the detail fails its schema at "id"', async () => {
+    const accessToken = await token();
+    const id = db.day(THURSDAY).items[0]?.id;
+    setScenario('contract-drift');
+    const {status, body} = await get(`/news/${id}`, accessToken);
+    expect(status).toBe(200);
+    const result = newsDetailWireSchema.safeParse(body);
+    expect(result.error?.issues[0]?.path).toEqual(['id']);
+  });
 });
