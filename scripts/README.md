@@ -38,3 +38,4 @@ After step 01, work only in `~/src/premarket-ai`. The `D:\` copy can be deleted 
 |---|---|
 | `scripts/convert-cpp-guide.sh` | Regenerates `docs/Google_Cpp_Style_Guide_20260925.md` from the official Google C++ Style Guide page (needs `sudo apt install pandoc`) |
 | `scripts/convert-py-guide.sh` | Regenerates `docs/Google_Python_Style_Guide_20260925.md` from the official Google Python Style Guide page (needs `sudo apt install pandoc`) |
+| `scripts/convert-ts-guide.sh` | Regenerates `docs/Google_TypeScript_Style_Guide_20260925.md` from the official Google TypeScript Style Guide page (needs `sudo apt install pandoc`) |
