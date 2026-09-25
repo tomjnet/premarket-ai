@@ -267,7 +267,7 @@ No code or deployment. It maps every component above to managed cloud services, 
 ## Getting started
 The setup is one-time and scripted:
 1. **GPU host:** Ollama settings, firewall rule, and model pull.
-2. **Ubuntu WSL:** `.wslconfig` and `/etc/wsl.conf`, then move the repo to `~/src/premarket-ai`, then Podman.
+2. **Ubuntu Linux or WSL:** `.wslconfig` and `/etc/wsl.conf`, then move the repo to `~/src/premarket-ai`, then Podman.
 3. `scripts/wsl/check-ollama.sh` confirms that containers can reach Ollama.
 
 Tested hardware: NVIDIA GTX 1650 (4 GB VRAM), 32 GB RAM. Run `scripts/hw-check.sh` / `scripts/hw-check.ps1` to see yours.
