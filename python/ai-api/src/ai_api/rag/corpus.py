@@ -6,6 +6,11 @@ that aren't in the vector store yet. Documents already stored are not
 fetched again, except the company fact sheets, which are refreshed (a
 changed sheet replaces its chunks). ``reindex`` rebuilds the vector store
 from ``ai.chunk`` (after a model change or a lost volume).
+
+Which chunks are "in the store" depends on the store: ChromaDB's are marked
+with ``indexed_at`` / ``embed_model``; pgvector's are the rows whose
+``embedding`` is set (with ``embedding_model``), written by the store
+itself.
 """
 
 from __future__ import annotations
@@ -155,11 +160,16 @@ class CorpusRepository:
                 )
         return True, old
 
-    async def unindexed(self, embed_model: str) -> list[dict[str, Any]]:
-        """Chunks not in the vector store with ``embed_model``."""
+    async def unindexed(
+        self, embed_model: str, store_kind: str = "chroma"
+    ) -> list[dict[str, Any]]:
+        """Chunks not in the ``store_kind`` store with ``embed_model``."""
+        if store_kind == "pgvector":
+            where = "embedding IS NULL OR embedding_model IS DISTINCT FROM %s"
+        else:
+            where = "indexed_at IS NULL OR embed_model IS DISTINCT FROM %s"
         return await self._all(
-            "SELECT id, text, metadata FROM ai.chunk"
-            " WHERE indexed_at IS NULL OR embed_model IS DISTINCT FROM %s"
+            f"SELECT id, text, metadata FROM ai.chunk WHERE {where}"
             " ORDER BY id",
             (embed_model,),
         )
@@ -187,18 +197,40 @@ class CorpusRepository:
         return found[0]["documents"], found[0]["chunks"]
 
 
-def _store(settings: config.AiSettings) -> store_lib.CorpusStore:
+def open_store(
+    settings: config.AiSettings,
+    conn: psycopg.AsyncConnection,
+    store_kind: str | None = None,
+) -> store_lib.CorpusStore:
+    """The vector store, writing through the owner connection ``conn``.
+
+    Args:
+        settings: The settings.
+        conn: An owner connection (autocommit).
+        store_kind: ``chroma`` or ``pgvector``; None is VECTOR_STORE.
+
+    Returns:
+        The store.
+    """
     llm = settings.llm
     embeddings = store_lib.PrefixedEmbeddings(
         factory.embeddings(llm), llm.query_prefix, llm.document_prefix
     )
-    return store_lib.CorpusStore(settings.rag, embeddings, llm.embed_model)
+    return store_lib.open_store(
+        settings.rag,
+        embeddings,
+        llm.embed_model,
+        llm.embed_dims,
+        connect=store_lib.connection_of(conn),
+        store_kind=store_kind,
+    )
 
 
-async def _index(
+async def index(
     repo: CorpusRepository, store: store_lib.CorpusStore, embed_model: str
 ) -> int:
-    pending = await repo.unindexed(embed_model)
+    """Embeds the chunks that aren't in ``store`` yet; returns how many."""
+    pending = await repo.unindexed(embed_model, store.kind)
     for start in range(0, len(pending), _INDEX_BATCH):
         batch = pending[start : start + _INDEX_BATCH]
         ids = [row["id"] for row in batch]
@@ -207,7 +239,8 @@ async def _index(
             [row["text"] for row in batch],
             [dict(row["metadata"], chunk_id=row["id"]) for row in batch],
         )
-        await repo.mark_indexed(ids, embed_model)
+        if store.kind == "chroma":
+            await repo.mark_indexed(ids, embed_model)
         _log.info("indexed %d/%d chunks", start + len(batch), len(pending))
     return len(pending)
 
@@ -316,9 +349,9 @@ async def build(settings: config.AiSettings) -> CorpusCounts:
                 except sources.SourceError as e:
                     failures += 1
                     _log.warning("%s: %s", source, e)
-            store = _store(settings)
+            store = open_store(settings, conn)
             await store.delete(replaced)
-            indexed = await _index(repo, store, settings.llm.embed_model)
+            indexed = await index(repo, store, settings.llm.embed_model)
             documents, chunks = await repo.totals()
     finally:
         await fetcher.aclose()
@@ -332,7 +365,8 @@ async def reindex(settings: config.AiSettings) -> int:
         settings.owner.dsn(), autocommit=True
     ) as conn:
         repo = CorpusRepository(conn)
-        store = _store(settings)
-        store.reset()
-        await repo.unmark_all()
-        return await _index(repo, store, settings.llm.embed_model)
+        store = open_store(settings, conn)
+        await store.reset()
+        if store.kind == "chroma":
+            await repo.unmark_all()
+        return await index(repo, store, settings.llm.embed_model)

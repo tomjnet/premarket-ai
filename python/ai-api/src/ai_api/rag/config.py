@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import dataclasses
 
-VECTOR_STORES = ("chroma",)
+VECTOR_STORES = ("chroma", "pgvector")
 
 
 def _int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -26,8 +26,10 @@ class RagConfig:
     """Where the vectors are and how much to retrieve.
 
     Attributes:
-        vector_store: VECTOR_STORE: ``chroma`` in increments 3 to 5
-            (``pgvector`` arrives in increment 6).
+        vector_store: VECTOR_STORE: ``chroma`` in increments 3 to 5,
+            ``pgvector`` (``ai.chunk.embedding``) from increment 6.
+        hybrid: RAG_HYBRID: pgvector fuses Postgres full-text matches into
+            the vector search (reciprocal rank fusion).
         chroma_host: CHROMA_HOST.
         chroma_port: CHROMA_PORT.
         collection: The corpus collection (``trusted_corpus``).
@@ -43,6 +45,7 @@ class RagConfig:
     """
 
     vector_store: str = "chroma"
+    hybrid: bool = True
     chroma_host: str = "chroma"
     chroma_port: int = 8000
     collection: str = "trusted_corpus"
@@ -65,15 +68,21 @@ class RagConfig:
         store = env.get("VECTOR_STORE", "chroma").strip().lower()
         if store not in VECTOR_STORES:
             raise ValueError(
-                f"VECTOR_STORE must be one of {', '.join(VECTOR_STORES)} in "
-                f"this increment, got {store!r}"
+                f"VECTOR_STORE must be one of {', '.join(VECTOR_STORES)},"
+                f" got {store!r}"
             )
         top_k = _int(env, "RAG_TOP_K", 20)
         top_n = _int(env, "RAG_TOP_N", 5)
         if top_n > top_k:
             raise ValueError("RAG_TOP_N must be <= RAG_TOP_K")
+        hybrid = env.get("RAG_HYBRID", "true").strip().lower()
+        if hybrid not in ("true", "false"):
+            raise ValueError(
+                f"RAG_HYBRID must be true or false, got {hybrid!r}"
+            )
         return cls(
             vector_store=store,
+            hybrid=hybrid == "true",
             chroma_host=env.get("CHROMA_HOST", "chroma").strip(),
             chroma_port=_int(env, "CHROMA_PORT", 8000),
             reranker_url=env.get("RERANKER_URL", "http://reranker:8080")

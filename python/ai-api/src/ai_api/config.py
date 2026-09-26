@@ -173,6 +173,11 @@ class Settings:
             (CHAT_CACHE_DISTANCE, 0.05).
         skills_dir: The Agent Skills folder (SKILLS_DIR).
         config_dir: Folder with ``universe.yaml`` (PREMARKET_CONFIG_DIR).
+        alert_webhook_token: ALERT_WEBHOOK_TOKEN, the bearer token Grafana
+            sends to ``POST /alerts/grafana``; empty turns the webhook off.
+        monthly_budget_usd: LLM_MONTHLY_BUDGET_USD (the budget banner).
+        judge_cloud_model: JUDGE_CLOUD_MODEL (shown on the admin page).
+        brief_model: BRIEF_MODEL (shown on the admin page).
     """
 
     database: Database
@@ -199,6 +204,10 @@ class Settings:
     chat_cache_distance: float = 0.05
     skills_dir: pathlib.Path = pathlib.Path("/app/skills")
     config_dir: pathlib.Path = pathlib.Path("/app/config")
+    alert_webhook_token: str = dataclasses.field(default="", repr=False)
+    monthly_budget_usd: float = 20.0
+    judge_cloud_model: str = ""
+    brief_model: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -251,6 +260,14 @@ class Settings:
             config_dir=pathlib.Path(
                 env.get("PREMARKET_CONFIG_DIR", "/app/config")
             ),
+            alert_webhook_token=(
+                _secret(env, "ALERT_WEBHOOK_TOKEN")
+                if env.get("ALERT_WEBHOOK_TOKEN", "").strip()
+                else ""
+            ),
+            monthly_budget_usd=_money(env, "LLM_MONTHLY_BUDGET_USD", 20.0),
+            judge_cloud_model=env.get("JUDGE_CLOUD_MODEL", "").strip(),
+            brief_model=env.get("BRIEF_MODEL", "").strip(),
         )
 
 
@@ -309,6 +326,21 @@ def role_password(env: Mapping[str, str], name: str) -> str:
         ConfigError: It is missing or weak.
     """
     return _secret(env, name)
+
+
+def redis_password(env: Mapping[str, str]) -> str:
+    """Returns REDIS_PASSWORD (the scheduler reads it too).
+
+    Args:
+        env: The environment.
+
+    Returns:
+        Its value.
+
+    Raises:
+        ConfigError: It is missing or weak.
+    """
+    return _secret(env, "REDIS_PASSWORD")
 
 
 def demo_password(env: Mapping[str, str]) -> str:

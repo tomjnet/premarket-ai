@@ -25,7 +25,30 @@ Each increment is developed on its own branch, merged to `main` through a PR onc
 | 6 | `inc-6-production` | A reliable brief **before 07:30 ET** every trading day, alerts, and the vendor scorecard |
 | 7 | `inc-7-enterprise-cloud-theory` | *(Theory only)* How a large enterprise would build the same platform on **Azure, AWS and GCP** |
 
-## This branch: increment 5, agents and skills (the PDF is retired)
+## This branch: increment 6, production
+The day now runs **by itself on the NYSE calendar** and is **measured**: the brief is published before 07:30 ET on every trading day, analysts see an alert when a deadline is missed, and the vendor scorecard shows what the vendor really delivered. Two more pieces of the old stack are replaced.
+
+- **The C++11 legacy ingester is retired.** The C++20 ingester (zero parity differences over every demo day) is now the only ingest. The strangler-fig views `ai.v_raw_news` / `ai.v_ingest_run` read its tables (`ingest.*`), and every AI result stays attached to its item. The legacy container stays under the opt-in compose profile `legacy` for before/after comparisons; `LEGACY_INGEST=true` runs it again in parallel with the parity check. The final legacy vs modern benchmark (`make -C python bench`): the C++20 ingester halves the per-item p99, processes a feed 4–15× faster, and its queue moves 29× more items per second.
+- **pgvector replaces ChromaDB.** The RAG vectors live in `ai.chunk.embedding` (HNSW, cosine) next to the chunk text, and retrieval is **hybrid**: the vector neighbours and Postgres full-text matches in one SQL query, fused by reciprocal rank. `make -C python migrate-vectors` re-embeds the corpus with the same model, compares the top-k chunks of the RAG eval questions against ChromaDB (a report next to the other benchmark results) and switches `VECTOR_STORE=pgvector`; `make -C python eval-rag` then scores the answers on pgvector next to the ChromaDB baseline. ChromaDB stays under the opt-in profile `chroma`.
+- **The scheduler** (`python/scheduler`, APScheduler, NYSE calendar via `exchange_calendars`, America/New_York):
+  | Time (ET) | Job |
+  |---|---|
+  | 02:00 | retention: AI results older than 90 days are deleted (the analysts' overrides are kept as labeled examples) |
+  | 05:00 | corpus: new 8-Ks and Fed/SEC releases |
+  | 05:30 | the C++20 ingester's own cron |
+  | 06:00 | wait for the ingest run, then rules → AI → the verify run |
+  | 06:15 · 06:30 · 07:00 · 07:30 | SLA checks: ingest DONE · at most 50 verify jobs queued · verification DONE · brief published |
+  | 07:15 · 09:00 | the morning brief · the refresh |
+  | 09:30 · 09:35 | pending reviews expire · the day's vendor scorecard |
+
+  Weekends and NYSE holidays are skipped. A Redis lock (`run:premarket:{date}`) keeps a job from running twice, a restart catches up on the jobs whose window is still open, and every job and SLA check is recorded (`make -C python sla`). `RUN_MODE=production` runs this timeline; `RUN_MODE=demo` (the default) only runs the nightly cleanup, and `make -C python demo` runs a whole day at once.
+- **Alerts, UI banner only:** an SLA breach, a failed job, and the cloud budget crossing 80% or 100% go to the Redis Stream `alerts`; analysts and admins see them live in a banner under the header. Everyone sees "Cloud budget reached, running local" at the cap.
+- **Observability profile:** the **OpenTelemetry Collector**, **Prometheus** and **Grafana** join Langfuse. ai-api, ai-worker and the batch commands export OpenTelemetry metrics with the **GenAI semantic conventions** (`gen_ai.client.operation.duration`, `gen_ai.client.token.usage` per model alias), request latency and worker liveness; the scheduler exports the SLA checks, job runs and today's operations (verdict mix, dedup hits, backlog, cloud spend). The Grafana dashboard **premarket-ai operations** shows them, and its alert rules (no worker running, a worker restart loop, verification stalled) call ai-api's webhook, which puts them in the same banner.
+- **Vendor scorecard** (`/scorecard`, ANALYST/ADMIN): items received, unique, duplicates by type, stale, FAKE and MISLEADING rates, injection items, corroboration, analyst overrides, cloud cost, and **billable items (unique VERIFIED or UNVERIFIED) against the 100 contracted**, over 30 days with a trend chart, CSV export and a **weekly summary** written with the `vendor-scorecard` skill. Today's schedule and SLA checks are on the same page.
+- **Admin page** (`/admin`, ADMIN): users (create, change role, disable, reset password), the source reputation list, and the LLM settings: the pinned models, the month's budget and three **cloud switches** (cloud models at all, judge escalation, the brief's overview). "Ask the News" stays local, because a streamed answer doesn't report its cost.
+- **CI:** the scheduler's tests and lint, the collector, Prometheus and dashboard configs, and **gitleaks** over the whole git history join the hosted jobs; **Renovate** (`.github/renovate.json`) proposes pinned upgrades as PRs. The GPU eval still runs only on the protected self-hosted runner.
+
+## Increment 5, agents and skills (still running)
 Traders now read **Today's brief** on the website instead of the PDF, and **"Ask the News" is answered by a team of agents**. Everything of increment 4 (verdicts, evidence, review queue) keeps running underneath: the brief is built only from what the verification decided.
 
 - **Today's brief** (`/brief`), written by the **briefing agent** in `ai-worker` (`make -C python brief`; the 09:00 refresh with `brief-refresh`):
@@ -116,15 +139,29 @@ Increment 5 adds:
 | **Least privilege** | The API's role gains the store's tables (`memory`), reading `ai.brief` and queuing a brief; the worker's role writes briefs and reads the watchlists; the MCP role reads `ai.brief`. |
 | **Cloud** | The brief is the only default cloud call (about one per edition), inside the $20 monthly cap; without an `OPENAI_API_KEY` or at the cap it stays local. |
 
+Increment 6 adds:
+
+| Layer | Protection |
+|---|---|
+| **Admin pages** | ADMIN only (403 otherwise, and the UI hides the link). An admin can't disable or demote their own account, so there is always one admin. Disabling a user or resetting their password ends their sessions at once. Passwords are 12–256 characters, argon2id. Every change is audited (never a password). |
+| **Alert webhook** | `POST /alerts/grafana` needs its own random bearer token (`ALERT_WEBHOOK_TOKEN`, constant-time check), is off when the token is empty, and the edge answers 404 for it: only Grafana, on the container network, can call it. |
+| **Scheduler** | Runs the same commands as `ai-api-init`, as the database owner, in subprocesses: no container-engine socket anywhere. Read-only root filesystem, no capabilities. Its metrics port isn't published. |
+| **Observability** | Grafana needs its generated admin password (no sign-up, no anonymous access) and is published on `127.0.0.1` only; the collector and Prometheus publish nothing. Metrics carry route templates and model aliases, never ids, questions or news text. |
+| **Least privilege** | The API's role gains reading the scorecard and the scheduler's runs, inserting and updating users (never deleting), and upserting source reputations and the cloud switches. The MCP role gains reading `ai.chunk` (pgvector). Nothing gains access to `ingest.*`: the AI still reads raw news only through the views. |
+| **Secrets** | `gitleaks` scans every commit in CI; `make -C python env` generates `ALERT_WEBHOOK_TOKEN` and `GRAFANA_ADMIN_PASSWORD`. |
+| **Audit retention** | Documented lab simplification: 90 days in ordinary tables, not a regulatory-grade (insert-only, multi-year) audit trail. |
+
 ### Project structure
 ```
 premarket-ai/
-├── compose.yaml              # the stack: ingesters ("legacy"), website + AI ("ai"), Langfuse ("observability")
+├── compose.yaml              # the stack: C++20 ingest + website + AI + scheduler ("ai"), metrics + Langfuse ("observability"), opt-in "legacy" and "chroma"
 ├── .env.example              # settings; `make -C python env` creates .env with random secrets
-├── .github/workflows/        # ci.yml: hosted CI (every Containerfile stage, rule eval, UI); gpu-evals.yml: self-hosted GPU eval
+├── .github/
+│   ├── workflows/            # ci.yml: hosted CI (every Containerfile stage, rule eval, UI, configs, gitleaks); gpu-evals.yml: self-hosted GPU eval
+│   └── renovate.json         # dependency upgrades as PRs (pinned versions)
 ├── cpp/
-│   ├── legacy/               # C++11 legacy app: ingest (still running) + PDF report (retired: LEGACY_PDF_ENABLED)
-│   ├── ingest/               # C++20 low-latency ingester (shadow run + parity check against legacy)
+│   ├── legacy/               # C++11 legacy app: retired (ingest and PDF), kept for before/after comparisons
+│   ├── ingest/               # C++20 low-latency ingester: the only ingest
 │   └── fastpath/             # C++20 nanobind module premarket_fastpath, built into the ai-api image
 ├── python/
 │   ├── Makefile              # task runner: build, up, test, lint, eval, demo, rules, enrich, corpus, smoke, ...
@@ -132,23 +169,24 @@ premarket-ai/
 │   ├── vendor-sim/           # the synthetic news vendor (FastAPI) + pytest tests
 │   ├── mcp-server/           # the MCP server (FastMCP): read-only tools, SSRF-safe fetch, Redis cache + pytest tests
 │   ├── skills/               # Agent Skills (SKILL.md folders): fact-check, source credibility, brief format, vendor scorecard
+│   ├── scheduler/            # the scheduler (APScheduler, NYSE calendar): timeline, jobs, SLA checks, metrics + pytest tests
 │   └── ai-api/               # the new backend (FastAPI) and the verification worker (same code)
-│       ├── src/ai_api/       #   routes/ (auth, news, chat, runs, review, briefs, me), migrations/ (Alembic), memory (watchlists), cli (init, rules, enrich, verify, brief, expire, corpus, smoke)
+│       ├── src/ai_api/       #   routes/ (auth, news, chat, runs, review, briefs, me, alerts, vendor, admin), migrations/ (Alembic), alerts, scorecard, retention, telemetry, cli (init, rules, enrich, verify, brief, expire, scorecard, retention, corpus, smoke)
 │       │   ├── agents/       #   the chat supervisor and its specialists, the briefing agent, the skills loader
 │       │   ├── verify/       #   the LangGraph verify_news graph: checks, verdict policy, LLM judge, tools, coordinator
 │       │   ├── worker/       #   the job queue (taskiq on Redis Streams) and the ai-worker's tasks
 │       │   ├── ml/           #   classic ML baseline: FinBERT, the DistilBERT verdict classifier and its training
 │       │   ├── dedup/        #   duplicate check L0-L3: normalize, simhash (C++ or Python), paraphrase (RedisVL)
 │       │   ├── rules/        #   SEC registry, rate limiter, entity/source/stale checks, engine, runner
-│       │   ├── llm/          #   gateway settings, LangChain model factory, Langfuse tracing
+│       │   ├── llm/          #   gateway settings, LangChain model factory, Langfuse tracing, cloud budget and switches
 │       │   ├── guard/        #   sanitize, injection heuristics, language, spotlighting, output checks
 │       │   ├── enrich/       #   extract + summary + sentiment: prompts, chains, the AI run
-│       │   └── rag/          #   trusted corpus sources, chunking, ChromaDB store, reranker, Ask the News, semantic answer cache
-│       ├── tests/            #   pytest: auth, news contract, dedup, rules, guard, L3, enrich, RAG, chat, verify, runs/review, agents, brief, memory, parity
-│       └── evals/            #   rule eval, L3 + guard eval, verdict eval (v2), model benchmark, RAG eval, datasets, baselines
+│       │   └── rag/          #   trusted corpus sources, chunking, pgvector (hybrid) or ChromaDB store, reranker, Ask the News, semantic answer cache
+│       ├── tests/            #   pytest: auth, news contract, dedup, rules, guard, L3, enrich, RAG, chat, verify, runs/review, agents, brief, memory, parity, alerts, admin, scorecard
+│       └── evals/            #   rule eval, L3 + guard eval, verdict eval (v2), model benchmark, RAG eval, vector store migration, datasets, baselines
 ├── ui/
 │   ├── Makefile              # UI task runner: install, dev, test, lint, build, check, e2e
-│   └── web/                  # React + Vite + TypeScript website (Today's brief, feed, detail, Ask the News, My watchlist, Review queue), mock backend
+│   └── web/                  # React + Vite + TypeScript website (Today's brief, feed, detail, Ask the News, My watchlist, Review queue, Vendor scorecard, Admin, banners), mock backend
 ├── sql/                      # PostgreSQL init scripts: legacy schema + seed, the C++20 ingest schema
 ├── podman/
 │   ├── legacy/Containerfile      # stages: build, test, lint, asan, tsan, bench, runtime
@@ -156,16 +194,20 @@ premarket-ai/
 │   ├── vendor-sim/Containerfile  # stages: test, lint, runtime
 │   ├── ai-api/Containerfile      # stages: fastpath-*, test, lint, eval, ml-base, ai-eval, worker, runtime (with python/skills)
 │   ├── mcp-server/Containerfile  # stages: test, lint, runtime
+│   ├── scheduler/Containerfile   # stages: test, lint, runtime (on top of the ai-api image)
 │   ├── web/Containerfile         # Node build of the UI -> unprivileged nginx with the static files
 │   └── config/
-│       ├── legacy/crontab        # supercronic schedule of the legacy ingester (mounted read-only)
-│       ├── ingest/crontab        # supercronic schedule of the C++20 ingester and the parity check
+│       ├── legacy/crontab        # supercronic schedule of the retired legacy ingester (opt-in profile)
+│       ├── ingest/crontab        # supercronic schedule of the C++20 ingester (05:30 ET)
 │       ├── web/default.conf      # nginx of the two web replicas (static files only)
 │       ├── edge/                 # the edge proxy: nginx.conf, templates/ (site), snippets/
 │       ├── litellm/config.yaml   # the LLM gateway: task aliases per hardware profile, benchmark candidates
-│       └── searxng/settings.yml  # the self-hosted web search behind the MCP tool web_search
+│       ├── searxng/settings.yml  # the self-hosted web search behind the MCP tool web_search
+│       ├── otel/config.yaml      # OpenTelemetry Collector: OTLP in, Prometheus exporter out
+│       ├── prometheus/           # scrape config (collector, scheduler)
+│       └── grafana/              # provisioning (data source, alert rules -> ai-api webhook) + the operations dashboard
 ├── scripts/                  # one-time setup for the GPU host and Ubuntu WSL
-└── docs/                     # project documents, the Google C++ Style Guide, benchmarks/ (model and RAG results)
+└── docs/                     # project documents, the Google C++ Style Guide, benchmarks/ (models, RAG, legacy vs C++20 ingest, vector migration)
 ```
 
 ### Setup dependencies
@@ -179,32 +221,36 @@ Increment 3 and later need **the GPU host** with Ollama and the models. Incremen
 6. Optional: `OPENAI_API_KEY` (and `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) for the cloud aliases. Increment 4 uses the cloud only if you also set `JUDGE_CLOUD_MODEL=cloud-openai` (escalation of uncertain verdicts, capped by `LLM_MONTHLY_BUDGET_USD`).
 7. Increment 4: run `make -C python env` again. It adds the new settings and generates `WORKER_DB_PASSWORD`, `MCP_DB_PASSWORD`, `MCP_SERVICE_TOKEN` and `SEARXNG_SECRET`.
 8. Increment 5: run `make -C python env` once more. It adds `LEGACY_PDF_ENABLED=false`, `BRIEF_MODEL`, and the chat agent and cache settings; nothing new to install. The brief is written by OpenAI when `OPENAI_API_KEY` is set (about a tenth of a cent per edition), else by the local model; `BRIEF_MODEL=` (empty) keeps it local.
+9. Increment 6: run `make -C python env` again. It adds `LEGACY_INGEST=false`, `RUN_MODE=demo`, `RETENTION_DAYS`, the SLA and scheduler settings, `VENDOR_CONTRACT_ITEMS`, the observability settings, and generates `ALERT_WEBHOOK_TOKEN` and `GRAFANA_ADMIN_PASSWORD`. Then, once: `make -C python up` (migrations 0006–0009: the views read the C++20 tables, the pgvector column) and `make -C python migrate-vectors` (re-embeds the corpus into pgvector, about 20 minutes on the GTX 1650, and sets `VECTOR_STORE=pgvector` in `.env`), then `make -C python up` again. A new install from `.env.example` starts on pgvector directly. For metrics, set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` and run `make -C python obs-up`. For the unattended day, set `RUN_MODE=production` (the GPU host must be on from 05:00 to 09:35 ET).
 
 The first `up` downloads the gateway (about 2 GB), ChromaDB, text-embeddings-inference and the reranker model (about 1 GB, into the `hf-models` volume). Increment 4 adds SearXNG (about 200 MB) and builds the worker image with CPU-only PyTorch (about 1.5 GB); the worker downloads FinBERT (about 440 MB) into the `ml-models` volume the first time it runs, and `ml-train` downloads DistilBERT (about 260 MB). The first `corpus` downloads about 600 documents from SEC and the Fed (about 20 minutes, most of it embedding 5,000 chunks on the GPU host).
 
 ### Build
 ```bash
-make -C python build        # all seven images (layers are cached)
+make -C python build        # the images (layers are cached); the legacy image only with LEGACY_INGEST=true
 make -C python eval-image   # the image of the GPU evals and ml-train (L3, verdicts, benchmark, RAG)
 ```
 This runs:
 ```bash
 podman build -f podman/vendor-sim/Containerfile --target runtime --build-context config=python/config -t localhost/premarket-ai/vendor-sim:dev python/vendor-sim
-podman build -f podman/legacy/Containerfile     --target runtime -t localhost/premarket-ai/legacy:dev cpp/legacy
 podman build -f podman/ingest/Containerfile     --target runtime -t localhost/premarket-ai/ingest:dev cpp/ingest
 podman build -f podman/ai-api/Containerfile     --target runtime --build-context fastpath=cpp/fastpath --build-context config=python/config --build-context vendorsim=python/vendor-sim --build-context skills=python/skills -t localhost/premarket-ai/ai-api:dev python/ai-api
 podman build -f podman/ai-api/Containerfile     --target worker --build-context fastpath=cpp/fastpath --build-context config=python/config --build-context vendorsim=python/vendor-sim --build-context skills=python/skills -t localhost/premarket-ai/ai-api:worker python/ai-api
 podman build -f podman/mcp-server/Containerfile --target runtime --build-context config=python/config -t localhost/premarket-ai/mcp-server:dev python/mcp-server
+podman build -f podman/scheduler/Containerfile  --target runtime --build-arg AI_API_IMAGE=localhost/premarket-ai/ai-api:dev -t localhost/premarket-ai/scheduler:dev python/scheduler
 podman build -f podman/web/Containerfile        --target runtime -t localhost/premarket-ai/web:dev ui/web
 ```
-The gateway, ChromaDB, the reranker, SearXNG and Langfuse are upstream images, pinned in `compose.yaml`, with only their config under `podman/config/`. `make -C python help` and `make -C ui help` list every task. Add `ENGINE=docker` to any task to use Docker instead of Podman.
+The gateway, ChromaDB, the reranker, SearXNG, Langfuse, the OpenTelemetry Collector, Prometheus and Grafana are upstream images, pinned in `compose.yaml`, with only their config under `podman/config/`. `make -C python help` and `make -C ui help` list every task. Add `ENGINE=docker` to any task to use Docker instead of Podman.
 
 ### Run
 ```bash
-make -C python up                         # everything: ingesters, website, gateway, chroma, reranker, worker, MCP, SearXNG
+make -C python up                         # everything: C++20 ingester, website, gateway, reranker, worker, MCP, SearXNG, scheduler
 make -C python demo DATE=2026-09-25       # a whole day (see below), then the website check
+make -C python obs-up                     # Langfuse, OpenTelemetry Collector, Prometheus, Grafana
 ```
-`demo` runs, for each of the 5 days before `DATE`: both ingesters, the parity check and the rules. Then `corpus` (only new documents are fetched), and for `DATE`: ingesters, parity, rules, **enrich**, **verify**, **brief**, and `smoke` (the PDF steps `report` and `pdf` run only with `LEGACY_PDF_ENABLED=true`). `verify` queues the run and prints each verdict as the worker decides it; `brief` prints the brief's counts and overview. On the GTX 1650, `enrich` takes about 14 minutes for 88 unique items, and `verify` takes about 25 seconds per item while it shares the GPU (roughly 35 minutes for the day); the brief takes seconds with the cloud model, about a minute locally.
+`demo` runs, for each of the 5 days before `DATE`: the C++20 ingester and the rules (plus the legacy ingester and the parity check with `LEGACY_INGEST=true`). Then `corpus` (only new documents are fetched), and for `DATE`: ingest, rules, **enrich**, **verify**, **brief**, **scorecard**, and `smoke` (the PDF steps `report` and `pdf` run only with `LEGACY_PDF_ENABLED=true`). `verify` queues the run and prints each verdict as the worker decides it; `brief` prints the brief's counts and overview. On the GTX 1650, `enrich` takes about 14 minutes for 88 unique items, and `verify` takes about 25 seconds per item while it shares the GPU (roughly 35 minutes for the day); the brief takes seconds with the cloud model, about a minute locally.
+
+As `analyst1`, **Vendor scorecard** shows the day's billable items against the contract, the 30-day trend and the weekly summary; as `admin1`, **Admin** manages users, source reputations and the cloud switches. Grafana (after `obs-up`) is on **http://localhost:3001** (user `admin`, `GRAFANA_ADMIN_PASSWORD` from `.env`), with the **premarket-ai operations** dashboard.
 
 Open **http://localhost:8080**, log in as `trader1`, `analyst1` or `admin1` with the `DEMO_USER_PASSWORD` from `.env`, and pick the demo date. **Today's brief** is the page that replaces the PDF: the overview, the top stories, every verified story by sector, "Unconfirmed – watch", and what was left out. Set up **My watchlist** (tickers and sectors) and its stories come first. The **News feed** shows every story with its **verdict**, AI summary and sentiment; the detail page shows how the verdict was reached. **Ask the News** shows how the agents worked on each question ("Why is NVDA flagged today?" asks the Fact-Checker; "Did NVDA shares move?" the Market Analyst), then the answer with its numbered sources; ask the same question again and it comes from the cache. As `analyst1`, open **Review queue** to approve or change verdicts, then **Refresh with reviewed items** on Today's brief (the 09:00 edition).
 
@@ -221,11 +267,18 @@ make -C python mcp-tools                  # the MCP server's tools (TOOL=… ARG
 make -C python ml-train                   # fine-tune the DistilBERT baseline (CPU, about 10 minutes)
 make -C python worker-logs                # follow the verification worker
 make -C python corpus                     # download new trusted documents and index them
-make -C python reindex                    # rebuild the ChromaDB index from ai.chunk
+make -C python reindex                    # rebuild the vector store (VECTOR_STORE) from ai.chunk
+make -C python migrate-vectors            # ChromaDB -> pgvector: re-embed, compare the top-k, switch VECTOR_STORE
+make -C python schedule-plan DATE=2026-11-26  # the scheduler's timeline for a date (Thanksgiving: nothing runs)
+make -C python schedule-run JOB=sla-brief # run one scheduler job now (FORCE=1 takes a held lock)
+make -C python sla DATE=2026-09-25        # the day's scheduled jobs and SLA checks (exit 1 if one was breached)
+make -C python scheduler-logs             # follow the scheduler
+make -C python scorecard DATE=2026-09-25  # count a day's vendor scorecard
+make -C python retention                  # the nightly cleanup, now
 make -C python llm-status                 # the gateway's aliases, one embedding and one chat call
 make -C python ai-runs                    # the last AI runs: paraphrases, summaries, fallbacks, time
-make -C python obs-up | obs-down          # Langfuse (then LANGFUSE_TRACING=true in .env and `up`)
-make -C python ingest | parity | rules | registry | dedup-rebuild | runs | rule-runs | bench | smoke
+make -C python obs-up | obs-down          # the observability profile (then LANGFUSE_TRACING=true / OTEL_EXPORTER_OTLP_ENDPOINT in .env and `up`)
+make -C python ingest | ingest-legacy | parity | rules | registry | dedup-rebuild | runs | rule-runs | bench | smoke
 make -C python audit | openapi | report | pdf | feed-summary | psql | logs | ps | down | reset
 make -C ui dev                            # UI dev server with the mock backend: http://localhost:5173
 make -C ui dev VITE_API_MODE=live         # UI dev server against the running stack (through the edge)
@@ -235,26 +288,30 @@ make -C ui dev VITE_API_MODE=live         # UI dev server against the running st
 |---|---|---|
 | edge | `http://edge:8080`: `/` → web-1/web-2, `/api/*` → ai-api | **`127.0.0.1:8080`** (`WEB_BIND`, `WEB_PORT`) |
 | web-1, web-2 | `http://web-1:8080`, `http://web-2:8080` (static UI) | none |
-| ai-api | `http://ai-api:8000` (`/auth/*`, `/news`, `/news/{id}`, `/chat`, `/runs`, `/runs/{id}/events`, `/review`, `/briefs/today`, `/briefs`, `/me/watchlist`, `/health`) | none |
-| ai-api-init | one-shot: migrations, roles, demo users; also runs `rules`, `enrich`, `verify`, `brief`, `expire`, `corpus`, `registry`, `smoke` | none |
+| ai-api | `http://ai-api:8000` (`/auth/*`, `/news`, `/news/{id}`, `/chat`, `/runs`, `/runs/{id}/events`, `/review`, `/briefs/today`, `/briefs`, `/me/watchlist`, `/alerts`, `/alerts/stream`, `/llm/budget`, `/schedule`, `/vendor/scorecard`, `/admin/*`, `/health`; `/alerts/grafana` for Grafana only) | none |
+| ai-api-init | one-shot: migrations, roles, demo users; also runs `rules`, `enrich`, `verify`, `brief`, `expire`, `scorecard`, `retention`, `corpus`, `registry`, `smoke` | none |
+| scheduler | the NYSE-calendar timeline (the same `ai-api` commands), SLA checks, alerts; metrics on `:9464` | none |
 | ai-worker | taskiq worker on the Redis Stream `premarket:verify`: the LangGraph verify graph and the briefing agent | none |
 | mcp-server | `http://mcp-server:8000/mcp` (streamable HTTP, `Authorization: Bearer <MCP_SERVICE_TOKEN>`) | **`127.0.0.1:8765`** (`MCP_BIND`, `MCP_PORT`) |
 | searxng | `http://searxng:8080` (web search, JSON; only mcp-server calls it) | none |
 | llm-gateway | `http://llm-gateway:4000/v1` (LiteLLM, key `sk-<LLM_GATEWAY_KEY>`) → Ollama on the GPU host | none |
-| chroma | `http://chroma:8000`: collection `trusted_corpus` | none |
+| chroma | opt-in profile `chroma` (and while `VECTOR_STORE=chroma`): collection `trusted_corpus` | none |
 | reranker | `http://reranker:8080/rerank` (bge-reranker-base, CPU) | none |
 | redis | `redis:6379` (password): sessions, dedup index L0-L3, rate limits, chat lock, job queue, run and brief events, tool cache, semantic answer cache, cloud budget | none |
 | postgres | `postgres:5432`, database `premarket` | none |
 | vendor-sim | `http://vendor-sim:8080/feed?date=YYYY-MM-DD` | none |
-| legacy | supercronic (05:30 ET, Mon–Fri): C++11 ingest (+ the PDF only with `LEGACY_PDF_ENABLED=true`) | none |
-| ingest | supercronic (05:30 ET ingest, 05:35 ET parity, Mon–Fri): C++20 ingester | none |
+| legacy | retired; opt-in profile `legacy` (`LEGACY_INGEST=true`): C++11 ingest at 05:30 ET | none |
+| ingest | supercronic (05:30 ET, Mon–Fri): the C++20 ingester, the only ingest | none |
 | langfuse-web (+ worker, db, clickhouse, minio, redis) | profile `observability` | `127.0.0.1:3000` (`LANGFUSE_PORT`) |
+| otel-collector | profile `observability`: OTLP/HTTP on `otel-collector:4318`, Prometheus exporter on `:8889` | none |
+| prometheus | profile `observability`: `http://prometheus:9090` | none |
+| grafana | profile `observability`: dashboard + alert rules | `127.0.0.1:3001` (`GRAFANA_PORT`) |
 
 | Demo login | Role |
 |---|---|
 | `trader1` | TRADER |
-| `analyst1` | ANALYST: the trader's pages plus the **Review queue** and writing the brief again |
-| `admin1` | ADMIN: the same as ANALYST for now |
+| `analyst1` | ANALYST: the trader's pages plus the **Review queue**, writing the brief again, the **Vendor scorecard** and the alert banner |
+| `admin1` | ADMIN: the analyst's pages plus **Admin** (users, source reputation, LLM settings) |
 
 **Password of the demo logins.** All three users share one password, the value of `DEMO_USER_PASSWORD` in `.env` (default `premarket-demo-2026`, copied from `.env.example`). It must have at least 12 characters, so a short word like `demo` never works. To see yours:
 ```bash
@@ -264,12 +321,13 @@ To change it, edit `DEMO_USER_PASSWORD` in `.env` and run `make -C python up`: e
 
 ### Test
 ```bash
-make -C python test         # pytest (vendor-sim, ai-api incl. verify graph, agents, brief, memory, mcp-server) + GoogleTest
+make -C python test         # pytest (vendor-sim, ai-api incl. verify graph, agents, brief, memory, alerts, admin, mcp-server, scheduler) + GoogleTest
 make -C python lint         # ruff + clang-format, cpplint, clang-tidy (all 3 C++ projects)
 make -C python sanitizers   # GoogleTest under ASan + UBSan (legacy, ingest, fastpath) and TSan (legacy, ingest)
 make -C python eval         # rule eval + rules-only verdict eval on the seed-42 golden set (no GPU)
 make -C python eval-ai      # L3 + guard eval, then the verdicts with the LLM judge (GPU host); report in docs/benchmarks
-make -C python eval-rag     # RAG baseline: citations, advice refusals, RAGAS faithfulness + context precision
+make -C python eval-rag     # RAG baseline: citations, advice refusals, RAGAS faithfulness + context precision (per vector store)
+make -C python bench        # legacy (C++11) vs C++20 ingest micro-benchmarks
 make -C python bench-models # the local model benchmark (about an hour on the GTX 1650)
 make -C python check        # test + lint + sanitizers + eval
 make -C ui check            # UI: ESLint (gts, zero warnings), tsc, Vitest with coverage, production build without mocks
@@ -278,6 +336,16 @@ make -C ui e2e              # UI in Chromium (Playwright): every mock scenario, 
 `eval-ai` embeds the golden set's unique items (seed 42, 2026-09-17 to 25) and gates on 2026-09-24/25: paraphrase recall ≥ 0.85, L3 precision and link accuracy ≥ 0.95, INJECTION_ATTEMPT recall 1.0 and precision ≥ 0.95, no English item flagged as another language, and no metric more than 2 points below `python/ai-api/evals/ai_baseline.json`. First result: every gated metric 1.0. The GPU evals also run on the protected self-hosted runner (push to `main`, by hand, nightly).
 
 `eval` also runs the verdict eval without any model (rules only, on hosted CI) and `eval-ai` runs it with L3, the judge and the DistilBERT baseline. The verdict gates: FAKE recall ≥ 0.85 and precision ≥ 0.90, macro-F1 ≥ 0.75, every injection item flagged, no tool called with injected text, and nothing more than 2 points below `python/ai-api/evals/verify_baseline.json`. First result (rules only, 200 items): every verdict right; the report lists the rules-only, hybrid and DistilBERT scores side by side.
+
+**Done when** (increment 6): `RUN_MODE=production` publishes the brief before 07:30 ET on trading days with every SLA green, and the vendor scorecard shows billable vs contracted items.
+1. `make -C python demo DATE=2026-09-25` ends with **`55/55 checks passed`** from `smoke`, which adds to the increment 5 checks:
+   - the AI reads the C++20 ingester's tables (the C++11 one is retired) and the day's ingest run is DONE
+   - **pgvector is the vector store**, with the corpus embedded in it
+   - the day's **vendor scorecard** shows its billable items against the contract
+   - every role reads the cloud budget; Grafana's webhook isn't reachable through the edge; a trader gets 403 on the admin pages and `admin1` lists the users; the scheduler's day is readable
+2. With `RUN_MODE=production` on a trading day, `make -C python sla` prints **`SLA: every check green`** (ingest 06:15, backlog 06:30, verification 07:00, brief 07:30), and `smoke` for that date checks it too.
+3. `make -C python migrate-vectors` passes (pgvector finds the same neighbours as ChromaDB: overlap@k ≥ 0.9), and `make -C python eval-rag` on pgvector scores at least the ChromaDB baseline.
+4. `make -C python test lint sanitizers eval` and `make -C ui check` pass with zero warnings; CI adds the scheduler, the observability configs and gitleaks.
 
 **Done when** (increment 5): traders use the brief instead of the PDF, and the PDF is switched off.
 1. `make -C python demo DATE=2026-09-25` writes the brief and ends with **`47/47 checks passed`** from `smoke`, which adds to the increment 4 checks:
@@ -521,33 +589,36 @@ flowchart LR
   classDef old fill:#f3f4f6,stroke:#9ca3af,color:#374151
   classDef retired fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-dasharray: 5 5
 
-  SCH["scheduler<br/>NYSE calendar · Redis lock<br/>06:00 verify → 07:15 brief"]:::new
-  ING["ingest (C++20)<br/>the only ingester"]:::old
+  ING["ingest (C++20)<br/>own cron 05:30 ET<br/>the only ingester"]:::old
   LEG["legacy ingest (C++11)"]:::retired
+  SCH["scheduler<br/>NYSE calendar · Redis lock<br/>06:00 rules → AI → verify<br/>07:15 brief · SLA checks"]:::new
   AI["ai-api + ai-worker<br/>+ agents"]:::old
-  PGV[("PostgreSQL + pgvector<br/>hybrid search")]:::new
+  PGV[("PostgreSQL + pgvector<br/>ai.v_raw_news → ingest.*<br/>hybrid search · scorecard")]:::new
   CH[("ChromaDB")]:::retired
+  AL[("Redis Stream<br/>alerts")]:::new
   subgraph OBS["observability profile"]
-    OT["OpenTelemetry"]:::new
+    OT["OpenTelemetry Collector<br/>GenAI metrics"]:::new
     PR["Prometheus"]:::new
-    GR["Grafana<br/>SLA · cost · alerts"]:::new
+    GR["Grafana<br/>dashboard · alert rules"]:::new
     OT --> PR --> GR
   end
-  SCORE["Vendor scorecard<br/>billable vs contracted"]:::new
-  CI["CI eval gate<br/>self-hosted GPU runner"]:::new
-  WEB["web: brief by 07:30 ET<br/>alert + budget banners"]:::old
-  T(["Trader"])
+  CI["CI: evals, gitleaks,<br/>self-hosted GPU runner"]:::new
+  WEB["web: brief by 07:30 ET · scorecard ·<br/>admin · alert + budget banners"]:::new
+  T(["Trader / Analyst / Admin"])
 
-  SCH --> ING
+  ING --> PGV
   LEG -. "replaced" .-> ING
+  SCH -- "waits for ingest" --> PGV
   SCH --> AI
   AI <--> PGV
   CH -. "migrated" .-> PGV
+  SCH -- "SLA breaches" --> AL
   AI -. metrics .-> OT
-  GR -. alerts .-> WEB
-  PGV --> SCORE --> WEB
+  SCH -. metrics .-> PR
+  GR -- "webhook" --> AI --> AL
+  AL --> WEB
+  PGV --> WEB --> T
   CI -. "blocks regressions" .-> AI
-  WEB --> T
 ```
 
 ### Increment 7: Enterprise AI on Azure / AWS / GCP (theory)
@@ -560,10 +631,11 @@ No code or deployment. It maps every component above to managed cloud services, 
 | Modern C++ | **C++20** (Google style + low-latency rules), CMake, Abseil, simdjson, libpq, nanobind (Python module), GoogleTest, Google Benchmark |
 | AI backend | Python 3.13, FastAPI (JWT + argon2id, Alembic, psycopg 3), LangChain, LangGraph, LiteLLM, MCP (FastMCP), Agent Skills, taskiq (Redis Streams) |
 | Models | Ollama on a GPU host (local 3–4B models, Llama Guard 3), OpenAI (default cloud), Claude / Gemini switchable · FinBERT and DistilBERT on CPU (PyTorch, transformers) |
-| Data | PostgreSQL 17 (+ pgvector), ChromaDB (increments 3–5), Redis 8 (+ RedisVL), bge-reranker-base (text-embeddings-inference), SearXNG, yfinance (lab only) |
+| Data | PostgreSQL 17 (+ pgvector, hybrid search from increment 6), ChromaDB (increments 3–5), Redis 8 (+ RedisVL), bge-reranker-base (text-embeddings-inference), SearXNG, yfinance (lab only) |
 | Web | React, Vite, TypeScript, TanStack Query, Tailwind, shadcn/ui, zod, MSW (mock backend), Playwright · nginx (edge proxy + load balancer) |
 | Quality | RAGAS metrics (faithfulness, context precision), promptfoo, pytest, Vitest, clang-format / cpplint / clang-tidy |
-| Observability | Langfuse, OpenTelemetry, Prometheus, Grafana |
+| Observability | Langfuse, OpenTelemetry (GenAI semantic conventions), Prometheus, Grafana |
+| Operations | APScheduler + exchange_calendars (NYSE), gitleaks, Renovate |
 | Runtime | Podman (rootless) in Ubuntu 24.04 on WSL2 · Ollama on a host with an NVIDIA GPU |
 
 ## Full setup (including the GPU host, needed from increment 3)

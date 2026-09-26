@@ -16,13 +16,16 @@ and advice checks) and scores:
 The questions are about the trusted corpus of the last 12 months, so build
 it first (``make -C python corpus``). Runs in the ``ai-eval`` container:
 ``make -C python eval-rag``; writes ``rag-baseline-<profile>.md`` and
-``.json`` to ``--out``.
+``.json`` to ``--out`` (``rag-baseline-<profile>-pgvector`` with
+``VECTOR_STORE=pgvector``, so the two stores can be compared: increment 6
+needs pgvector to score at least as well as ChromaDB).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import datetime
 import json
 import os
@@ -31,6 +34,9 @@ import statistics
 import sys
 from typing import Any
 
+import psycopg
+
+from ai_api import config
 from ai_api.llm import config as llm_config
 from ai_api.llm import factory
 from ai_api.llm import tracing
@@ -52,13 +58,45 @@ def _config_dir() -> pathlib.Path:
     return _HERE.parents[1] / "config"
 
 
-def _service(llm: llm_config.LlmConfig) -> ask.AskService:
-    rag = rag_config.RagConfig.from_env(os.environ)
+@contextlib.asynccontextmanager
+async def open_corpus(
+    llm: llm_config.LlmConfig, rag: rag_config.RagConfig
+) -> Any:
+    """The active vector store (pgvector reads as the database owner).
+
+    Args:
+        llm: The gateway settings (embedding model).
+        rag: The RAG settings (VECTOR_STORE).
+
+    Yields:
+        The store.
+    """
     embeddings = store.PrefixedEmbeddings(
         factory.embeddings(llm), llm.query_prefix, llm.document_prefix
     )
+    if rag.vector_store != "pgvector":
+        yield store.open_store(rag, embeddings, llm.embed_model, llm.embed_dims)
+        return
+    owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
+    async with await psycopg.AsyncConnection.connect(
+        owner.dsn(), autocommit=True
+    ) as conn:
+        yield store.open_store(
+            rag,
+            embeddings,
+            llm.embed_model,
+            llm.embed_dims,
+            connect=store.connection_of(conn),
+        )
+
+
+def _service(
+    llm: llm_config.LlmConfig,
+    rag: rag_config.RagConfig,
+    corpus: store.CorpusStore,
+) -> ask.AskService:
     return ask.AskService(
-        store=store.CorpusStore(rag, embeddings, llm.embed_model),
+        store=corpus,
         reranker=rerank.Reranker(rag.reranker_url),
         model=factory.chat_model(llm, max_tokens=600),
         tracer=tracing.Tracer(tracing.TracingConfig()),
@@ -104,8 +142,15 @@ async def _judged(
     }
 
 
-async def _answers(llm: llm_config.LlmConfig) -> list[dict[str, Any]]:
-    service = _service(llm)
+async def _answers(
+    llm: llm_config.LlmConfig, rag: rag_config.RagConfig
+) -> tuple[list[dict[str, Any]], int]:
+    async with open_corpus(llm, rag) as corpus:
+        rows = await _ask_all(_service(llm, rag, corpus))
+        return rows, await corpus.count()
+
+
+async def _ask_all(service: ask.AskService) -> list[dict[str, Any]]:
     day = datetime.date.today()
     rows = []
     for line in _QUESTIONS.read_text(encoding="utf-8").splitlines():
@@ -147,12 +192,13 @@ async def _answers(llm: llm_config.LlmConfig) -> list[dict[str, Any]]:
 
 def _markdown(meta: dict[str, Any], metrics: dict[str, float]) -> str:
     lines = [
-        f"# RAG baseline: `{meta['profile']}`",
+        f"# RAG baseline: `{meta['profile']}`, {meta['vector_store']}",
         "",
         f"Run {meta['date']}: {meta['questions']} questions "
         f"(`python/ai-api/evals/datasets/rag_questions.jsonl`) through the "
         f'"Ask the News" chain, main model `{meta["model"]}`, corpus of '
-        f"{meta['corpus_chunks']} chunks. Command: `make -C python eval-rag`.",
+        f"{meta['corpus_chunks']} chunks in {meta['vector_store']}"
+        f"{meta['retrieval']}. Command: `make -C python eval-rag`.",
         "",
         "| Metric | Value |",
         "|---|---|",
@@ -187,7 +233,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     llm = llm_config.LlmConfig.from_env(os.environ)
-    rows = asyncio.run(_answers(llm))
+    rag = rag_config.RagConfig.from_env(os.environ)
+    rows, chunks = asyncio.run(_answers(llm, rag))
     factual = [r for r in rows if not r["advice"]]
     advice = [r for r in rows if r["advice"]]
     metrics = {
@@ -200,21 +247,26 @@ def main(argv: list[str] | None = None) -> int:
     }
     if not args.no_judge:
         metrics.update(asyncio.run(_judged(llm, rows)))
-    rag = rag_config.RagConfig.from_env(os.environ)
+    pgvector = rag.vector_store == "pgvector"
     meta = {
         "profile": llm.hw_profile,
         "date": datetime.date.today().isoformat(),
         "questions": len(rows),
         "model": llm.main_model,
-        "corpus_chunks": store.CorpusStore(
-            rag, factory.embeddings(llm), llm.embed_model
-        ).count(),
+        "corpus_chunks": chunks,
+        "vector_store": rag.vector_store,
+        "retrieval": (
+            " (hybrid: vector + full text)"
+            if pgvector and rag.hybrid
+            else " (vector only)"
+        ),
     }
     metrics = {k: round(v, 4) for k, v in metrics.items()}
     for name, value in metrics.items():
         print(f"  {name:<26} {value:.4f}")
     args.out.mkdir(parents=True, exist_ok=True)
-    stem = args.out / f"rag-baseline-{llm.hw_profile}"
+    suffix = "-pgvector" if pgvector else ""
+    stem = args.out / f"rag-baseline-{llm.hw_profile}{suffix}"
     stem.with_suffix(".json").write_text(
         json.dumps({"meta": meta, "metrics": metrics, "rows": rows}, indent=2)
         + "\n"

@@ -315,7 +315,7 @@ async def open_services(settings: config.Settings) -> AsyncIterator[Services]:
                 store.load_universe(settings.config_dir),
             ),
             cache=cache.ToolCache(redis),
-            corpus=corpus.Corpus(settings, http),
+            corpus=corpus.Corpus(settings, http, pool=pool),
             web=web.WebSearch(settings.searxng_url, http),
             fetcher=fetch.Fetcher(http, settings.fetch_max_bytes),
             prices=prices.price_history,

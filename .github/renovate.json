@@ -1,0 +1,50 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "premarket-ai (increment 6): upgrades come as PRs; CI must pass before a merge. Every version is pinned exactly.",
+  "extends": [
+    "config:recommended",
+    ":pinAllExceptPeerDependencies"
+  ],
+  "timezone": "America/New_York",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "prConcurrentLimit": 5,
+  "labels": [
+    "dependencies"
+  ],
+  "dockerfile": {
+    "managerFilePatterns": [
+      "/(^|/)Containerfile$/"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Python services: one PR per service",
+      "matchManagers": [
+        "pep621"
+      ],
+      "groupName": "python {{packageFileDir}}"
+    },
+    {
+      "description": "taskiq 0.13.0 breaks taskiq-redis 1.2.3; langchain-mcp-adapters needs mcp < 2",
+      "matchPackageNames": [
+        "taskiq",
+        "mcp"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Container images of compose.yaml: one PR each, never latest",
+      "matchManagers": [
+        "docker-compose",
+        "dockerfile"
+      ],
+      "pinDigests": false
+    }
+  ]
+}

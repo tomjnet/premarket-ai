@@ -14,6 +14,7 @@ import contextlib
 import datetime
 import logging
 import os
+import time
 from typing import Any
 
 import fastapi
@@ -21,17 +22,23 @@ from psycopg_pool import AsyncConnectionPool
 from redis import asyncio as aioredis
 
 import ai_api
+from ai_api import admin
+from ai_api import alerts
 from ai_api import briefs
 from ai_api import config
 from ai_api import deps
 from ai_api import memory as memory_lib
 from ai_api import news
+from ai_api import schedule
+from ai_api import scorecard
 from ai_api import sessions
+from ai_api import telemetry
 from ai_api import users
 from ai_api import verdicts
 from ai_api.agents import skills
 from ai_api.agents import supervisor
 from ai_api.guard import llama_guard
+from ai_api.llm import budget
 from ai_api.llm import factory
 from ai_api.llm import tracing
 from ai_api.rag import ask
@@ -39,6 +46,8 @@ from ai_api.rag import cache
 from ai_api.rag import rerank
 from ai_api.rag import store
 from ai_api.rag import universe
+from ai_api.routes import admin as admin_routes
+from ai_api.routes import alerts as alert_routes
 from ai_api.routes import auth
 from ai_api.routes import briefs as brief_routes
 from ai_api.routes import chat
@@ -47,6 +56,7 @@ from ai_api.routes import me
 from ai_api.routes import news as news_routes
 from ai_api.routes import review
 from ai_api.routes import runs
+from ai_api.routes import vendor
 from ai_api.verify import events
 from ai_api.worker import queue
 
@@ -140,8 +150,20 @@ async def build_ask(
     settings: config.Settings,
     news_store: news.NewsStore,
     memory: memory_lib.Memory | None = None,
+    connect: store.Connect | None = None,
 ) -> tuple[ask.AskService | None, rerank.Reranker | None]:
-    """The "Ask the News" service when the LLM and RAG are configured."""
+    """The "Ask the News" service when the LLM and RAG are configured.
+
+    Args:
+        settings: The settings.
+        news_store: The day's items (vendor sources of an answer).
+        memory: Users' watchlists, or None.
+        connect: Database connections (the pgvector store reads
+            ``ai.chunk`` through them).
+
+    Returns:
+        The service and its reranker (to close), or (None, None).
+    """
     llm = settings.llm
     if llm is None or settings.rag is None:
         _log.warning("LLM_GATEWAY_KEY isn't set: Ask the News is off")
@@ -157,7 +179,13 @@ async def build_ask(
     )
     tracer = tracing.Tracer(settings.tracing)
     service = ask.AskService(
-        store=store.CorpusStore(settings.rag, embeddings, llm.embed_model),
+        store=store.open_store(
+            settings.rag,
+            embeddings,
+            llm.embed_model,
+            llm.embed_dims,
+            connect=connect,
+        ),
         reranker=reranker,
         model=factory.chat_model(llm, max_tokens=600),
         tracer=tracer,
@@ -171,6 +199,26 @@ async def build_ask(
         memory=memory,
     )
     return service, reranker
+
+
+def _summarizer(settings: config.Settings) -> scorecard.Summarizer | None:
+    """The weekly vendor summary's writer (the local main model)."""
+    llm = settings.llm
+    if llm is None:
+        return None
+    try:
+        skill = skills.Library.load(settings.skills_dir).body(
+            "vendor-scorecard"
+        )
+    except OSError as e:
+        _log.warning("skills unreadable: %r", e)
+        return None
+    if skill is None:
+        _log.warning("the vendor-scorecard skill is missing")
+        return None
+    return scorecard.Summarizer(
+        factory.chat_model(llm, max_tokens=400), llm.main_model, skill
+    )
 
 
 def _sectors(settings: config.Settings) -> tuple[str, ...]:
@@ -232,12 +280,22 @@ async def open_services(
         memory = await stack.enter_async_context(
             memory_lib.open_memory(settings.database, "ai-api")
         )
-        ask_service, reranker = await build_ask(settings, news_store, memory)
+        ask_service, reranker = await build_ask(
+            settings, news_store, memory, pool.connection
+        )
+        administration = admin.PostgresAdmin(pool, redis)
+        try:
+            # Redis keeps nothing across a restart: the admin's cloud
+            # switches come back from Postgres.
+            await administration.restore()
+        except Exception as e:  # noqa: BLE001 - the switches default to on.
+            _log.warning("cloud switches not restored: %r", e)
+        user_store = users.PostgresUserStore(pool)
         if reranker is not None:
             stack.push_async_callback(reranker.aclose)
         yield deps.Services(
             settings=settings,
-            users=users.PostgresUserStore(pool),
+            users=user_store,
             news=news_store,
             sessions=sessions.SessionStore(
                 redis,
@@ -256,6 +314,14 @@ async def open_services(
             brief_events=events.RunEvents(redis, prefix="brief"),
             memory=memory,
             sectors=_sectors(settings),
+            alerts=alerts.Alerts(redis),
+            budget=budget.CloudBudget(redis, settings.monthly_budget_usd),
+            admin=administration,
+            user_admin=user_store,
+            scorecard=scorecard.PostgresScorecard(pool),
+            summarizer=_summarizer(settings),
+            cache=redis,
+            schedule=schedule.PostgresSchedule(pool),
         )
 
 
@@ -284,9 +350,13 @@ def create_app(
             app.state.services = services
             yield
             return
-        async with open_services(settings) as opened:
-            app.state.services = opened
-            yield
+        telemetry.setup("ai-api", os.environ)
+        try:
+            async with open_services(settings) as opened:
+                app.state.services = opened
+                yield
+        finally:
+            telemetry.shutdown()
 
     docs = settings.expose_docs
     app = fastapi.FastAPI(
@@ -303,7 +373,17 @@ def create_app(
         request: fastapi.Request,
         call_next: Callable[[fastapi.Request], Awaitable[fastapi.Response]],
     ) -> fastapi.Response:
+        started = time.monotonic()
         response = await call_next(request)
+        # The route template (/news/{item_id}), never the raw path: ids and
+        # query strings would make one series per request.
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        telemetry.record_http(
+            route,
+            request.method,
+            response.status_code,
+            time.monotonic() - started,
+        )
         # Swagger UI (EXPOSE_DOCS=true, local debugging only) needs scripts.
         swagger = docs and request.url.path == "/docs"
         for name, value in _SECURITY_HEADERS.items():
@@ -319,4 +399,7 @@ def create_app(
     app.include_router(review.router)
     app.include_router(brief_routes.router)
     app.include_router(me.router)
+    app.include_router(alert_routes.router)
+    app.include_router(vendor.router)
+    app.include_router(admin_routes.router)
     return app

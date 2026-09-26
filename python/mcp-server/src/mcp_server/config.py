@@ -73,6 +73,8 @@ class Settings:
         gateway_key: LLM_GATEWAY_KEY.
         embed_model: EMBED_MODEL, default ``embed-<HW_PROFILE>``.
         query_prefix: The embedding model's query prefix.
+        vector_store: VECTOR_STORE: ``pgvector`` (``ai.chunk``, increment
+            6) or ``chroma``.
         chroma_host: CHROMA_HOST.
         chroma_port: CHROMA_PORT.
         collection: The trusted corpus collection.
@@ -96,6 +98,7 @@ class Settings:
     gateway_key: str = dataclasses.field(default="", repr=False)
     embed_model: str = "embed-gpu4gb"
     query_prefix: str = "search_query: "
+    vector_store: str = "chroma"
     chroma_host: str = "chroma"
     chroma_port: int = 8000
     collection: str = "trusted_corpus"
@@ -129,6 +132,11 @@ class Settings:
             ).split(",")
             if h.strip()
         )
+        store = env.get("VECTOR_STORE", "chroma").strip().lower()
+        if store not in ("chroma", "pgvector"):
+            raise ConfigError(
+                f"VECTOR_STORE must be chroma or pgvector, got {store!r}"
+            )
         return cls(
             token=_secret(env, "MCP_SERVICE_TOKEN"),
             db_host=env.get("PGHOST", "postgres"),
@@ -145,6 +153,7 @@ class Settings:
             embed_model=env.get("EMBED_MODEL", "").strip()
             or f"embed-{profile}",
             query_prefix=_QUERY_PREFIX.get(profile, ""),
+            vector_store=store,
             chroma_host=env.get("CHROMA_HOST", "chroma"),
             chroma_port=_int(env, "CHROMA_PORT", 8000),
             searxng_url=env.get("SEARXNG_URL", "http://searxng:8080").rstrip(

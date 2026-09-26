@@ -44,6 +44,7 @@ import taskiq
 from ai_api import briefs
 from ai_api import config
 from ai_api import memory as memory_lib
+from ai_api import telemetry
 from ai_api.agents import brief as brief_lib
 from ai_api.agents import skills
 from ai_api.guard import llama_guard
@@ -274,6 +275,7 @@ class Worker:
                 members,
             ),
         )
+        telemetry.worker_started()
         _log.info(
             "ai-worker ready: judge %s, cloud %s, guard %s, classic ML %s,"
             " brief %s",
@@ -290,6 +292,7 @@ class Worker:
         if self._runtime is None:
             return
         self._runtime.tracer.flush()
+        telemetry.shutdown()
         await self._runtime.pool.close()
         await self._runtime.checkpoint_pool.close()
         await self._runtime.memory_pool.close()
@@ -333,6 +336,7 @@ class Worker:
         snapshot = await runtime.graph.aget_state(config)
         if snapshot.values.get("progress"):
             _log.info("%s already verified: skipped", thread)
+            telemetry.verify_item("skipped")
             return "skipped"
         payload = {
             "run_id": run_id,
@@ -349,7 +353,9 @@ class Worker:
                 _log.warning("%s attempt %d failed: %r", thread, attempt, e)
                 continue
             snapshot = await runtime.graph.aget_state(config)
-            return "review" if snapshot.next else "done"
+            outcome = "review" if snapshot.next else "done"
+            telemetry.verify_item(outcome)
+            return outcome
         progress = await runtime.deps.repo.save_failure(
             run_id, news_id, thread, repr(error)
         )
@@ -360,6 +366,7 @@ class Worker:
                 progress,
                 {"news_id": news_id, "verdict": None, "failed": True},
             )
+        telemetry.verify_item("failed")
         return "failed"
 
     async def resume(
@@ -398,6 +405,7 @@ def build_broker() -> Any:
     """The worker's broker with the tasks (the taskiq CLI's factory)."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     settings = config.VerifySettings.from_env(os.environ)
+    telemetry.setup("ai-worker", os.environ)
     broker = queue.make_broker(settings.redis_host, settings.redis_password)
     worker = Worker(settings, broker)
     broker.add_event_handler(taskiq.TaskiqEvents.WORKER_STARTUP, worker.start)

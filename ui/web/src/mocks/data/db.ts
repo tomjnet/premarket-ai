@@ -1,11 +1,17 @@
 import type {TokenResponseWire} from '@/api/schemas/auth';
 import type {NewsDetailWire, Verdict} from '@/api/schemas/news';
+import type {
+  AdminSourceWire,
+  AdminUserWire,
+  AlertWire,
+  CloudSwitches,
+} from '@/api/schemas/ops';
 import {ENV} from '@/lib/env';
 import {todayInNewYork} from '@/lib/time';
 
 import {emptyDay, generateDay, parseItemId} from './generator';
 import type {GeneratedDay} from './generator';
-import {MOCK_PASSWORD, MOCK_USERS} from './users';
+import {MOCK_PASSWORD, MOCK_USERS, mockAdminUsers, mockSources} from './users';
 
 /** How fast the mock "model" writes: about 25 tokens a second. */
 const CHAT_TOKEN_DELAY_MS = 40;
@@ -100,6 +106,15 @@ export class MockDb {
   readonly reviews = new Map<number, ReviewRecord>();
   /** Verify runs started in this session, oldest first. */
   readonly startedRuns: StartedRun[] = [];
+  /** Increment 6: the operations banner's events, oldest first. */
+  readonly alerts: AlertWire[] = [];
+  /** This month's cloud spend and cap (`GET /llm/budget`). */
+  cloudSpendUsd = 0;
+  cloudCapUsd = 20;
+  /** The admin page's users, sources and cloud switches. */
+  readonly adminUsers = new Map<string, AdminUserWire>();
+  readonly sources = new Map<string, AdminSourceWire>();
+  cloudSwitches: CloudSwitches = {enabled: true, judge: true, brief: true};
   private runCounter = 0;
   private readonly accessTokens = new Map<string, AccessToken>();
   private tokenCounter = 0;
@@ -124,6 +139,23 @@ export class MockDb {
     this.runCounter = 0;
     this.accessTokens.clear();
     this.runStarts.clear();
+    this.alerts.length = 0;
+    this.cloudSpendUsd = 0;
+    this.cloudCapUsd = 20;
+    this.cloudSwitches = {enabled: true, judge: true, brief: true};
+    this.seedAdmin();
+  }
+
+  /** The admin page's starting users and sources. */
+  seedAdmin(): void {
+    this.adminUsers.clear();
+    for (const user of mockAdminUsers()) {
+      this.adminUsers.set(user.username, user);
+    }
+    this.sources.clear();
+    for (const source of mockSources()) {
+      this.sources.set(source.domain, source);
+    }
   }
 
   /** A token response for a right password, undefined otherwise. */
@@ -257,3 +289,4 @@ export class MockDb {
 
 /** The one mock database the handlers share. */
 export const db = new MockDb();
+db.seedAdmin();

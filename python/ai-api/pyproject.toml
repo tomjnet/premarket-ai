@@ -42,6 +42,11 @@ dependencies = [
   "taskiq-redis==1.2.3",
   "langchain-mcp-adapters==0.3.2",
   "mcp==1.30.0",
+  # Increment 6: OpenTelemetry metrics (GenAI semantic conventions) to the
+  # collector over OTLP/HTTP. Same versions chromadb-client already pulls.
+  "opentelemetry-api==1.45.0",
+  "opentelemetry-sdk==1.45.0",
+  "opentelemetry-exporter-otlp-proto-http==1.45.0",
 ]
 
 [project.optional-dependencies]

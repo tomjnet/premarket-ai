@@ -1,0 +1,30 @@
+# premarket-ai Prometheus (profile observability, increment 6).
+# Two sources:
+#   otel-collector:8889  OTLP metrics of ai-api, ai-worker and the batch
+#                        commands (GenAI calls, HTTP, worker up/starts)
+#   scheduler:9464       SLA checks, job runs, and today's operations
+#                        (verdict mix, dedup hits, backlog, cloud spend)
+# Grafana reads it and owns the alert rules (podman/config/grafana).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: otel-collector
+    # Keep the job/instance labels the collector derives from each
+    # process's service.name and service.instance.id.
+    honor_labels: true
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  - job_name: scheduler
+    # Each scrape runs a few queries: every 30 s is plenty.
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: ["scheduler:9464"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

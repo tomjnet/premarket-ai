@@ -1,12 +1,13 @@
 """The news feed: raw news through the ``ai.v_*`` views, plus rule results.
 
 From increment 2 the API reads raw news only through ``ai.v_raw_news`` and
-``ai.v_ingest_run`` (the strangler-fig seam; they switch from ``legacy.*`` to
-``ingest.*`` in increment 6), joined with the rule engine's results.
+``ai.v_ingest_run`` (the strangler-fig seam; they read ``legacy.*`` until
+increment 6 and the C++20 ingester's ``ingest.*`` since), joined with the
+rule engine's results.
 
 Duplicates: once the rules have checked an item, ``is_dup`` / ``dup_of``
 come from the rule engine (URL, exact and near copies, also of earlier
-days). Before that, they're the legacy exact-hash flags.
+days). Before that, they're the ingester's exact-hash flags.
 
 Verdicts (increment 4): a unique item shows its own; a duplicate shows its
 original's (``verdict_source = inherited``), except a stale copy, which is

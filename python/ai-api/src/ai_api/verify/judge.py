@@ -178,7 +178,7 @@ class Judge:
         """True when a cloud model is set and the budget allows a call."""
         if self._cloud is None or self._budget is None:
             return False
-        return await self._budget.allows()
+        return await self._budget.allows("judge")
 
     async def _ask(
         self,

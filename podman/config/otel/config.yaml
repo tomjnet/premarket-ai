@@ -1,0 +1,43 @@
+# premarket-ai OpenTelemetry Collector (profile observability, increment 6).
+# ai-api, ai-worker and the ai-api batch commands push their metrics over
+# OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318);
+# Prometheus scrapes them here on :8889. Traces stay in Langfuse.
+#
+# Each process reports job="premarket-ai/<service>" and
+# instance="<service.instance.id>". A process that stops exporting drops out
+# after metric_expiration, so "workers up" is live within a minute.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 160
+    spike_limit_mib: 40
+  batch:
+    timeout: 5s
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    metric_expiration: 1m
+    send_timestamps: false
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+  telemetry:
+    logs:
+      level: warn

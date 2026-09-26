@@ -4,6 +4,7 @@ import {Link, NavLink} from 'react-router';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {useSession} from '@/features/auth/session-context';
+import {canSeeOps, isAdmin} from '@/features/ops/ops';
 import {canReview} from '@/features/review/review';
 import {formatLongDate, todayInNewYork} from '@/lib/time';
 
@@ -69,6 +70,20 @@ export function AppHeader() {
                 <li>
                   <NavLink to="/review" className={navLinkClass}>
                     Review queue
+                  </NavLink>
+                </li>
+              )}
+              {canSeeOps(user.role) && (
+                <li>
+                  <NavLink to="/scorecard" className={navLinkClass}>
+                    Vendor scorecard
+                  </NavLink>
+                </li>
+              )}
+              {isAdmin(user.role) && (
+                <li>
+                  <NavLink to="/admin" className={navLinkClass}>
+                    Admin
                   </NavLink>
                 </li>
               )}

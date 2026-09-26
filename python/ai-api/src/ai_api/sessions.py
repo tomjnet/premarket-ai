@@ -199,6 +199,22 @@ class SessionStore:
         """Ends a session and every access token that names it."""
         await self._redis.delete(_SESSION_KEY.format(sid=session_id))
 
+    async def revoke_user(self, username: str) -> int:
+        """Ends every session of a user (disabled or role changed).
+
+        Returns:
+            How many sessions were ended.
+        """
+        ended = 0
+        async for key in self._redis.scan_iter(
+            _SESSION_KEY.format(sid="*"), count=500
+        ):
+            if key.count(":") != 1:
+                continue  # a rotation grace key, not a session
+            if await self._redis.hget(key, "username") == username:
+                ended += await self._redis.delete(key)
+        return ended
+
     async def revoke_token(self, refresh_token: str) -> None:
         """Ends the session a refresh token belongs to (logout)."""
         parts = _split(refresh_token)

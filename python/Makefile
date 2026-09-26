@@ -23,25 +23,43 @@ API_BUILD = $(ENGINE) build -f podman/ai-api/Containerfile \
 WEB_BUILD = $(ENGINE) build -f podman/web/Containerfile ui/web
 MCP_BUILD = $(ENGINE) build -f podman/mcp-server/Containerfile \
   --build-context config=python/config python/mcp-server
+# Increment 6: the scheduler is built on the ai-api image (it runs the
+# ai-api commands), so that image is built first.
+SCHEDULER_BUILD = $(ENGINE) build -f podman/scheduler/Containerfile \
+  --build-arg AI_API_IMAGE=$(PREFIX)/ai-api:dev python/scheduler
 # The GPU evals run on the compose network (gateway, chroma, reranker).
 EVAL_RUN = $(COMPOSE) --profile eval run --rm --no-deps ai-eval
 PSQL = $(COMPOSE) exec -T postgres psql -U premarket -d premarket
 # Increment 1 runs the legacy pipeline and the website side by side;
-# increment 2 adds the C++20 ingester (profile legacy) and the rule checks;
+# increment 2 adds the C++20 ingester and the rule checks;
 # increment 3 adds the LLM gateway, chroma and the reranker (profile ai);
 # increment 4 adds ai-worker, mcp-server and searxng (profile ai);
-# increment 5 adds the brief (ai-worker) and retires the PDF.
+# increment 5 adds the brief (ai-worker) and retires the PDF;
+# increment 6 retires the C++11 legacy ingester: the C++20 one is in the ai
+# profile, and LEGACY_INGEST=true (in .env) brings the legacy one back in
+# parallel, with the parity check, for before/after videos.
 # `run` always uses --no-deps: with Podman, compose recreates the running
 # postgres for every `run` with dependencies, and ai-api would lose its
 # connections for a few seconds. `up` (or `demo`) starts everything first.
-PROFILES = --profile legacy --profile ai
+LEGACY_INGEST ?= $(or $(shell grep -s '^LEGACY_INGEST=' $(ROOT)/.env \
+  | cut -d= -f2),false)
+LEGACY_ON = $(filter true,$(LEGACY_INGEST))
+# Increment 6: ChromaDB runs only while it is the vector store
+# (VECTOR_STORE=chroma, the default until `migrate-vectors`).
+VECTOR_STORE ?= $(or $(shell grep -s '^VECTOR_STORE=' $(ROOT)/.env \
+  | cut -d= -f2),chroma)
+PROFILES = --profile ai $(if $(LEGACY_ON),--profile legacy) \
+  $(if $(filter chroma,$(VECTOR_STORE)),--profile chroma)
+# Every profile, so `down` and `reset` stop whatever was started.
+ALL_PROFILES = --profile full --profile legacy
 # Secrets `env` fills with random values when .env has them empty or missing.
 SECRETS = JWT_SECRET REDIS_PASSWORD AI_DB_PASSWORD LLM_GATEWAY_KEY \
   LANGFUSE_KEY_ID LANGFUSE_SECRET LANGFUSE_DB_PASSWORD \
   LANGFUSE_CLICKHOUSE_PASSWORD LANGFUSE_MINIO_PASSWORD \
   LANGFUSE_REDIS_PASSWORD LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY \
   LANGFUSE_NEXTAUTH_SECRET LANGFUSE_INIT_USER_PASSWORD \
-  WORKER_DB_PASSWORD MCP_DB_PASSWORD MCP_SERVICE_TOKEN SEARXNG_SECRET
+  WORKER_DB_PASSWORD MCP_DB_PASSWORD MCP_SERVICE_TOKEN SEARXNG_SECRET \
+  ALERT_WEBHOOK_TOKEN GRAFANA_ADMIN_PASSWORD
 # Settings added to an older .env (from increments 0 and 1).
 NEW_SETTINGS = WEB_PORT WEB_BIND DEMO_USER_PASSWORD ACCESS_TOKEN_TTL_S \
   REFRESH_TOKEN_TTL_S LOGIN_MAX_FAILURES LOGIN_LOCKOUT_S \
@@ -57,7 +75,10 @@ NEW_SETTINGS = WEB_PORT WEB_BIND DEMO_USER_PASSWORD ACCESS_TOKEN_TTL_S \
   ML_BASELINE WORKER_CONCURRENCY WORKER_MEM MCP_BIND MCP_PORT \
   WEB_SEARCH_PER_MIN PRICES_PER_MIN \
   LEGACY_PDF_ENABLED BRIEF_MODEL CHAT_AGENTS AGENT_MAX_TOOL_CALLS \
-  CHAT_CACHE CHAT_CACHE_TTL_S CHAT_CACHE_DISTANCE
+  CHAT_CACHE CHAT_CACHE_TTL_S CHAT_CACHE_DISTANCE \
+  LEGACY_INGEST RAG_HYBRID RUN_MODE RETENTION_DAYS SLA_BACKLOG_MAX \
+  SCHEDULER_CORPUS SCHEDULER_MEM OTEL_EXPORTER_OTLP_ENDPOINT GRAFANA_PORT \
+  PROMETHEUS_RETENTION VENDOR_CONTRACT_ITEMS
 WEB_PORT ?= $(shell grep -s '^WEB_PORT=' $(ROOT)/.env | cut -d= -f2)
 # Increment 5: the web brief replaced the PDF (true brings it back).
 LEGACY_PDF_ENABLED ?= $(or $(shell grep -s '^LEGACY_PDF_ENABLED=' \
@@ -69,12 +90,14 @@ EDITION ?= morning
         cpp-asan cpp-tsan cpp-bench sanitizers check demo ingest report \
         runs pdf feed-summary psql reset api-test api-lint web-image smoke \
         enrich corpus reindex llm-status ai-runs eval-image eval-ai \
-        bench-models eval-rag obs-up obs-down verify demo-open \
-        verify-runs review-queue mcp-test mcp-lint mcp-tools mcp-call \
-        ml-train worker-logs brief brief-refresh briefs brief-usage \
-        web openapi audit ingest-legacy ingest-modern parity rules registry \
-        dedup-rebuild rule-runs eval bench ingest-test ingest-lint \
-        ingest-asan ingest-tsan fastpath-test fastpath-lint fastpath-asan
+        bench-models eval-rag migrate-vectors obs-up obs-down verify \
+        demo-open verify-runs review-queue mcp-test mcp-lint mcp-tools \
+        mcp-call ml-train worker-logs brief brief-refresh briefs \
+        brief-usage web openapi audit ingest-legacy ingest-modern parity \
+        rules registry dedup-rebuild rule-runs eval bench ingest-test \
+        ingest-lint ingest-asan ingest-tsan fastpath-test fastpath-lint \
+        fastpath-asan api-image scheduler-test scheduler-lint schedule-plan \
+        schedule-run sla scheduler-logs retention scorecard
 
 help: ## List the tasks
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -96,21 +119,23 @@ env: ## Create .env from .env.example and fill empty secrets with random values
 	@chmod 600 $(ROOT)/.env
 
 # --- build and run ----------------------------------------------------------
-build: env ## Build the images (vendor-sim, legacy, ingest, ai-api, worker, mcp, web)
+build: env ## Build the images (vendor-sim, ingest, ai-api, worker, mcp, scheduler, web)
 	cd $(ROOT) && $(VENDOR_BUILD) --target runtime -t $(PREFIX)/vendor-sim:dev
-	cd $(ROOT) && $(LEGACY_BUILD) --target runtime -t $(PREFIX)/legacy:dev
+	$(if $(LEGACY_ON),cd $(ROOT) && $(LEGACY_BUILD) --target runtime \
+	  -t $(PREFIX)/legacy:dev)
 	cd $(ROOT) && $(INGEST_BUILD) --target runtime -t $(PREFIX)/ingest:dev
 	cd $(ROOT) && $(API_BUILD) --target runtime -t $(PREFIX)/ai-api:dev
 	cd $(ROOT) && $(API_BUILD) --target worker -t $(PREFIX)/ai-api:worker
 	cd $(ROOT) && $(MCP_BUILD) --target runtime -t $(PREFIX)/mcp-server:dev
+	cd $(ROOT) && $(SCHEDULER_BUILD) --target runtime -t $(PREFIX)/scheduler:dev
 	cd $(ROOT) && $(WEB_BUILD) --target runtime -t $(PREFIX)/web:dev
 
-up: build ## Build (cached) and start everything: both ingesters + website
+up: build ## Build (cached) and start everything: C++20 ingest + website
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) up -d --wait
 	@$(MAKE) --no-print-directory web
 
 down: ## Stop the stack (volumes are kept)
-	cd $(ROOT) && $(COMPOSE) --profile full down
+	cd $(ROOT) && $(COMPOSE) $(ALL_PROFILES) down
 
 logs: ## Follow the logs of all services
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) logs -f --tail=100
@@ -119,7 +144,7 @@ ps: ## Show service status
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) ps
 
 reset: ## Stop the stack and DELETE its volumes (database, PDFs, labels)
-	cd $(ROOT) && $(COMPOSE) --profile full down -v
+	cd $(ROOT) && $(COMPOSE) $(ALL_PROFILES) down -v
 
 web: ## Print the website URL and the demo logins
 	@echo "Website: http://localhost:$(or $(WEB_PORT),8080)"
@@ -127,19 +152,22 @@ web: ## Print the website URL and the demo logins
 	@echo "Review:  analyst1 or admin1 -> Review queue; MCP: make -C python mcp-tools"
 	@echo "Brief:   Today's brief (every role); My watchlist; Ask the News (agents)"
 
-obs-up: ## Start Langfuse (profile observability); set LANGFUSE_TRACING=true
+obs-up: ## Start Langfuse, OTel Collector, Prometheus, Grafana (observability)
 	cd $(ROOT) && $(COMPOSE) --profile observability up -d --wait
 	@echo "Langfuse: http://localhost:$(or $(LANGFUSE_PORT),3000)"
 	@echo "Login:    LANGFUSE_INIT_USER_EMAIL / LANGFUSE_INIT_USER_PASSWORD in .env"
+	@echo "Grafana:  http://localhost:$(or $(GRAFANA_PORT),3001) (admin / GRAFANA_ADMIN_PASSWORD in .env)"
+	@echo "Metrics:  set OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 in .env, then make -C python up"
 
-obs-down: ## Stop Langfuse (its volumes are kept)
+obs-down: ## Stop the observability profile (its volumes are kept)
 	cd $(ROOT) && $(COMPOSE) --profile observability stop
 
 # --- tests ------------------------------------------------------------------
-test: ## Unit tests: pytest (vendor-sim, ai-api + parity, mcp) + GoogleTest (C++)
+test: ## Unit tests: pytest (vendor-sim, ai-api + parity, mcp, scheduler) + GoogleTest (C++)
 	cd $(ROOT) && $(VENDOR_BUILD) --target test -t $(PREFIX)/vendor-sim:test
 	$(MAKE) --no-print-directory api-test
 	$(MAKE) --no-print-directory mcp-test
+	$(MAKE) --no-print-directory scheduler-test
 	$(MAKE) --no-print-directory cpp-test
 	$(MAKE) --no-print-directory ingest-test
 	$(MAKE) --no-print-directory fastpath-test
@@ -148,6 +176,7 @@ lint: ## Style: ruff + clang-format/cpplint/clang-tidy (all C++ projects)
 	cd $(ROOT) && $(VENDOR_BUILD) --target lint -t $(PREFIX)/vendor-sim:lint
 	$(MAKE) --no-print-directory api-lint
 	$(MAKE) --no-print-directory mcp-lint
+	$(MAKE) --no-print-directory scheduler-lint
 	$(MAKE) --no-print-directory cpp-lint
 	$(MAKE) --no-print-directory ingest-lint
 	$(MAKE) --no-print-directory fastpath-lint
@@ -163,6 +192,15 @@ mcp-test: ## mcp-server pytest (tools, SSRF guard, token, host check)
 
 mcp-lint: ## mcp-server ruff
 	cd $(ROOT) && $(MCP_BUILD) --target lint -t $(PREFIX)/mcp-server:lint
+
+api-image: ## Build only the ai-api runtime image (the scheduler's base)
+	cd $(ROOT) && $(API_BUILD) --target runtime -t $(PREFIX)/ai-api:dev
+
+scheduler-test: api-image ## scheduler pytest (timeline, NYSE calendar, jobs, SLA)
+	cd $(ROOT) && $(SCHEDULER_BUILD) --target test -t $(PREFIX)/scheduler:test
+
+scheduler-lint: api-image ## scheduler ruff
+	cd $(ROOT) && $(SCHEDULER_BUILD) --target lint -t $(PREFIX)/scheduler:lint
 
 web-image: ## Build only the web image (production UI bundle + nginx)
 	cd $(ROOT) && $(WEB_BUILD) --target runtime -t $(PREFIX)/web:dev
@@ -186,6 +224,19 @@ bench-models: eval-image ## Local model benchmark -> docs/benchmarks (GPU host)
 
 eval-rag: eval-image ## RAGAS baseline of "Ask the News" -> docs/benchmarks
 	cd $(ROOT) && $(EVAL_RUN) python -m evals.rag_eval --out /out
+
+# Increment 6: re-embeds ai.chunk into pgvector (same model), compares the
+# top-k chunks of the RAG eval questions with ChromaDB, writes
+# docs/benchmarks/vector-migration-*.md, then sets VECTOR_STORE=pgvector.
+migrate-vectors: eval-image ## ChromaDB -> pgvector: re-embed, compare, switch
+	cd $(ROOT) && $(COMPOSE) --profile chroma up -d --wait chroma
+	cd $(ROOT) && $(EVAL_RUN) python -m evals.migrate_vectors --check \
+	  --out /out
+	cd $(ROOT) && if grep -q '^VECTOR_STORE=' .env; then \
+	  sed -i 's/^VECTOR_STORE=.*/VECTOR_STORE=pgvector/' .env; \
+	else echo 'VECTOR_STORE=pgvector' >> .env; fi
+	@echo "VECTOR_STORE=pgvector in .env: now make -C python up, then"
+	@echo "make -C python eval-rag (RAGAS on pgvector vs the chroma baseline)"
 
 cpp-test: ## C++11 legacy: debug build + ctest
 	cd $(ROOT) && $(LEGACY_BUILD) --target test -t $(PREFIX)/legacy:test
@@ -241,7 +292,9 @@ check: test lint sanitizers eval ## Everything CI runs
 # the review queue (an analyst approves one and the worker resumes it), the
 # brief (only VERIFIED and "Unconfirmed - watch" items) with the watchlist,
 # the semantic cache and the chat agents, the PDF switched off, plus the
-# security checks of increment 1.
+# security checks of increment 1. Increment 6: the AI reads the C++20
+# ingester, pgvector holds the corpus, the scorecard, the budget and admin
+# endpoints, and with RUN_MODE=production every SLA of the day green.
 smoke: ## Website check for DATE: brief, agents, verdicts, review, rules, login
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api smoke --base-url http://edge:8080 --date $(DATE)
@@ -260,25 +313,30 @@ audit: ## Last 20 auth events (logins, failures, lockouts, logouts)
 # Increment 5: the brief replaces the PDF (report and pdf only run with
 # LEGACY_PDF_ENABLED=true).
 PDF_STEPS = $(if $(filter true,$(LEGACY_PDF_ENABLED)),report pdf,)
+# Increment 6: the parity check only runs when the retired legacy ingester
+# ran too (LEGACY_INGEST=true).
+PARITY_STEP = $(if $(LEGACY_ON),parity,)
 demo: up ## Whole day: history + DATE (ingest, rules, AI, verify, brief), check
 	@for i in $$(seq $(HISTORY_DAYS) -1 1); do \
 	  d=$$(date -d "$(DATE) -$$i day" +%F); \
 	  echo "== history $$d"; \
-	  $(MAKE) --no-print-directory ingest parity rules DATE=$$d || exit 1; \
+	  $(MAKE) --no-print-directory ingest $(PARITY_STEP) rules DATE=$$d \
+	    || exit 1; \
 	done
 	$(MAKE) --no-print-directory corpus
-	$(MAKE) --no-print-directory ingest parity rules enrich verify brief \
-	  $(PDF_STEPS) runs smoke web DATE=$(DATE)
+	$(MAKE) --no-print-directory ingest $(PARITY_STEP) rules enrich verify \
+	  brief scorecard $(PDF_STEPS) runs smoke web DATE=$(DATE)
 
-ingest: ingest-legacy ingest-modern ## Ingest DATE with both ingesters
+# The C++20 ingester, plus the retired legacy one when LEGACY_INGEST=true.
+ingest: ingest-modern $(if $(LEGACY_ON),ingest-legacy) ## Ingest DATE (C++20)
 
-ingest-legacy: ## Run the C++11 legacy ingest for DATE
+ingest-legacy: ## Run the retired C++11 legacy ingest for DATE (videos)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps legacy ingest --date $(DATE)
 
-ingest-modern: ## Run the C++20 ingest for DATE (shadow schema ingest.*)
+ingest-modern: ## Run the C++20 ingest for DATE (schema ingest.*)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ingest ingest --date $(DATE)
 
-parity: ## Compare DATE's legacy and C++20 rows (must be 0 differences)
+parity: ## Compare DATE's legacy and C++20 rows (after ingest-legacy)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ingest parity --date $(DATE)
 
 rules: ## Rule checks for DATE: dedup L0-L2, SEC registry, sources, stale
@@ -297,7 +355,7 @@ corpus: ## Download new EDGAR/Fed/SEC documents and index them (SEC_USER_AGENT)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api corpus
 
-reindex: ## Rebuild the vector store (chroma) from ai.chunk
+reindex: ## Rebuild the vector store (VECTOR_STORE) from ai.chunk
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api reindex
 
@@ -334,6 +392,31 @@ brief-usage: ## Who opened the brief, per day (the PDF retirement check)
 	  actor, count(*) AS views, to_char(max(at) AT TIME ZONE \
 	  'America/New_York', 'MM-DD HH24:MI') AS last_et FROM ai.audit_log \
 	  WHERE action = 'brief' GROUP BY 1, 2 ORDER BY 1 DESC, 2 LIMIT 30"
+
+# --- increment 6: production ---------------------------------------------------
+schedule-plan: ## The scheduler's timeline for DATE (NYSE calendar, RUN_MODE)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) exec -T scheduler \
+	  scheduler plan --date $(DATE)
+
+JOB ?= pipeline
+schedule-run: ## Run one scheduler job now: JOB=pipeline|brief|sla-brief... DATE
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) exec -T scheduler \
+	  scheduler run $(JOB) --date $(DATE) $(if $(FORCE),--force)
+
+sla: ## DATE's scheduled jobs and SLA checks (exit 1 if one was breached)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) exec -T scheduler \
+	  scheduler status --date $(DATE)
+
+scheduler-logs: ## Follow the scheduler's log
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) logs -f --tail=100 scheduler
+
+scorecard: ## DATE's vendor scorecard (billable vs contracted items)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api scorecard --date $(DATE)
+
+retention: ## Delete AI results older than RETENTION_DAYS (nightly job)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api retention
 
 demo-open: ## Market open for DATE: pending reviews expire (verdicts stand)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \

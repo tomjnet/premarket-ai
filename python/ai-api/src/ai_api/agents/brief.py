@@ -330,7 +330,7 @@ class Writer:
         return (
             self._cloud is not None
             and self._budget is not None
-            and await self._budget.allows()
+            and await self._budget.allows("brief")
         )
 
     def _messages(

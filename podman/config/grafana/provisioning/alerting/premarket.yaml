@@ -1,0 +1,136 @@
+# premarket-ai Grafana alerting (increment 6): rules on Prometheus, one
+# contact point, the ai-api webhook. ai-api puts each alert on the Redis
+# Stream `alerts`, and the web app shows it as a banner to analysts and
+# admins. There's no e-mail, chat or pager in the lab.
+#
+# The SLA deadlines (ingest 06:15, backlog 06:30, verification 07:00, brief
+# 07:30) are checked by the scheduler itself, which publishes straight to the
+# same stream, so they work without this profile. The cloud budget alerts at
+# 80% and 100% come from the budget code. These rules cover what only the
+# metrics can see: the workers.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: premarket-banner
+    receivers:
+      - uid: premarket-banner-webhook
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: http://ai-api:8000/alerts/grafana
+          httpMethod: POST
+          authorization_scheme: Bearer
+          authorization_credentials: ${ALERT_WEBHOOK_TOKEN}
+
+policies:
+  - orgId: 1
+    receiver: premarket-banner
+    group_by: ["alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
+groups:
+  - orgId: 1
+    name: premarket-workers
+    folder: premarket-ai
+    interval: 1m
+    rules:
+      - uid: premarket-worker-down
+        title: WorkerDown
+        condition: C
+        for: 5m
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: No verification worker is running
+          description: >-
+            No ai-worker process has reported premarket_worker_up for 5
+            minutes. Verify jobs and briefs wait in the queue. Check
+            `make -C python worker-logs` (and that OTEL_EXPORTER_OTLP_ENDPOINT
+            is set, or the workers don't report at all).
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(premarket_worker_up) or vector(0)
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+
+      - uid: premarket-worker-crash-loop
+        title: WorkerCrashLoop
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: The verification worker keeps restarting
+          description: >-
+            Three or more ai-worker processes stopped in the last 15 minutes
+            (processes seen minus processes up). Look for an out-of-memory kill
+            or a startup error in `make -C python worker-logs`.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: >-
+                (count(count_over_time(premarket_worker_up[15m])) or vector(0))
+                - (count(premarket_worker_up) or vector(0))
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [2]}
+
+      - uid: premarket-verify-stalled
+        title: VerifyStalled
+        condition: C
+        for: 15m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: Verification has made no progress for 15 minutes
+          description: >-
+            Today's verify run still has queued items, but none has finished
+            in 15 minutes. A worker may be stuck on the GPU host or the MCP
+            server.
+        data:
+          - refId: A
+            relativeTimeRange: {from: 900, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: >-
+                (max(premarket_verify_backlog) > 0)
+                and (max(delta(premarket_verify_done[15m])) == 0)
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}

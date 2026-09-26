@@ -15,8 +15,18 @@
 # python/skills), a semantic answer cache in Redis and long-term memory
 # (watchlists, LangGraph store in Postgres); ai-worker writes the pre-market
 # brief; the legacy PDF is switched off (LEGACY_PDF_ENABLED=false).
-# Profiles: legacy (inc 0+), ai (inc 1+), observability (inc 3+), full.
-#   podman compose --profile legacy --profile ai up -d
+# Increment 6 (production): the C++11 legacy ingester is retired. The C++20
+# ingester is the only ingest (profile ai) and ai.v_raw_news reads
+# ingest.*; the legacy container is opt-in (profile legacy) for before/after
+# videos. The RAG vectors move to pgvector (ai.chunk.embedding,
+# VECTOR_STORE=pgvector after `make -C python migrate-vectors`); ChromaDB
+# stays under the profile chroma.
+# The scheduler runs the AI side's day on the NYSE calendar (RUN_MODE), and
+# the observability profile adds the OpenTelemetry Collector, Prometheus
+# and Grafana (dashboard + alert rules -> the banner) next to Langfuse.
+# Profiles: ai (inc 1+), observability (inc 3+), legacy and chroma (opt-in
+# from inc 6), full.
+#   podman compose --profile ai up -d
 # Ollama is not a service: it runs on the GPU host (OLLAMA_BASE_URL).
 #
 # Only `edge` (plus Langfuse and the MCP server, on loopback) publishes a
@@ -54,7 +64,9 @@ x-ai-env: &ai-env
   LLM_GATEWAY_KEY: sk-${LLM_GATEWAY_KEY:?run make -C python env}
   HW_PROFILE: ${HW_PROFILE:-gpu4gb}
   LLM_CONCURRENCY: ${LLM_CONCURRENCY:-2}
+  # chroma until `make -C python migrate-vectors` sets pgvector in .env.
   VECTOR_STORE: ${VECTOR_STORE:-chroma}
+  RAG_HYBRID: ${RAG_HYBRID:-true}
   CHROMA_HOST: chroma
   CHROMA_PORT: "8000"
   RERANKER_URL: http://reranker:8080
@@ -68,6 +80,36 @@ x-ai-env: &ai-env
   LANGFUSE_SECRET_KEY: sk-lf-${LANGFUSE_SECRET:-}
   # Increment 4: Llama Guard on news and chat (guard-<HW_PROFILE>).
   LLAMA_GUARD: ${LLAMA_GUARD:-true}
+  # Increment 6: OpenTelemetry metrics to the collector (observability
+  # profile); empty means no metrics are exported.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+
+# The database owner's batch jobs: the one-shot ai-api-init (migrations,
+# `make -C python rules`, enrich, verify, brief...) and, from increment 6,
+# the scheduler, which runs the same commands on the NYSE timeline.
+x-owner-jobs-env: &owner-jobs-env
+  <<: [*pg-env, *ai-env]
+  TZ: UTC
+  REDIS_HOST: redis
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?run make -C python env}
+  SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+  REGISTRY_MAX_AGE_DAYS: ${REGISTRY_MAX_AGE_DAYS:-7}
+  STALE_MAX_AGE_DAYS: ${STALE_MAX_AGE_DAYS:-30}
+  DEDUP_WINDOW_DAYS: ${DEDUP_WINDOW_DAYS:-7}
+  DEDUP_SIMHASH_NGRAM: ${DEDUP_SIMHASH_NGRAM:-2}
+  DEDUP_SIMHASH_MAX_HAMMING: ${DEDUP_SIMHASH_MAX_HAMMING:-10}
+  DEDUP_NEAR_MAX_WORD_EDITS: ${DEDUP_NEAR_MAX_WORD_EDITS:-3}
+  CORPUS_MONTHS: ${CORPUS_MONTHS:-12}
+  CORPUS_MAX_FILINGS: ${CORPUS_MAX_FILINGS:-8}
+  CORPUS_MAX_RELEASES: ${CORPUS_MAX_RELEASES:-40}
+  # Increment 5: the smoke check reports whether the PDF is off.
+  LEGACY_PDF_ENABLED: ${LEGACY_PDF_ENABLED:-false}
+  # Increment 6: the nightly cleanup, the production mode, the budget gauge.
+  RETENTION_DAYS: ${RETENTION_DAYS:-90}
+  RUN_MODE: ${RUN_MODE:-demo}
+  LLM_MONTHLY_BUDGET_USD: ${LLM_MONTHLY_BUDGET_USD:-20}
+  # The vendor's contract (items per day), for the scorecard.
+  VENDOR_CONTRACT_ITEMS: ${VENDOR_CONTRACT_ITEMS:-100}
 
 # Settings shared by the two UI replicas.
 x-web: &web
@@ -132,8 +174,12 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # Retired in increment 6: the AI reads the C++20 ingester's tables. Kept
+  # under the opt-in profile `legacy` (not in `full`) for before/after
+  # videos: with it, both ingesters run at 05:30 and `make -C python parity`
+  # compares them (LEGACY_INGEST=true in .env).
   legacy:
-    profiles: [legacy, full]
+    profiles: [legacy]
     build:
       context: ./cpp/legacy
       dockerfile: ../../podman/legacy/Containerfile
@@ -160,13 +206,13 @@ services:
       - ./podman/config/legacy/crontab:/etc/premarket/crontab:ro
     restart: unless-stopped
 
-  # --- increment 2: the modern C++20 ingester, in parallel ------------------
-  # Same feed, same job as legacy, into the shadow schema `ingest`. Its own
-  # cron (05:30 ingest, 05:35 parity check against legacy.vendor_news_raw).
-  # It applies sql/03_ingest_schema.sql itself, so an existing database gets
+  # --- increment 2: the modern C++20 ingester ---------------------------------
+  # Same feed, same job as legacy, into the schema `ingest`: a shadow run
+  # from increment 2, the only ingest from increment 6 (cron 05:30 ET). It
+  # applies sql/03_ingest_schema.sql itself, so an existing database gets
   # the schema too.
   ingest:
-    profiles: [legacy, full]
+    profiles: [ai, full]
     build:
       context: ./cpp/ingest
       dockerfile: ../../podman/ingest/Containerfile
@@ -244,7 +290,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      <<: [*pg-env, *ai-env]
+      <<: *owner-jobs-env
       AI_DB_USER: premarket_ai
       AI_DB_PASSWORD: ${AI_DB_PASSWORD:?run make -C python env}
       # Increment 4: the worker's and the MCP server's roles.
@@ -253,21 +299,6 @@ services:
       MCP_DB_USER: premarket_mcp
       MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?run make -C python env}
       DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?copy it from .env.example}
-      TZ: UTC
-      REDIS_HOST: redis
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make -C python env}
-      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
-      REGISTRY_MAX_AGE_DAYS: ${REGISTRY_MAX_AGE_DAYS:-7}
-      STALE_MAX_AGE_DAYS: ${STALE_MAX_AGE_DAYS:-30}
-      DEDUP_WINDOW_DAYS: ${DEDUP_WINDOW_DAYS:-7}
-      DEDUP_SIMHASH_NGRAM: ${DEDUP_SIMHASH_NGRAM:-2}
-      DEDUP_SIMHASH_MAX_HAMMING: ${DEDUP_SIMHASH_MAX_HAMMING:-10}
-      DEDUP_NEAR_MAX_WORD_EDITS: ${DEDUP_NEAR_MAX_WORD_EDITS:-3}
-      CORPUS_MONTHS: ${CORPUS_MONTHS:-12}
-      CORPUS_MAX_FILINGS: ${CORPUS_MAX_FILINGS:-8}
-      CORPUS_MAX_RELEASES: ${CORPUS_MAX_RELEASES:-40}
-      # Increment 5: the smoke check reports whether the PDF is off.
-      LEGACY_PDF_ENABLED: ${LEGACY_PDF_ENABLED:-false}
     <<: *hardened
     tmpfs:
       - /tmp:size=16m
@@ -325,6 +356,13 @@ services:
       CHAT_CACHE: ${CHAT_CACHE:-true}
       CHAT_CACHE_TTL_S: ${CHAT_CACHE_TTL_S:-900}
       CHAT_CACHE_DISTANCE: ${CHAT_CACHE_DISTANCE:-0.05}
+      # Increment 6: Grafana's webhook token (POST /alerts/grafana) and the
+      # cloud cap of the budget banner.
+      ALERT_WEBHOOK_TOKEN: ${ALERT_WEBHOOK_TOKEN:?run make -C python env}
+      LLM_MONTHLY_BUDGET_USD: ${LLM_MONTHLY_BUDGET_USD:-20}
+      # Shown on the admin LLM page (the worker uses them).
+      JUDGE_CLOUD_MODEL: ${JUDGE_CLOUD_MODEL:-}
+      BRIEF_MODEL: ${BRIEF_MODEL-cloud-openai}
       <<: *ai-env
     <<: *hardened
     tmpfs:
@@ -366,10 +404,13 @@ services:
       retries: 30
     restart: unless-stopped
 
-  # The RAG vector store in increments 3 to 5 (pgvector replaces it in 6). An
-  # index only: `make -C python reindex` rebuilds it from ai.chunk.
+  # The RAG vector store in increments 3 to 5. Increment 6 moves the vectors
+  # into Postgres (pgvector); ChromaDB stays under the opt-in profile chroma
+  # (the Makefile adds it while VECTOR_STORE=chroma, and migrate-vectors
+  # compares the two). An index only: `make -C python reindex` rebuilds it
+  # from ai.chunk.
   chroma:
-    profiles: [ai, full]
+    profiles: [chroma, full]
     image: docker.io/chromadb/chroma:1.5.9
     volumes:
       - chromadata:/data
@@ -422,7 +463,11 @@ services:
     profiles: [eval]
     image: localhost/premarket-ai/ai-api:ai-eval
     environment:
-      <<: *ai-env
+      # The database owner and Redis: pgvector reads, and migrate-vectors
+      # writes ai.chunk.embedding (increment 6).
+      <<: [*pg-env, *ai-env]
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make -C python env}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
       ML_MODEL_DIR: /models
     volumes:
@@ -490,6 +535,7 @@ services:
       LLM_GATEWAY_URL: http://llm-gateway:4000/v1
       LLM_GATEWAY_KEY: sk-${LLM_GATEWAY_KEY:?run make -C python env}
       HW_PROFILE: ${HW_PROFILE:-gpu4gb}
+      VECTOR_STORE: ${VECTOR_STORE:-chroma}
       CHROMA_HOST: chroma
       CHROMA_PORT: "8000"
       SEARXNG_URL: http://searxng:8080
@@ -569,6 +615,51 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     mem_limit: ${WORKER_MEM:-3g}
+    restart: unless-stopped
+
+  # --- increment 6: production ------------------------------------------------
+  # The AI side's timeline on NYSE trading days (America/New_York): 05:00
+  # corpus, 06:00 wait for the ingest run then rules -> AI -> verify, 07:15
+  # brief, 09:00 refresh, 09:30 expire, 09:35 scorecard; SLA checks at
+  # 06:15, 06:30, 07:00 and 07:30 (breaches go to the alert banner); 02:00
+  # retention every day. RUN_MODE=demo (default) runs only the retention;
+  # `make -C python demo` runs a whole day at once. It runs the same `ai-api`
+  # commands as ai-api-init, as the database owner, in subprocesses (no
+  # container socket). Redis locks (run:premarket:{date}) keep a job from
+  # running twice. Metrics on :9464 for Prometheus (not published).
+  scheduler:
+    profiles: [ai, full]
+    build:
+      context: ./python/scheduler
+      dockerfile: ../../podman/scheduler/Containerfile
+      target: runtime
+      args:
+        AI_API_IMAGE: localhost/premarket-ai/ai-api:dev
+    image: localhost/premarket-ai/scheduler:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-api-init:
+        condition: service_completed_successfully
+      ai-worker:
+        condition: service_started
+    environment:
+      <<: *owner-jobs-env
+      SLA_BACKLOG_MAX: ${SLA_BACKLOG_MAX:-50}
+      SCHEDULER_CORPUS: ${SCHEDULER_CORPUS:-true}
+    <<: *hardened
+    tmpfs:
+      - /tmp:size=64m
+    # The AI step (enrich) runs in a subprocess of this container.
+    mem_limit: ${SCHEDULER_MEM:-1536m}
+    healthcheck:
+      test: ["CMD", "scheduler", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
   # Two replicas of the static UI, load balanced by the edge.
@@ -749,6 +840,82 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:?run make -C python env}
     restart: unless-stopped
 
+  # --- observability profile (increment 6): metrics, dashboard, alerts ------
+  # ai-api, ai-worker and the batch commands push OpenTelemetry metrics
+  # (GenAI semantic conventions, HTTP, workers) to the collector when
+  # OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318; Prometheus
+  # scrapes it and the scheduler; Grafana shows the dashboard and sends its
+  # alerts to ai-api's webhook (the banner).
+  #   make -C python obs-up
+  # Grafana: http://localhost:${GRAFANA_PORT:-3001} (admin /
+  # GRAFANA_ADMIN_PASSWORD from .env).
+  otel-collector:
+    profiles: [observability, full]
+    image: docker.io/otel/opentelemetry-collector-contrib:0.160.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./podman/config/otel/config.yaml:/etc/otelcol/config.yaml:ro
+    <<: *hardened
+    mem_limit: 256m
+    restart: unless-stopped
+
+  prometheus:
+    profiles: [observability, full]
+    image: docker.io/prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.listen-address=:9090
+    volumes:
+      - ./podman/config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    <<: *hardened
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  grafana:
+    profiles: [observability, full]
+    image: docker.io/grafana/grafana:13.2.2
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - ${WEB_BIND:-127.0.0.1}:${GRAFANA_PORT:-3001}:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?run make -C python env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DATE_FORMATS_DEFAULT_TIMEZONE: America/New_York
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      GF_LOG_MODE: console
+      # Read by the alerting provisioning (the contact point's token).
+      ALERT_WEBHOOK_TOKEN: ${ALERT_WEBHOOK_TOKEN:?run make -C python env}
+    volumes:
+      - ./podman/config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./podman/config/grafana/dashboards:/var/lib/grafana-dashboards:ro
+      - grafana-data:/var/lib/grafana
+    <<: *hardened
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
 volumes:
   pgdata:
   vendor-data:
@@ -759,3 +926,5 @@ volumes:
   langfuse-db:
   langfuse-clickhouse:
   langfuse-minio:
+  prometheus-data:
+  grafana-data:

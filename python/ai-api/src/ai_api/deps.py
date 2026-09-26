@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 import dataclasses
-from typing import Annotated, Protocol
+from typing import Annotated, Any, Protocol
 
 import fastapi
 
+from ai_api import admin as admin_lib
+from ai_api import alerts as alerts_lib
 from ai_api import briefs as briefs_lib
 from ai_api import config
 from ai_api import memory as memory_lib
 from ai_api import news
+from ai_api import schedule as schedule_lib
+from ai_api import scorecard as scorecard_lib
 from ai_api import sessions
 from ai_api import tokens
 from ai_api import users
 from ai_api import verdicts as verdicts_lib
+from ai_api.llm import budget as budget_lib
 from ai_api.rag import ask as ask_lib
 from ai_api.verify import events as events_lib
 
@@ -74,6 +79,14 @@ class Services:
         brief_events: A brief's progress (Redis Streams, ``brief:*``).
         memory: Users' watchlists (the LangGraph store).
         sectors: The lab universe's GICS sectors (the watchlist's choices).
+        alerts: The operations banner's stream (increment 6).
+        budget: The month's cloud spend (the budget banner).
+        admin: Source reputation and the cloud switches (ADMIN).
+        user_admin: Creating and changing users (ADMIN).
+        scorecard: The vendor scorecard rows.
+        summarizer: The weekly vendor summary's writer, or None.
+        cache: A decoded Redis client for small caches (the summary).
+        schedule: The scheduler's runs and SLA checks.
     """
 
     settings: config.Settings
@@ -90,6 +103,14 @@ class Services:
     brief_events: events_lib.RunEvents | None = None
     memory: memory_lib.Memory | None = None
     sectors: tuple[str, ...] = ()
+    alerts: alerts_lib.Alerts | None = None
+    budget: budget_lib.CloudBudget | None = None
+    admin: admin_lib.PostgresAdmin | None = None
+    user_admin: users.UserAdmin | None = None
+    scorecard: scorecard_lib.ScorecardStore | None = None
+    summarizer: scorecard_lib.Summarizer | None = None
+    cache: Any = None
+    schedule: schedule_lib.ScheduleStore | None = None
 
 
 def get_services(request: fastapi.Request) -> Services:

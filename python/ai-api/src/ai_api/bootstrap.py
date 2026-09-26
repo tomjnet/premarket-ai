@@ -16,6 +16,11 @@ checkpointer's tables (schema ``graph``):
 
 Increment 5 adds the LangGraph store's tables (schema ``memory``: users'
 watchlists) and the grants on ``ai.brief``.
+
+Increment 6: the API reads the vendor scorecard and the scheduler's runs,
+and its ADMIN pages create and change users, source reputations and the
+cloud switches (``ai.app_setting``); the MCP server reads ``ai.chunk``
+(pgvector).
 """
 
 from __future__ import annotations
@@ -122,7 +127,8 @@ def grant_api_role(
     """
     _login_role(conn, role, password, 20)
     # From increment 2 the API reads raw news only through the ai.v_* views
-    # (the strangler-fig seam): it has no access to the legacy schema.
+    # (the strangler-fig seam; legacy.* until increment 6, then ingest.*): it
+    # has no access to either schema.
     statements = (
         "GRANT CONNECT ON DATABASE {db} TO {role}",
         "REVOKE ALL ON ALL TABLES IN SCHEMA legacy FROM {role}",
@@ -155,6 +161,14 @@ def grant_api_role(
         "GRANT USAGE ON SCHEMA memory TO {role}",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA memory"
         " TO {role}",
+        # Increment 6: the scorecard, the SLA panel and the ADMIN pages.
+        "GRANT SELECT ON ai.vendor_scorecard, ai.schedule_run TO {role}",
+        "GRANT SELECT, INSERT, UPDATE ON ai.app_setting TO {role}",
+        "GRANT INSERT ON ai.app_user TO {role}",
+        "GRANT UPDATE (role, disabled, password_hash, updated_at)"
+        " ON ai.app_user TO {role}",
+        "GRANT INSERT ON ai.source_reputation TO {role}",
+        "GRANT UPDATE (tier, note) ON ai.source_reputation TO {role}",
     )
     _grant(conn, role, database, statements)
 
@@ -217,6 +231,8 @@ def grant_mcp_role(
         " TO {role}",
         # Increment 5: get_brief.
         "GRANT SELECT ON ai.brief TO {role}",
+        # Increment 6: search_news reads the pgvector store (ai.chunk).
+        "GRANT SELECT ON ai.chunk TO {role}",
     )
     _grant(conn, role, database, statements)
 

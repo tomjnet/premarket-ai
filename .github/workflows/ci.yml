@@ -113,6 +113,63 @@ jobs:
           --target ${{ matrix.stage }}
           --build-context config=python/config python/mcp-server
 
+  # Increment 6: the scheduler is built on the ai-api image (it runs the
+  # ai-api commands), so the job builds that image first.
+  scheduler:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [test, lint, runtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: ai-api runtime (the scheduler's base image)
+        run: >
+          podman build -f podman/ai-api/Containerfile --target runtime
+          -t localhost/premarket-ai/ai-api:dev
+          --build-context fastpath=cpp/fastpath
+          --build-context config=python/config
+          --build-context vendorsim=python/vendor-sim
+          --build-context skills=python/skills python/ai-api
+      - name: scheduler ${{ matrix.stage }}
+        run: >
+          podman build -f podman/scheduler/Containerfile
+          --target ${{ matrix.stage }}
+          --build-arg AI_API_IMAGE=localhost/premarket-ai/ai-api:dev
+          python/scheduler
+
+  # Increment 6: the observability profile's configs.
+  observability-config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: OpenTelemetry Collector config
+        run: >
+          podman run --rm
+          -v $PWD/podman/config/otel/config.yaml:/etc/otelcol/config.yaml:ro
+          docker.io/otel/opentelemetry-collector-contrib:0.160.0
+          validate --config=/etc/otelcol/config.yaml
+      - name: Prometheus config
+        run: >
+          podman run --rm --entrypoint promtool
+          -v $PWD/podman/config/prometheus:/p:ro
+          docker.io/prom/prometheus:v3.15.0 check config /p/prometheus.yml
+      - name: Grafana dashboard is valid JSON
+        run: python3 -m json.tool podman/config/grafana/dashboards/premarket-operations.json > /dev/null
+
+  # Increment 6: no secret in any commit (the whole history).
+  gitleaks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: >
+          podman run --rm -v $PWD:/repo:ro
+          docker.io/zricethezav/gitleaks:v8.30.1
+          git --redact --no-banner /repo
+
   web:
     runs-on: ubuntu-24.04
     steps:
@@ -152,4 +209,4 @@ jobs:
         run: |
           # .env.example leaves the secrets empty; `env` generates them.
           make -C python env
-          docker compose --profile full config --quiet
+          docker compose --profile full --profile legacy config --quiet

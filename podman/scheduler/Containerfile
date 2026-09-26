@@ -1,0 +1,39 @@
+# premarket-ai scheduler (Python 3.13, APScheduler + the NYSE calendar).
+# It runs the `ai-api` commands (rules, enrich, verify, brief, expire,
+# scorecard, retention) in subprocesses, so it is built on the ai-api image,
+# which must be built first (make -C python build does):
+#   podman build -f podman/scheduler/Containerfile --target runtime \
+#     python/scheduler
+# Stages: dev -> test (pytest), lint (ruff), runtime (default).
+
+ARG AI_API_IMAGE=localhost/premarket-ai/ai-api:dev
+
+FROM ${AI_API_IMAGE} AS base
+USER root
+WORKDIR /opt/scheduler
+
+# ---------------------------------------------------------------------------
+FROM base AS dev
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install -e ".[dev]"
+COPY tests ./tests
+
+FROM dev AS test
+RUN pytest -q -p no:cacheprovider
+
+FROM dev AS lint
+RUN ruff check --no-cache src tests && ruff format --no-cache --check src tests
+
+# ---------------------------------------------------------------------------
+FROM base AS runtime
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install . && rm -rf src pyproject.toml
+# The ai-api image's unprivileged user; compose adds a read-only root
+# filesystem, no capabilities and no privilege escalation.
+USER api
+WORKDIR /app
+EXPOSE 9464
+# The healthcheck lives in compose.yaml (OCI images drop HEALTHCHECK).
+CMD ["scheduler", "serve"]

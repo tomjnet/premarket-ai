@@ -1,5 +1,7 @@
 import {Outlet, useLocation} from 'react-router';
 
+import {OpsBanners} from '@/features/ops/components/ops-banners';
+
 import {AppFooter} from './app-footer';
 import {AppHeader} from './app-header';
 import {ComplianceNotices} from './compliance-notices';
@@ -30,15 +32,16 @@ export function RootLayout() {
 }
 
 /**
- * Pages for a logged-in user: the header above the page content. Routes
- * that need a role (`RequireRole`) go inside it, so the 403 page keeps the
- * header and the main landmark.
+ * Pages for a logged-in user: the header and the operations banners (budget,
+ * alerts) above the page content. Routes that need a role (`RequireRole`)
+ * go inside it, so the 403 page keeps the header and the main landmark.
  */
 export function AppShell() {
   const {pathname} = useLocation();
   return (
     <>
       <AppHeader />
+      <OpsBanners />
       <PageMain focusKey={pathname} className="px-4 py-6">
         <Outlet />
       </PageMain>

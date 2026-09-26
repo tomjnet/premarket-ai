@@ -12,6 +12,7 @@ from langchain_core import embeddings as lc_embeddings
 from langchain_core import language_models
 import langchain_openai
 
+from ai_api import telemetry
 from ai_api.llm import config
 
 
@@ -45,6 +46,8 @@ def chat_model(
         max_retries=1,
         max_tokens=max_tokens,
         include_response_headers=response_headers,
+        # Duration and tokens of every call (increment 6 metrics).
+        callbacks=[telemetry.GenAiMetrics(model)],
     )
 
 

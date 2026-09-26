@@ -623,6 +623,237 @@ class WatchlistOut(pydantic.BaseModel):
     available_sectors: list[str]
 
 
+AlertSeverity = Literal["info", "warning", "critical"]
+AlertStatus = Literal["firing", "resolved"]
+AlertSource = Literal["scheduler", "grafana", "budget"]
+
+
+class AlertOut(pydantic.BaseModel):
+    """One banner alert (increment 6).
+
+    ``id`` is the Redis Stream id of its latest event; ``at`` is when it
+    happened (UTC, ``Z``).
+    """
+
+    id: str
+    key: str
+    title: str
+    severity: AlertSeverity
+    status: AlertStatus
+    detail: str
+    source: AlertSource
+    at: str
+
+
+class AlertListOut(pydantic.BaseModel):
+    """``GET /alerts``: the alerts firing now, newest first."""
+
+    count: int
+    items: list[AlertOut]
+
+
+class BudgetOut(pydantic.BaseModel):
+    """``GET /llm/budget``: this month's cloud spend (UTC month)."""
+
+    spent_usd: float
+    cap_usd: float
+    share: float
+    warning: bool
+    reached: bool
+
+
+Tier = Literal["trusted", "neutral", "low", "blocked"]
+_USERNAME = r"^[a-z][a-z0-9_.-]{0,63}$"
+# A lower-case host name (the length is checked by max_length: pydantic's
+# regex engine has no look-ahead).
+_DOMAIN = r"^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+
+
+class AdminUserOut(pydantic.BaseModel):
+    """A user on the admin page (increment 6)."""
+
+    username: str
+    role: Role
+    disabled: bool
+    created_at: str
+    updated_at: str
+
+
+class AdminUserListOut(pydantic.BaseModel):
+    """``GET /admin/users``."""
+
+    count: int
+    items: list[AdminUserOut]
+
+
+class AdminUserIn(pydantic.BaseModel):
+    """``POST /admin/users``: a new user."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    username: str = pydantic.Field(pattern=_USERNAME)
+    role: Role
+    password: str = pydantic.Field(min_length=12, max_length=256)
+
+
+class AdminUserUpdateIn(pydantic.BaseModel):
+    """``POST /admin/users/{username}``: only the fields to change."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    role: Role | None = None
+    disabled: bool | None = None
+    password: str | None = pydantic.Field(
+        default=None, min_length=12, max_length=256
+    )
+
+
+class AdminSourceOut(pydantic.BaseModel):
+    """A domain's reputation."""
+
+    domain: str
+    tier: Tier
+    reputation: float
+    note: str
+    updated_at: str
+
+
+class AdminSourceListOut(pydantic.BaseModel):
+    """``GET /admin/sources``."""
+
+    count: int
+    items: list[AdminSourceOut]
+
+
+class AdminSourceIn(pydantic.BaseModel):
+    """``POST /admin/sources``: add a domain or change it."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    domain: str = pydantic.Field(pattern=_DOMAIN, max_length=253)
+    tier: Tier
+    reputation: float = pydantic.Field(ge=0, le=1)
+    note: str = pydantic.Field(default="", max_length=300)
+
+
+class CloudSwitchesOut(pydantic.BaseModel):
+    """The cloud switches in effect."""
+
+    enabled: bool
+    judge: bool
+    brief: bool
+
+
+class CloudSwitchesIn(pydantic.BaseModel):
+    """``POST /admin/llm``: the switches to change."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    judge: bool | None = None
+    brief: bool | None = None
+
+
+class AdminLlmOut(pydantic.BaseModel):
+    """``GET /admin/llm``: models (pinned in the gateway), budget, switches.
+
+    ``judge_cloud_model`` / ``brief_model`` are empty when the task has no
+    cloud model configured (it stays local whatever the switch says).
+    """
+
+    hw_profile: str
+    main_model: str
+    embed_model: str
+    guard_model: str
+    vector_store: str
+    judge_cloud_model: str
+    brief_model: str
+    cloud: CloudSwitchesOut
+    budget: BudgetOut
+
+
+class ScorecardRatesOut(pydantic.BaseModel):
+    """A scorecard day's shares (0 to 1)."""
+
+    duplicate_rate: float
+    stale_rate: float
+    fake_rate: float
+    misleading_rate: float
+    override_rate: float
+    billable_vs_contract: float
+
+
+class ScorecardDayOut(pydantic.BaseModel):
+    """One day of the vendor scorecard."""
+
+    feed_date: datetime.date
+    received: int
+    unique_items: int
+    duplicates: int
+    dup_url: int
+    dup_exact: int
+    dup_near: int
+    dup_paraphrase: int
+    stale: int
+    verified: int
+    unverified: int
+    misleading: int
+    fake: int
+    failed: int
+    pending_review: int
+    injection: int
+    avg_corroboration: float
+    reviewed: int
+    overridden: int
+    billable: int
+    contracted: int
+    cloud_cost_usd: float
+    rates: ScorecardRatesOut
+    computed_at: str
+
+
+class ScorecardOut(pydantic.BaseModel):
+    """``GET /vendor/scorecard``: days newest first."""
+
+    count: int
+    items: list[ScorecardDayOut]
+    average_billable: float
+    contracted: int
+
+
+class ScorecardSummaryOut(pydantic.BaseModel):
+    """``GET /vendor/scorecard/summary``: the weekly summary."""
+
+    text: str
+    source: Literal["llm", "fallback"]
+    model: str
+    days: int
+    last_date: datetime.date | None
+
+
+class ScheduleRunOut(pydantic.BaseModel):
+    """One scheduled job run or SLA check."""
+
+    job: str
+    run_mode: Literal["production", "demo", "manual"]
+    status: Literal["RUNNING", "DONE", "FAILED", "SKIPPED", "OK", "BREACHED"]
+    started_at: str
+    finished_at: str | None
+    detail: str
+
+
+class ScheduleOut(pydantic.BaseModel):
+    """``GET /schedule``: a day's runs.
+
+    ``sla_green`` is true when the day had SLA checks and all were OK.
+    """
+
+    date: datetime.date
+    items: list[ScheduleRunOut]
+    sla_checked: int
+    sla_green: bool
+
+
 class HealthOut(pydantic.BaseModel):
     """``GET /health``."""
 

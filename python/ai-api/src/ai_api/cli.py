@@ -18,6 +18,10 @@ Usage:
     ai-api brief --date YYYY-MM-DD [--edition morning|refresh]
                                       write the pre-market brief, follow it
     ai-api ml-train                   fine-tune the DistilBERT baseline
+    ai-api scorecard --date YYYY-MM-DD
+                                      the day's vendor scorecard snapshot
+    ai-api retention [--days N]       delete AI results older than N days
+                                      (RETENTION_DAYS, default 90)
     ai-api smoke --base-url URL --date YYYY-MM-DD
                                       the increment's "done when" check
 
@@ -30,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import dataclasses
 import datetime
 import json
@@ -151,19 +156,31 @@ def _smoke(base_url: str, day: datetime.date) -> int:
         results.append((name, ok, detail))
 
     check(
-        "ingest: C++20 ingester matches legacy (parity PASS)",
-        counts["parity"] == "PASS",
-        counts["parity_detail"],
+        "ingest: the AI reads the C++20 ingester (C++11 legacy retired)",
+        counts["views"] == "ingest",
+        f"ai.v_raw_news reads {counts['views']}.vendor_news_raw",
     )
+    check(
+        "ingest: C++20 ingest run DONE for the date",
+        counts["ingest_run"] == "DONE",
+        str(counts["ingest_run"]),
+    )
+    if counts["parity"] is not None:
+        # Only when the legacy ingester ran too (opt-in profile `legacy`).
+        check(
+            "ingest: C++20 ingester matches legacy (parity PASS)",
+            counts["parity"] == "PASS",
+            counts["parity_detail"],
+        )
     check(
         "rules: rule run DONE for the date",
         counts["rule_run"] == "DONE",
         str(counts["rule_run"]),
     )
     check(
-        "rules: catch every legacy duplicate",
-        counts["rule_dups"] >= counts["legacy_dups"] > 0,
-        f"rules {counts['rule_dups']} vs legacy {counts['legacy_dups']}",
+        "rules: catch every exact duplicate the ingester flagged",
+        counts["rule_dups"] >= counts["ingest_dups"] > 0,
+        f"rules {counts['rule_dups']} vs ingest {counts['ingest_dups']}",
     )
 
     page = _call("GET", f"{base_url}/")
@@ -245,6 +262,7 @@ def _smoke(base_url: str, day: datetime.date) -> int:
     _smoke_ai(check, api, bearer, day, counts)
     _smoke_verify(check, api, bearer, day, counts, password)
     _smoke_brief(check, api, bearer, day, counts)
+    _smoke_production(check, api, bearer, day, counts, password)
     check(
         "news: unknown id is 404",
         _call("GET", f"{api}/news/999999999999", bearer).status == 404,
@@ -598,6 +616,77 @@ def _smoke_brief(
     )
 
 
+def _smoke_production(
+    check: Any,
+    api: str,
+    bearer: dict[str, str],
+    day: datetime.date,
+    counts: dict[str, Any],
+    password: str,
+) -> None:
+    """Increment 6: pgvector, the scorecard, the banners, admin, SLAs."""
+    store = os.environ.get("VECTOR_STORE", "chroma")
+    check(
+        "rag: pgvector is the vector store, with the corpus in it",
+        store == "pgvector" and counts["embedded_chunks"] > 0,
+        f"VECTOR_STORE={store}, {counts['embedded_chunks']} of"
+        f" {counts['chunks']} chunks embedded"
+        + ("" if store == "pgvector" else " (make -C python migrate-vectors)"),
+    )
+    budget = _call("GET", f"{api}/llm/budget", bearer)
+    check(
+        "budget: every role reads the cloud budget (the banner)",
+        budget.status == 200 and "reached" in budget.json(),
+        f"HTTP {budget.status}",
+    )
+    check(
+        "alerts: Grafana's webhook isn't reachable through the edge",
+        _call("POST", f"{api}/alerts/grafana", body={"alerts": []}).status
+        == 404,
+    )
+    check(
+        "admin: a trader can't open the admin pages (403)",
+        _call("GET", f"{api}/admin/users", bearer).status == 403,
+    )
+    admin = _login(api, "admin1", password)
+    users = _call("GET", f"{api}/admin/users", admin) if admin else None
+    check(
+        "admin: admin1 lists the users",
+        users is not None
+        and users.status == 200
+        and users.json()["count"] >= 3,
+        "no login" if users is None else f"HTTP {users.status}",
+    )
+    analyst = _login(api, "analyst1", password)
+    card = _call(
+        "GET",
+        f"{api}/vendor/scorecard?days=1&date={day.isoformat()}",
+        analyst,
+    )
+    items = card.json()["items"] if card.status == 200 else []
+    row = items[0] if items else {}
+    check(
+        "scorecard: the day's billable items against the contract",
+        row.get("feed_date") == day.isoformat() and row.get("billable", 0) > 0,
+        f"HTTP {card.status}: {row.get('billable')} billable of"
+        f" {row.get('contracted')} contracted",
+    )
+    schedule = _call("GET", f"{api}/schedule?date={day.isoformat()}", analyst)
+    body = schedule.json() if schedule.status == 200 else {}
+    if os.environ.get("RUN_MODE", "demo") == "production":
+        check(
+            "schedule: every SLA of the day is green (RUN_MODE=production)",
+            bool(body.get("sla_green")),
+            f"{body.get('sla_checked')} checks",
+        )
+    else:
+        check(
+            "schedule: the scheduler's day is readable (RUN_MODE=demo)",
+            schedule.status == 200,
+            f"HTTP {schedule.status}, {body.get('sla_checked')} SLA checks",
+        )
+
+
 def _database_counts(day: datetime.date) -> dict[str, Any]:
     """What the smoke check compares the website with (as the owner)."""
     owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
@@ -609,7 +698,19 @@ def _database_counts(day: datetime.date) -> dict[str, Any]:
             " FROM ai.v_raw_news WHERE feed_date = %s",
             (day,),
         ).fetchone()
-        counts["items"], counts["legacy_dups"], counts["pdf_rows"] = row
+        counts["items"], counts["ingest_dups"], counts["pdf_rows"] = row
+        view = conn.execute(
+            "SELECT pg_get_viewdef('ai.v_raw_news'::regclass)"
+        ).fetchone()[0]
+        counts["views"] = (
+            "ingest" if "ingest.vendor_news_raw" in view else "legacy"
+        )
+        row = conn.execute(
+            "SELECT status FROM ai.v_ingest_run WHERE feed_date = %s"
+            " ORDER BY started_at DESC LIMIT 1",
+            (day,),
+        ).fetchone()
+        counts["ingest_run"] = None if row is None else row[0]
         row = conn.execute(
             "SELECT count(*) FROM ai.duplicate_link d"
             " JOIN ai.news_item n ON n.id = d.news_id WHERE n.feed_date = %s",
@@ -689,6 +790,14 @@ def _database_counts(day: datetime.date) -> dict[str, Any]:
         counts["kept_out"] = set(row[0])
         try:
             row = conn.execute(
+                "SELECT count(*), count(embedding) FROM ai.chunk"
+            ).fetchone()
+        except psycopg.errors.UndefinedColumn:
+            conn.rollback()
+            row = (0, 0)
+        counts["chunks"], counts["embedded_chunks"] = row
+        try:
+            row = conn.execute(
                 "SELECT status, differences, legacy_rows, modern_rows"
                 " FROM ingest.parity_run WHERE feed_date = %s"
                 " ORDER BY checked_at DESC LIMIT 1",
@@ -698,7 +807,7 @@ def _database_counts(day: datetime.date) -> dict[str, Any]:
             row = None
     if row is None:
         counts["parity"] = None
-        counts["parity_detail"] = "no parity run: make -C python parity"
+        counts["parity_detail"] = "no parity run"
     else:
         counts["parity"] = row[0]
         counts["parity_detail"] = (
@@ -1027,6 +1136,61 @@ def _expire(day: datetime.date) -> int:
     return 0
 
 
+def _scorecard(day: datetime.date) -> int:
+    """Counts the day's vendor scorecard (as the owner) and prints it."""
+    from redis import asyncio as aioredis  # noqa: PLC0415
+
+    from ai_api import scorecard  # noqa: PLC0415
+    from ai_api.llm import budget  # noqa: PLC0415
+
+    raw = os.environ.get("VENDOR_CONTRACT_ITEMS", "").strip()
+    contracted = int(raw) if raw else scorecard.DEFAULT_CONTRACTED
+
+    async def spent() -> float:
+        redis = aioredis.Redis(
+            host=os.environ.get("REDIS_HOST", "redis"),
+            password=os.environ.get("REDIS_PASSWORD", ""),
+            decode_responses=True,
+        )
+        try:
+            return await budget.CloudBudget(redis, 0).spent_on(day)
+        finally:
+            await redis.aclose()
+
+    owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
+    with psycopg.connect(owner.dsn()) as conn:
+        row = scorecard.compute(conn, day, contracted, asyncio.run(spent()))
+    rates = scorecard.rates(row)
+    print(
+        f"scorecard {day}: {row['received']} received, {row['unique_items']}"
+        f" unique, {row['billable']} billable of {row['contracted']}"
+        f" contracted; duplicates {rates['duplicate_rate']:.0%}, FAKE"
+        f" {rates['fake_rate']:.0%}, MISLEADING {rates['misleading_rate']:.0%}"
+        f", overrides {row['overridden']}/{row['reviewed']}"
+    )
+    return 0
+
+
+def _retention(days: int | None) -> int:
+    """The nightly cleanup: AI results of feed dates older than ``days``."""
+    from ai_api import retention  # noqa: PLC0415
+
+    if days is None:
+        raw = os.environ.get("RETENTION_DAYS", "").strip()
+        days = int(raw) if raw else retention.DEFAULT_DAYS
+    today = datetime.datetime.now(_NEW_YORK).date()
+    try:
+        cutoff = retention.cutoff_for(today, days)
+    except ValueError as e:
+        print(f"retention: {e}", file=sys.stderr)
+        return 2
+    owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
+    with psycopg.connect(owner.dsn()) as conn:
+        purged = retention.purge(conn, cutoff)
+    print(f"retention: {purged.line()}")
+    return 0
+
+
 def _ml_train() -> int:
     from ai_api.ml import train  # noqa: PLC0415
 
@@ -1073,6 +1237,8 @@ def main(argv: list[str] | None = None) -> int:
             "expire",
             "brief",
             "ml-train",
+            "retention",
+            "scorecard",
             "smoke",
         ),
     )
@@ -1085,6 +1251,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--timeout", type=float, default=7200, help="verify: seconds"
+    )
+    parser.add_argument(
+        "--days", type=int, default=None, help="retention: days kept"
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -1109,9 +1278,17 @@ def main(argv: list[str] | None = None) -> int:
             return _llm_status()
         if args.command == "ml-train":
             return _ml_train()
+        if args.command == "retention":
+            return _retention(args.days)
         day = args.date
         if day is None:
             day = datetime.datetime.now(_NEW_YORK).date()
+        if args.command in ("enrich", "verify", "brief"):
+            # The model calls of the batch steps (increment 6 metrics).
+            from ai_api import telemetry  # noqa: PLC0415
+
+            if telemetry.setup(f"ai-api-{args.command}", os.environ):
+                atexit.register(telemetry.shutdown)
         if args.command == "rules":
             return _rules(day)
         if args.command == "dedup-rebuild":
@@ -1122,6 +1299,8 @@ def main(argv: list[str] | None = None) -> int:
             return _verify(day, args.timeout)
         if args.command == "expire":
             return _expire(day)
+        if args.command == "scorecard":
+            return _scorecard(day)
         if args.command == "brief":
             return _brief(day, args.edition, min(args.timeout, 1800))
         return _smoke(args.base_url, day)
