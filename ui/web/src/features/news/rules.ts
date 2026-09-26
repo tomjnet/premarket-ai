@@ -4,6 +4,7 @@ import type {
   NewsItem,
   RuleEvidence,
   RuleRun,
+  VerifyEvidence,
 } from '@/api/schemas/news';
 
 /**
@@ -13,7 +14,7 @@ import type {
  */
 
 /** How a badge looks. The text is the signal; the colour only helps. */
-export type BadgeTone = 'danger' | 'warning' | 'neutral';
+export type BadgeTone = 'danger' | 'warning' | 'neutral' | 'success';
 
 export interface RuleBadge {
   key: string;
@@ -30,7 +31,11 @@ const KNOWN_CODES: ReadonlyArray<[string, BadgeTone]> = [
   ['FAKE_TICKER', 'danger'],
   ['SPOOFED_SOURCE', 'danger'],
   ['INJECTION_ATTEMPT', 'danger'],
+  ['FABRICATED_CLAIM', 'danger'],
+  ['CONTRADICTED_BY_FILING', 'danger'],
+  ['NUMBER_MISMATCH', 'warning'],
   ['STALE', 'warning'],
+  ['SENSATIONAL_HEADLINE', 'warning'],
   ['UNSUPPORTED_LANGUAGE', 'neutral'],
 ];
 
@@ -43,16 +48,25 @@ const DUP_TYPE_TEXT: Record<DupType, string> = {
   paraphrase: 'paraphrase',
 };
 
-/** A rule check's or an AI-run step's explanation. */
-export type CheckEvidence = RuleEvidence | AiEvidence;
+/** A rule check's, an AI-run step's or the verification's explanation. */
+export type CheckEvidence =
+  RuleEvidence | AiEvidence | Pick<VerifyEvidence, 'check' | 'code'>;
 
-const CHECK_TEXT: Record<CheckEvidence['check'], string> = {
+// The verify graph's checks (increment 4) can grow; unknown ones show
+// their name.
+const CHECK_TEXT: Record<string, string> = {
   entity: 'ENTITY CHECK',
   source: 'SOURCE CHECK',
   dedup: 'DUPLICATE',
   stale: 'STALE CHECK',
   guard: 'GUARD',
   language: 'LANGUAGE CHECK',
+  corroboration: 'CORROBORATION',
+  claim: 'CLAIM CHECK',
+  style: 'HEADLINE CHECK',
+  ml: 'CLASSIC ML',
+  judge: 'LLM JUDGE',
+  review: 'ANALYST',
 };
 
 /** `FAKE_TICKER` → `FAKE TICKER`. */
@@ -75,7 +89,9 @@ export function evidenceBadge(evidence: CheckEvidence): RuleBadge {
   if (evidence.code === null) {
     return {
       key: evidence.check,
-      text: CHECK_TEXT[evidence.check],
+      text:
+        CHECK_TEXT[evidence.check] ??
+        reasonCodeText(evidence.check).toUpperCase(),
       tone: 'neutral',
     };
   }

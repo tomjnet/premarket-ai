@@ -29,10 +29,11 @@ class FakeUsers:
     """In-memory users; records audit events."""
 
     def __init__(self) -> None:
-        """Seeds trader1, admin1 and the disabled gone1."""
+        """Seeds trader1, analyst1, admin1 and the disabled gone1."""
         hashed = passwords.hash_password(PASSWORD)
         self.users = {
             "trader1": users.User("trader1", "TRADER", hashed),
+            "analyst1": users.User("analyst1", "ANALYST", hashed),
             "admin1": users.User("admin1", "ADMIN", hashed),
             "gone1": users.User("gone1", "TRADER", hashed, disabled=True),
         }
@@ -80,6 +81,10 @@ def make_row(number: int, **overrides: Any) -> dict[str, Any]:
         "ai_model": "main-gpu4gb",
         "prompt_version": "enrich-v1",
         "enriched_at": datetime.datetime(2026, 9, 24, 10, 5, tzinfo=UTC),
+        "verdict": "VERIFIED",
+        "confidence": 0.91,
+        "review_status": None,
+        "verdict_source": "ai",
         "evidence": [
             {
                 "check": "entity",
@@ -103,12 +108,15 @@ class FakeNews:
                 2,
                 tickers=["QVXH"],
                 reason_codes=["FAKE_COMPANY", "FAKE_TICKER"],
+                verdict="FAKE",
+                confidence=0.97,
             ),
             make_row(
                 3,
                 is_dup=True,
                 dup_of="VND-20260924-001",
                 dup_type="near",
+                verdict_source="inherited",
             ),
         ]
         self.rule_run: dict[str, Any] | None = {
@@ -145,6 +153,24 @@ class FakeNews:
                 },
             ]
         }
+        self.verify_run: dict[str, Any] | None = make_verify_run()
+        self.verifications: dict[int, tuple] = {
+            2001: (
+                make_verification(),
+                [
+                    {
+                        "seq": 1,
+                        "check": "entity",
+                        "code": None,
+                        "message": "SEC registry: AAPL is Apple Inc.",
+                        "source": "registry",
+                        "url": None,
+                        "title": None,
+                    }
+                ],
+                None,
+            )
+        }
         self.queries: list[news.NewsQuery] = []
         self.run: dict[str, Any] | None = {
             "run_id": 42,
@@ -175,6 +201,16 @@ class FakeNews:
         """Returns the extraction rows of one item."""
         return self.extractions.get(item_id, [])
 
+    async def latest_verify_run(
+        self, day: datetime.date
+    ) -> dict[str, Any] | None:
+        """Returns the verify run for DAY only."""
+        return self.verify_run if day == DAY else None
+
+    async def verification(self, item_id: int) -> tuple:
+        """The verification, evidence and review of one item."""
+        return self.verifications.get(item_id, ({}, [], None))
+
     async def items(self, query: news.NewsQuery) -> list[dict[str, Any]]:
         """Applies the date, duplicate and ticker filters."""
         self.queries.append(query)
@@ -184,11 +220,63 @@ class FakeNews:
             if row["feed_date"] == query.day
             and (query.include_duplicates or not row["is_dup"])
             and (query.ticker is None or query.ticker in row["tickers"])
+            and (query.verdict is None or row["verdict"] == query.verdict)
+            and (not query.pending_review or row["review_status"] == "PENDING")
         ]
 
     async def item(self, item_id: int) -> dict[str, Any] | None:
         """Returns one row by id."""
         return next((r for r in self.rows if r["id"] == item_id), None)
+
+
+def make_verify_run(**overrides: Any) -> dict[str, Any]:
+    run = {
+        "run_id": 7,
+        "feed_date": DAY,
+        "status": "DONE",
+        "requested_by": "analyst1",
+        "requested_at": datetime.datetime(2026, 9, 24, 10, 10, tzinfo=UTC),
+        "started_at": datetime.datetime(2026, 9, 24, 10, 10, 1, tzinfo=UTC),
+        "finished_at": datetime.datetime(2026, 9, 24, 10, 20, tzinfo=UTC),
+        "total": 2,
+        "done": 2,
+        "failed": 0,
+        "verified": 1,
+        "unverified": 0,
+        "misleading": 0,
+        "fake": 1,
+        "pending_review": 0,
+        "escalated": 0,
+        "model": "main-gpu4gb",
+        "error": None,
+    }
+    run.update(overrides)
+    return run
+
+
+def make_verification(**overrides: Any) -> dict[str, Any]:
+    found = {
+        "news_id": 11,
+        "status": "DONE",
+        "verdict": "VERIFIED",
+        "confidence": 0.91,
+        "reason_codes": [],
+        "rationale": "From a trusted-tier newswire [E1].",
+        "rule_verdict": "VERIFIED",
+        "rule_confidence": 0.75,
+        "judge_verdict": "VERIFIED",
+        "judge_confidence": 0.9,
+        "judge_model": "main-gpu4gb",
+        "escalated": False,
+        "review_status": None,
+        "review_reasons": [],
+        "impact": "high",
+        "impact_score": 0.98,
+        "prompt_version": "verify-v1",
+        "verified_at": datetime.datetime(2026, 9, 24, 10, 15, tzinfo=UTC),
+    }
+    found.update(overrides)
+    return found
 
 
 async def _ping() -> None:

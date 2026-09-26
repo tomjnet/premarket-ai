@@ -109,17 +109,31 @@ class Database:
             password=_require(env, password_var),
         )
 
-    def dsn(self) -> str:
-        """Returns a libpq connection string (values quoted by psycopg)."""
+    def dsn(
+        self, search_path: str | None = None, application: str = "ai-api"
+    ) -> str:
+        """Returns a libpq connection string (values quoted by psycopg).
+
+        Args:
+            search_path: A schema to use for unqualified names (the
+                LangGraph checkpointer's tables live in ``graph``).
+            application: The ``application_name`` shown in pg_stat_activity.
+
+        Returns:
+            The connection string.
+        """
+        # No query may hold a connection for long (slow-query DoS).
+        options = "-c statement_timeout=5000"
+        if search_path is not None:
+            options += f" -c search_path={search_path}"
         return conninfo.make_conninfo(
             host=self.host,
             port=self.port,
             dbname=self.name,
             user=self.user,
             password=self.password,
-            application_name="ai-api",
-            # No query may hold a connection for long (slow-query DoS).
-            options="-c statement_timeout=5000",
+            application_name=application,
+            options=options,
         )
 
 
@@ -144,6 +158,8 @@ class Settings:
         llm: The gateway settings; None turns "Ask the News" off.
         rag: The vector store and reranker; None turns it off too.
         tracing: Langfuse settings.
+        llama_guard: Check chat questions and answers with Llama Guard
+            (LLAMA_GUARD, default true).
     """
 
     database: Database
@@ -160,6 +176,7 @@ class Settings:
     llm: llm_config.LlmConfig | None = None
     rag: rag_config.RagConfig | None = None
     tracing: tracing.TracingConfig = tracing.TracingConfig()
+    llama_guard: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -196,6 +213,11 @@ class Settings:
             llm=_optional_llm(env),
             rag=_rag(env),
             tracing=tracing.TracingConfig.from_env(env),
+            llama_guard=(
+                True
+                if not env.get("LLAMA_GUARD", "").strip()
+                else _bool(env, "LLAMA_GUARD")
+            ),
         )
 
 
@@ -233,6 +255,22 @@ def ai_db_password(env: Mapping[str, str]) -> str:
         ConfigError: It is missing or weak.
     """
     return _secret(env, "AI_DB_PASSWORD")
+
+
+def role_password(env: Mapping[str, str], name: str) -> str:
+    """Returns a database role's password (``ai-api init`` only).
+
+    Args:
+        env: The environment.
+        name: The variable, for example WORKER_DB_PASSWORD.
+
+    Returns:
+        Its value.
+
+    Raises:
+        ConfigError: It is missing or weak.
+    """
+    return _secret(env, name)
 
 
 def demo_password(env: Mapping[str, str]) -> str:
@@ -366,6 +404,115 @@ class AiSettings:
             rag=_rag(env),
             tracing=tracing.TracingConfig.from_env(env),
             sec_user_agent=env.get("SEC_USER_AGENT", "").strip(),
+            config_dir=pathlib.Path(
+                env.get("PREMARKET_CONFIG_DIR", "/app/config")
+            ),
+        )
+
+
+def _fraction(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from e
+    if not 0 <= value <= 1:
+        raise ConfigError(f"{name} must be between 0 and 1, got {value}")
+    return value
+
+
+def _money(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from e
+    if value < 0:
+        raise ConfigError(f"{name} can't be negative, got {value}")
+    return value
+
+
+@dataclasses.dataclass(frozen=True)
+class VerifySettings:
+    """Settings of the verification worker (``ai-worker``, increment 4).
+
+    Attributes:
+        database: The worker's own database role (WORKER_DB_USER /
+            WORKER_DB_PASSWORD): it reads items, writes verdicts, evidence
+            and review tasks, and the checkpointer's tables.
+        redis_host: Redis host (the job queue, run events, cloud budget).
+        redis_password: Redis password.
+        llm: The gateway settings.
+        tracing: Langfuse settings.
+        mcp_url: The MCP server's streamable HTTP endpoint (MCP_URL).
+        mcp_token: Its service token (MCP_SERVICE_TOKEN).
+        hitl_confidence_min: Below this, an item goes to review
+            (HITL_CONFIDENCE_MIN, 0.70).
+        judge_cloud_model: The escalation alias (JUDGE_CLOUD_MODEL, for
+            example ``cloud-openai``); empty keeps every judgement local.
+        monthly_budget_usd: The cloud cap (LLM_MONTHLY_BUDGET_USD, $20).
+        llama_guard: Run Llama Guard on news (LLAMA_GUARD, default true).
+        guard_news_review: An unsafe news item goes to review and skips the
+            judge (GUARD_NEWS_REVIEW, default false: evidence only, because
+            the 1B guard flags ordinary financial news).
+        ml_model_dir: The classic ML models (ML_MODEL_DIR).
+        ml_enabled: Run the classic ML baseline (ML_BASELINE, default
+            true; it is skipped when torch isn't installed).
+        config_dir: Folder with ``universe.yaml`` (PREMARKET_CONFIG_DIR).
+    """
+
+    database: Database
+    redis_host: str
+    redis_password: str = dataclasses.field(repr=False)
+    llm: llm_config.LlmConfig
+    tracing: tracing.TracingConfig = tracing.TracingConfig()
+    mcp_url: str = "http://mcp-server:8000/mcp"
+    mcp_token: str = dataclasses.field(default="", repr=False)
+    hitl_confidence_min: float = 0.70
+    judge_cloud_model: str = ""
+    monthly_budget_usd: float = 20.0
+    llama_guard: bool = True
+    guard_news_review: bool = False
+    ml_model_dir: pathlib.Path = pathlib.Path("/models")
+    ml_enabled: bool = True
+    config_dir: pathlib.Path = pathlib.Path("/app/config")
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> VerifySettings:
+        """Builds the settings from environment variables.
+
+        Args:
+            env: The environment.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ConfigError: A setting is missing or invalid.
+        """
+        guard = env.get("LLAMA_GUARD", "").strip()
+        ml = env.get("ML_BASELINE", "").strip()
+        return cls(
+            database=Database.from_env(
+                env, "WORKER_DB_USER", "WORKER_DB_PASSWORD"
+            ),
+            redis_host=env.get("REDIS_HOST", "redis"),
+            redis_password=_secret(env, "REDIS_PASSWORD"),
+            llm=_llm(env),
+            tracing=tracing.TracingConfig.from_env(env),
+            mcp_url=env.get("MCP_URL", "http://mcp-server:8000/mcp").strip(),
+            mcp_token=_secret(env, "MCP_SERVICE_TOKEN"),
+            hitl_confidence_min=_fraction(env, "HITL_CONFIDENCE_MIN", 0.70),
+            judge_cloud_model=env.get("JUDGE_CLOUD_MODEL", "").strip(),
+            monthly_budget_usd=_money(env, "LLM_MONTHLY_BUDGET_USD", 20.0),
+            llama_guard=True if not guard else _bool(env, "LLAMA_GUARD"),
+            guard_news_review=_bool(env, "GUARD_NEWS_REVIEW"),
+            ml_model_dir=pathlib.Path(env.get("ML_MODEL_DIR", "/models")),
+            ml_enabled=True if not ml else _bool(env, "ML_BASELINE"),
             config_dir=pathlib.Path(
                 env.get("PREMARKET_CONFIG_DIR", "/app/config")
             ),

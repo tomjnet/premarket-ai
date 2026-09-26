@@ -26,6 +26,8 @@ from ai_api import deps
 from ai_api import news
 from ai_api import sessions
 from ai_api import users
+from ai_api import verdicts
+from ai_api.guard import llama_guard
 from ai_api.llm import factory
 from ai_api.llm import tracing
 from ai_api.rag import ask
@@ -36,6 +38,10 @@ from ai_api.routes import auth
 from ai_api.routes import chat
 from ai_api.routes import health
 from ai_api.routes import news as news_routes
+from ai_api.routes import review
+from ai_api.routes import runs
+from ai_api.verify import events
+from ai_api.worker import queue
 
 _log = logging.getLogger(__name__)
 
@@ -81,6 +87,11 @@ def build_ask(
         factory.embeddings(llm), llm.query_prefix, llm.document_prefix
     )
     reranker = rerank.Reranker(settings.rag.reranker_url)
+    guard = llama_guard.Guard(
+        factory.chat_model(llm, model=llm.guard_model, max_tokens=20)
+        if settings.llama_guard
+        else None
+    )
     config_dir = pathlib.Path(
         os.environ.get("PREMARKET_CONFIG_DIR", "/app/config")
     )
@@ -93,6 +104,7 @@ def build_ask(
         members=universe.load(config_dir),
         vendor_lookup=_vendor_lookup(news_store),
         model_name=llm.main_model,
+        guard=guard,
     )
     return service, reranker
 
@@ -137,6 +149,10 @@ async def open_services(
 
     news_store = news.PostgresNewsStore(pool)
     ask_service, reranker = build_ask(settings, news_store)
+    jobs = queue.Queue(
+        queue.make_broker(settings.redis_host, settings.redis_password)
+    )
+    await jobs.start()
     try:
         yield deps.Services(
             settings=settings,
@@ -152,8 +168,12 @@ async def open_services(
             ping=ping,
             ask=ask_service,
             chat_gate=chat.ChatGate(redis),
+            verdicts=verdicts.PostgresVerdictStore(pool),
+            queue=jobs,
+            run_events=events.RunEvents(redis),
         )
     finally:
+        await jobs.stop()
         await pool.close()
         await redis.aclose()
         if reranker is not None:
@@ -216,4 +236,6 @@ def create_app(
     app.include_router(auth.router)
     app.include_router(news_routes.router)
     app.include_router(chat.router)
+    app.include_router(runs.router)
+    app.include_router(review.router)
     return app

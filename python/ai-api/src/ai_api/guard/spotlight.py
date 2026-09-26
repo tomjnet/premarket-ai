@@ -43,8 +43,8 @@ def news_block(headline: str, body: str, item_id: str | int = "") -> str:
     )
 
 
-def source_block(number: int, title: str, text: str) -> str:
-    """One retrieved source, numbered for citations ``[n]``."""
+def source_block(number: int | str, title: str, text: str) -> str:
+    """One retrieved source (or evidence), numbered for citations ``[n]``."""
     return (
         f'<source n="{number}">\nTitle: {_neutralize(title)}\n'
         f"{_neutralize(text)}\n</source>"

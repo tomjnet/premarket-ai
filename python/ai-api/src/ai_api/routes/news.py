@@ -46,6 +46,10 @@ def _item(row: dict[str, Any], *, with_body: bool) -> dict[str, Any]:
         "rules_checked": row["rules_checked"],
         "summary": row.get("summary"),
         "sentiment": row.get("sentiment"),
+        "verdict": row.get("verdict"),
+        "confidence": row.get("confidence"),
+        "review_status": row.get("review_status"),
+        "verdict_source": row.get("verdict_source"),
     }
     if with_body:
         fields["body"] = row["body"]
@@ -78,6 +82,50 @@ def _ai_detail(
     )
 
 
+def _verification(
+    found: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    review: dict[str, Any] | None,
+) -> schemas.VerificationOut | None:
+    if not found:
+        return None
+    review_out = None
+    if review is not None:
+        decided = review["decided_at"]
+        review_out = schemas.ReviewOut(
+            id=review["id"],
+            status=review["status"],
+            reasons=list(review["reasons"]),
+            ai_verdict=review["ai_verdict"],
+            final_verdict=review["final_verdict"],
+            reviewer=review["reviewer"],
+            comment=review["comment"],
+            created_at=schemas.utc_z(review["created_at"]),
+            decided_at=None if decided is None else schemas.utc_z(decided),
+        )
+    return schemas.VerificationOut(
+        status=found["status"],
+        verdict=found["verdict"],
+        confidence=found["confidence"],
+        reason_codes=list(found["reason_codes"]),
+        rationale=found["rationale"],
+        rule_verdict=found["rule_verdict"],
+        rule_confidence=found["rule_confidence"],
+        judge_verdict=found["judge_verdict"],
+        judge_confidence=found["judge_confidence"],
+        judge_model=found["judge_model"],
+        escalated=found["escalated"],
+        review_status=found["review_status"],
+        review_reasons=list(found["review_reasons"]),
+        impact=found["impact"],
+        impact_score=found["impact_score"],
+        prompt_version=found["prompt_version"],
+        verified_at=schemas.utc_z(found["verified_at"]),
+        evidence=[schemas.EvidenceOut(**e) for e in evidence],
+        review=review_out,
+    )
+
+
 @router.get("/news")
 async def list_news(
     services: deps.ServicesDep,
@@ -87,6 +135,8 @@ async def list_news(
     ] = None,
     q: Annotated[str | None, fastapi.Query(max_length=200)] = None,
     include_duplicates: bool = False,
+    verdict: schemas.Verdict | None = None,
+    pending_review: bool = False,
 ) -> schemas.NewsListOut:
     """One feed date's news, newest first.
 
@@ -96,10 +146,12 @@ async def list_news(
         ticker: Only items tagged with this ticker.
         q: Case-insensitive text in the headline or body.
         include_duplicates: Also return items flagged as duplicates.
+        verdict: Only items with this verdict.
+        pending_review: Only items waiting for an analyst's review.
 
     Returns:
-        The date's ingest, rule and AI runs (or null) and the matching
-        items with their rule results and summaries.
+        The date's ingest, rule, AI and verify runs (or null) and the
+        matching items with their rule results, summaries and verdicts.
     """
     if day is None:
         day = datetime.datetime.now(_NEW_YORK).date()
@@ -109,10 +161,13 @@ async def list_news(
         ticker=None if ticker is None else ticker.upper(),
         text=text if text else None,
         include_duplicates=include_duplicates,
+        verdict=verdict,
+        pending_review=pending_review,
     )
     run = await services.news.latest_run(day)
     rule_run = await services.news.latest_rule_run(day)
     ai_run = await services.news.latest_ai_run(day)
+    verify_run = await services.news.latest_verify_run(day)
     rows = await services.news.items(query)
     items = [schemas.NewsItemOut(**_item(row, with_body=False)) for row in rows]
     return schemas.NewsListOut(
@@ -122,6 +177,11 @@ async def list_news(
             None if rule_run is None else schemas.RuleRunOut.from_row(rule_run)
         ),
         ai_run=None if ai_run is None else schemas.AiRunOut.from_row(ai_run),
+        verify_run=(
+            None
+            if verify_run is None
+            else schemas.VerifyRunOut.from_row(verify_run)
+        ),
         count=len(items),
         items=items,
     )
@@ -132,7 +192,7 @@ async def get_news_item(
     services: deps.ServicesDep,
     item_id: Annotated[int, fastapi.Path(ge=1, le=2**63 - 1)],
 ) -> schemas.NewsDetailOut:
-    """One item with its full body, the rule evidence and the AI results.
+    """One item with its body, the rule evidence, AI results and verdict.
 
     Raises:
         fastapi.HTTPException: 404 when there is no such item.
@@ -141,6 +201,9 @@ async def get_news_item(
     if row is None:
         raise fastapi.HTTPException(status_code=404, detail=_NOT_FOUND)
     extraction = await services.news.extraction(item_id)
+    found, evidence, review = await services.news.verification(item_id)
     return schemas.NewsDetailOut(
-        **_item(row, with_body=True), ai=_ai_detail(row, extraction)
+        **_item(row, with_body=True),
+        ai=_ai_detail(row, extraction),
+        verification=_verification(found, evidence, review),
     )

@@ -7,16 +7,23 @@
 # Increment 3 (first AI): the LLM gateway (LiteLLM), ChromaDB, the reranker,
 # and `ai-api enrich` / `ai-api corpus` in the ai-api-init container; the
 # `observability` profile adds Langfuse.
+# Increment 4 (AI verification): the verification worker (ai-worker, a
+# taskiq queue on Redis Streams running the LangGraph verify_news graph),
+# the MCP server with its read-only tools, and SearXNG for web search.
 # Profiles: legacy (inc 0+), ai (inc 1+), observability (inc 3+), full.
 #   podman compose --profile legacy --profile ai up -d
 # Ollama is not a service: it runs on the GPU host (OLLAMA_BASE_URL).
 #
-# Only `edge` (and Langfuse, when on) publishes a port:
+# Only `edge` (plus Langfuse and the MCP server, on loopback) publishes a
+# port:
 #   browser -> edge (rate limits, security headers, load balancing)
 #                ├── /      -> web-1 | web-2   (static UI)
-#                └── /api/  -> ai-api          (auth, news, chat)
+#                └── /api/  -> ai-api          (auth, news, chat, runs,
+#                                                review)
 #                                -> postgres, redis, chroma, reranker,
 #                                   llm-gateway -> Ollama on the GPU host
+#   ai-api --(jobs: Redis Stream)--> ai-worker --> mcp-server --> searxng,
+#                                                  postgres, chroma, Yahoo
 
 name: premarket-ai
 
@@ -53,6 +60,8 @@ x-ai-env: &ai-env
   LANGFUSE_HOST: http://langfuse-web:3000
   LANGFUSE_PUBLIC_KEY: pk-lf-${LANGFUSE_KEY_ID:-}
   LANGFUSE_SECRET_KEY: sk-lf-${LANGFUSE_SECRET:-}
+  # Increment 4: Llama Guard on news and chat (guard-<HW_PROFILE>).
+  LLAMA_GUARD: ${LLAMA_GUARD:-true}
 
 # Settings shared by the two UI replicas.
 x-web: &web
@@ -229,6 +238,11 @@ services:
       <<: [*pg-env, *ai-env]
       AI_DB_USER: premarket_ai
       AI_DB_PASSWORD: ${AI_DB_PASSWORD:?run make -C python env}
+      # Increment 4: the worker's and the MCP server's roles.
+      WORKER_DB_USER: premarket_worker
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?run make -C python env}
+      MCP_DB_USER: premarket_mcp
+      MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?run make -C python env}
       DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?copy it from .env.example}
       TZ: UTC
       REDIS_HOST: redis
@@ -248,10 +262,11 @@ services:
       - /tmp:size=16m
     restart: "no"
 
-  # FastAPI: /auth/*, /news, /news/{id}, /health. Not published: only the
-  # edge proxy reaches it. Connects as premarket_ai, which can read raw news
-  # only through the ai.v_* views, plus the rule results and the users, and
-  # append audit rows, nothing else.
+  # FastAPI: /auth/*, /news, /news/{id}, /chat, /runs, /review, /health.
+  # Not published: only the edge proxy reaches it. Connects as
+  # premarket_ai, which can read raw news only through the ai.v_* views,
+  # plus the rule, AI and verification results and the users, append audit
+  # rows, start verify runs and record review decisions, nothing else.
   ai-api:
     profiles: [ai, full]
     build:
@@ -378,16 +393,154 @@ services:
 
   # The GPU evals (make -C python eval-ai / bench-models / eval-rag): run on
   # this network against the gateway, chroma and the reranker, and write
-  # their reports to docs/benchmarks.
+  # their reports to docs/benchmarks. `make -C python ml-train` trains the
+  # DistilBERT baseline into the ml-models volume with the same image.
   ai-eval:
     profiles: [eval]
     image: localhost/premarket-ai/ai-api:ai-eval
     environment:
       <<: *ai-env
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      ML_MODEL_DIR: /models
     volumes:
       - ./docs/benchmarks:/out
+      - ml-models:/models
     restart: "no"
+
+  # --- increment 4: AI verification -------------------------------------------
+  # Self-hosted web search for the MCP tool `web_search` (counted and linked,
+  # never stored). Only mcp-server calls it.
+  searxng:
+    profiles: [ai, full]
+    image: docker.io/searxng/searxng:2026.9.25-12f8b6515
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?run make -C python env}
+    volumes:
+      - ./podman/config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    tmpfs:
+      - /var/cache/searxng:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 512m
+    healthcheck:
+      # No spaces inside arguments: Podman re-splits healthcheck commands.
+      test: ["CMD", "python3", "-c", "__import__('urllib.request').request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # The MCP server (FastMCP, streamable HTTP at /mcp): read-only tools for
+  # the verify graph and, from increment 5, the agents. Every client needs
+  # MCP_SERVICE_TOKEN. Published on loopback only, so Claude Desktop or the
+  # MCP Inspector on this machine can connect (make -C python mcp-tools).
+  mcp-server:
+    profiles: [ai, full]
+    build:
+      context: ./python/mcp-server
+      dockerfile: ../../podman/mcp-server/Containerfile
+      target: runtime
+      additional_contexts:
+        config: ./python/config
+    image: localhost/premarket-ai/mcp-server:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-api-init:
+        condition: service_completed_successfully
+    ports:
+      - ${MCP_BIND:-127.0.0.1}:${MCP_PORT:-8765}:8000
+    environment:
+      TZ: UTC
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: premarket
+      MCP_DB_USER: premarket_mcp
+      MCP_DB_PASSWORD: ${MCP_DB_PASSWORD:?run make -C python env}
+      MCP_SERVICE_TOKEN: ${MCP_SERVICE_TOKEN:?run make -C python env}
+      MCP_ALLOWED_HOSTS: mcp-server:8000,localhost:*,127.0.0.1:*
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make -C python env}
+      LLM_GATEWAY_URL: http://llm-gateway:4000/v1
+      LLM_GATEWAY_KEY: sk-${LLM_GATEWAY_KEY:?run make -C python env}
+      HW_PROFILE: ${HW_PROFILE:-gpu4gb}
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      SEARXNG_URL: http://searxng:8080
+      WEB_SEARCH_PER_MIN: ${WEB_SEARCH_PER_MIN:-30}
+      PRICES_PER_MIN: ${PRICES_PER_MIN:-30}
+    <<: *hardened
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "mcp-server", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # The verification worker: taskiq on the Redis Stream `premarket:verify`
+  # (consumer group ai-worker). It runs the coordinator of each verify run
+  # (Llama Guard over every unique item, then one job per item), the
+  # LangGraph verify_news graph per item (checkpoints in Postgres, schema
+  # `graph`), and the resume of reviewed items. Scale it with
+  #   podman compose up -d --scale ai-worker=3
+  # (one GPU still serves the model calls; more workers mostly overlap the
+  # tool calls). Same code as ai-api, plus CPU torch for the classic ML
+  # baseline (FinBERT, the fine-tuned DistilBERT in the ml-models volume).
+  ai-worker:
+    profiles: [ai, full]
+    build:
+      context: ./python/ai-api
+      dockerfile: ../../podman/ai-api/Containerfile
+      target: worker
+      additional_contexts:
+        fastpath: ./cpp/fastpath
+        config: ./python/config
+        vendorsim: ./python/vendor-sim
+    image: localhost/premarket-ai/ai-api:worker
+    command: ["taskiq", "worker", "ai_api.worker.app:build_broker", "--workers", "1", "--max-async-tasks", "${WORKER_CONCURRENCY:-2}", "--ack-type", "when_executed", "--shutdown-timeout", "30"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-api-init:
+        condition: service_completed_successfully
+      llm-gateway:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    environment:
+      TZ: UTC
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: premarket
+      WORKER_DB_USER: premarket_worker
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:?run make -C python env}
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make -C python env}
+      MCP_URL: http://mcp-server:8000/mcp
+      MCP_SERVICE_TOKEN: ${MCP_SERVICE_TOKEN:?run make -C python env}
+      HITL_CONFIDENCE_MIN: ${HITL_CONFIDENCE_MIN:-0.70}
+      JUDGE_CLOUD_MODEL: ${JUDGE_CLOUD_MODEL:-}
+      LLM_MONTHLY_BUDGET_USD: ${LLM_MONTHLY_BUDGET_USD:-20}
+      GUARD_NEWS_REVIEW: ${GUARD_NEWS_REVIEW:-false}
+      ML_BASELINE: ${ML_BASELINE:-true}
+      ML_MODEL_DIR: /models
+      <<: *ai-env
+    volumes:
+      # FinBERT's download cache and the trained DistilBERT (ml-train).
+      - ml-models:/models
+    <<: *hardened
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    mem_limit: ${WORKER_MEM:-3g}
+    restart: unless-stopped
 
   # Two replicas of the static UI, load balanced by the edge.
   web-1:
@@ -573,6 +726,7 @@ volumes:
   nfs-reports:
   chromadata:
   hf-models:
+  ml-models:
   langfuse-db:
   langfuse-clickhouse:
   langfuse-minio:

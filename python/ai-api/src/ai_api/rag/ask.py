@@ -10,6 +10,10 @@
 The answer streams token by token; the final event carries the checked
 text: citation numbers that point to no source are removed, and an answer
 that gives investment advice is replaced by a refusal.
+
+Increment 4 adds Llama Guard (guard layer 2) on both ends: an unsafe
+question is refused before retrieval, and an unsafe answer is replaced by
+the refusal (``guard_blocked`` in the final event).
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from typing import Any
 
 from langchain_core import language_models
 
+from ai_api.guard import llama_guard
 from ai_api.guard import output
 from ai_api.guard import sanitize
 from ai_api.guard import spotlight
@@ -64,6 +69,11 @@ Rules:
 - Answer in English, in at most 150 words.
 - Never give investment advice: no buy, sell or hold recommendations and no
   price targets. You may describe sentiment and what the sources say."""
+
+GUARD_REFUSAL = (
+    "I can't help with that request. Ask about companies, filings or the "
+    "day's news instead."
+)
 
 ADVICE_QUESTION = (
     "The question asks for investment advice. Start your answer with: "
@@ -177,6 +187,7 @@ class AskService:
         members: list[universe.Member],
         vendor_lookup: VendorLookup | None = None,
         model_name: str = "",
+        guard: llama_guard.Guard | None = None,
     ) -> None:
         """Wires the chain.
 
@@ -189,6 +200,7 @@ class AskService:
             members: The universe (tickers named in a question).
             vendor_lookup: The day's items for some tickers, or None.
             model_name: The gateway alias, for the answer metadata.
+            guard: Llama Guard on the question and the answer, or None.
         """
         self._store = store
         self._reranker = reranker
@@ -198,6 +210,23 @@ class AskService:
         self._members = members
         self._vendor_lookup = vendor_lookup
         self._model_name = model_name
+        self._guard = guard
+
+    async def _unsafe_question(self, question: str) -> bool:
+        if self._guard is None or not self._guard.enabled:
+            return False
+        found = await self._guard.check_question(question)
+        if found.blocks_question():
+            _log.warning("Llama Guard refused a question: %s", found.describe())
+        return found.blocks_question()
+
+    async def _unsafe_answer(self, question: str, answer: str) -> bool:
+        if self._guard is None or not self._guard.enabled:
+            return False
+        found = await self._guard.check_answer(question, answer)
+        if not found.safe:
+            _log.warning("Llama Guard blocked an answer: %s", found.describe())
+        return not found.safe
 
     async def retrieve(
         self, question: str, day: datetime.date
@@ -293,6 +322,13 @@ class AskService:
         started = time.monotonic()
         clean = sanitize.clean_text(question)[:MAX_QUESTION_CHARS]
         injection = bool(sanitize.injection_sentences(clean))
+        if await self._unsafe_question(clean):
+            yield Event("sources", {"sources": [], "reranked": False})
+            yield Event("token", {"text": GUARD_REFUSAL})
+            yield self._done(
+                GUARD_REFUSAL, [], [], True, started, injection, blocked=True
+            )
+            return
         sources, reranked = await self.retrieve(clean, day)
         yield Event(
             "sources",
@@ -321,11 +357,16 @@ class AskService:
                 yield Event("token", {"text": text})
         answer, cited = check_citations("".join(parts), sources)
         refused = False
+        blocked = False
         advice = output.investment_advice(answer)
         if advice:
             _log.warning("answer gave investment advice: %s", advice)
             answer, cited, refused = output.REFUSAL, [], True
-        yield self._done(answer, cited, sources, refused, started, injection)
+        elif await self._unsafe_answer(clean, answer):
+            answer, cited, refused, blocked = GUARD_REFUSAL, [], True, True
+        yield self._done(
+            answer, cited, sources, refused, started, injection, blocked
+        )
 
     def _done(
         self,
@@ -335,6 +376,7 @@ class AskService:
         refused: bool,
         started: float,
         injection: bool,
+        blocked: bool = False,
     ) -> Event:
         trusted = {s.n for s in sources if s.trusted}
         return Event(
@@ -345,6 +387,7 @@ class AskService:
                 "cites_trusted": any(n in trusted for n in cited),
                 "refused": refused,
                 "injection_flagged": injection,
+                "guard_blocked": blocked,
                 "model": self._model_name,
                 "prompt_version": PROMPT_VERSION,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),

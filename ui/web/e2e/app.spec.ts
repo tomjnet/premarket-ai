@@ -172,6 +172,47 @@ test.describe('Ask the News (streamed over the service worker)', () => {
   }
 });
 
+test.describe('Review queue (increment 4)', () => {
+  for (const colorScheme of ['light', 'dark'] as const) {
+    test(`queue, a decision and a verify run in ${colorScheme} mode`, async ({
+      page,
+    }) => {
+      // A run of about 80 items at 150 ms each, plus two axe runs.
+      test.slow();
+      await page.emulateMedia({colorScheme});
+      await logIn(page, 'default', 'analyst1');
+      await page.getByRole('link', {name: 'Review queue'}).click();
+      const queue = page.getByRole('list', {name: 'Review tasks'});
+      await expect(queue).toBeVisible();
+      await expectNoA11yViolations(page);
+
+      const tasks = queue.locator('[data-review-task]');
+      const before = await tasks.count();
+      await tasks
+        .first()
+        .getByRole('button', {name: /^Approve/})
+        .click();
+      await expect(tasks).toHaveCount(before - 1);
+      await expect(page.getByText(/Verdict approved for VND-/)).toBeAttached();
+
+      await page.getByRole('button', {name: 'Verify this date'}).click();
+      await expect(
+        page.getByText(/^Verification finished: \d+ items/),
+      ).toBeVisible({timeout: 60_000});
+      await expectNoA11yViolations(page);
+    });
+  }
+
+  test('traders get the 403 page', async ({page}) => {
+    await logIn(page);
+    await expect(page.getByRole('link', {name: 'Review queue'})).toHaveCount(0);
+    await page.goto('/review');
+    await expect(
+      page.getByRole('heading', {name: "You don't have access to this page"}),
+    ).toBeVisible();
+  });
+});
+
 test.describe('every mock scenario', () => {
   test('default: the day with its summary', async ({page}) => {
     await logIn(page);

@@ -12,6 +12,7 @@ import {
   NoFeed,
   RuleRunStatus,
   RunStatus,
+  VerifyRunStatus,
 } from './components/feed-states';
 import {NewsRow} from './components/news-row';
 import {feedSearch, newestFirst, parseFeedFilters, visibleItems} from './feed';
@@ -134,7 +135,10 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
   if (list.run === null) {
     return <NoFeed date={filters.date} today={today} />;
   }
-  const filtered = filters.ticker !== undefined || filters.q !== undefined;
+  const filtered =
+    filters.ticker !== undefined ||
+    filters.q !== undefined ||
+    filters.verdict !== undefined;
   const search = feedSearch(filters);
   // A pressed chip clears the ticker filter; another chip sets it.
   const toggleTicker = (ticker: string) =>
@@ -160,8 +164,10 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
         <RunStatus list={list} filters={filters} today={today} />
       )}
       <RuleRunStatus ruleRun={list.ruleRun} />
-      {/* Only once the rules have run: the AI run comes after them. */}
+      {/* Only once the rules have run: the AI run comes after them, and
+          the verification after the AI run. */}
       {list.ruleRun !== null && <AiRunStatus aiRun={list.aiRun} />}
+      {list.aiRun !== null && <VerifyRunStatus verifyRun={list.verifyRun} />}
       {items.length > 0 && shown.length === 0 && (
         <div className="flex flex-col items-start gap-2 py-6">
           <p>No item in this view was flagged by the rule checks.</p>
@@ -178,14 +184,19 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
         <div className="flex flex-col items-start gap-2 py-6">
           <p>
             {filtered
-              ? 'No items match this ticker or search.'
+              ? 'No items match this ticker, search or verdict.'
               : 'No items in this feed yet.'}
           </p>
           {filtered && (
             <button
               type="button"
               onClick={() =>
-                onChange({...filters, ticker: undefined, q: undefined})
+                onChange({
+                  ...filters,
+                  ticker: undefined,
+                  q: undefined,
+                  verdict: undefined,
+                })
               }
               className="font-medium underline underline-offset-4"
             >

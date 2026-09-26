@@ -1,7 +1,7 @@
 import {apiClient} from './client';
 import type {CallOptions} from './client';
 import {newsDetailSchema, newsListSchema} from './schemas/news';
-import type {NewsDetail, NewsList} from './schemas/news';
+import type {NewsDetail, NewsList, Verdict} from './schemas/news';
 
 /** The filters of `GET /news`, as the UI holds them. */
 export interface NewsFilters {
@@ -11,6 +11,10 @@ export interface NewsFilters {
   /** Text search in headline and body. */
   q?: string;
   includeDuplicates?: boolean;
+  /** Only items with this verdict (increment 4). */
+  verdict?: Verdict;
+  /** Only items waiting for an analyst's review. */
+  pendingReview?: boolean;
 }
 
 /** `GET /news`: the feed of one trading date. */
@@ -28,6 +32,8 @@ export function getNews(
         filters.includeDuplicates === undefined
           ? undefined
           : String(filters.includeDuplicates),
+      verdict: filters.verdict,
+      pending_review: filters.pendingReview === true ? 'true' : undefined,
     },
     schema: newsListSchema,
     signal,

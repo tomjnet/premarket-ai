@@ -1,0 +1,46 @@
+# premarket-ai SearXNG: the self-hosted web search behind the MCP tool
+# `web_search` (increment 4). Only mcp-server calls it (no published port):
+# the verify graph counts which outlets report a story and keeps their
+# titles and links as evidence. Outlet text is never stored.
+#
+# The secret comes from SEARXNG_SECRET (make -C python env generates it).
+# Changing this file needs `podman compose up -d searxng`.
+
+use_default_settings:
+  engines:
+    # A few general and news engines that answer without an API key.
+    keep_only:
+      - duckduckgo
+      - bing
+      - brave
+      - mojeek
+      - startpage
+      - bing news
+      - yahoo news
+
+general:
+  instance_name: premarket-ai
+  enable_metrics: false
+
+server:
+  # Replaced by SEARXNG_SECRET at startup.
+  secret_key: "set-by-SEARXNG_SECRET"
+  # Only reached from the compose network by mcp-server, which has its own
+  # per-minute limit; the bot limiter would need a Valkey of its own.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: GET
+
+search:
+  safe_search: 1
+  default_lang: en
+  # json is what mcp-server reads.
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 4.0
+  max_request_timeout: 8.0
+  useragent_suffix: "premarket-ai-lab"

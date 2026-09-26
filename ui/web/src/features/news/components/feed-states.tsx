@@ -1,6 +1,6 @@
 import {Link} from 'react-router';
 
-import type {AiRun, NewsList, RuleRun} from '@/api/schemas/news';
+import type {AiRun, NewsList, RuleRun, VerifyRun} from '@/api/schemas/news';
 import {Alert, AlertDescription, AlertTitle} from '@/components/ui/alert';
 import {Skeleton} from '@/components/ui/skeleton';
 import {formatLongDate, isWeekend} from '@/lib/time';
@@ -9,6 +9,7 @@ import {aiRunSummary} from '../ai';
 import {feedFallbackDate, feedSearch, feedSummary} from '../feed';
 import type {FeedFilters} from '../feed';
 import {ruleRunSummary} from '../rules';
+import {verifyRunSummary} from '../verdicts';
 
 const SKELETON_ROWS = 6;
 
@@ -146,6 +147,27 @@ export function RuleRunStatus({ruleRun}: RuleRunStatusProps) {
     return (
       <Alert role="status">
         <AlertTitle>Rule checks failed</AlertTitle>
+        <AlertDescription>{text}</AlertDescription>
+      </Alert>
+    );
+  }
+  return <p className="text-sm text-muted-foreground">{text}</p>;
+}
+
+interface VerifyRunStatusProps {
+  verifyRun: VerifyRun | null;
+}
+
+/**
+ * The date's AI verification: its verdict counts when `DONE`, progress
+ * while queued or running, a notice when it failed or hasn't run.
+ */
+export function VerifyRunStatus({verifyRun}: VerifyRunStatusProps) {
+  const text = verifyRunSummary(verifyRun);
+  if (verifyRun?.status === 'FAILED') {
+    return (
+      <Alert role="status">
+        <AlertTitle>The AI verification failed</AlertTitle>
         <AlertDescription>{text}</AlertDescription>
       </Alert>
     );

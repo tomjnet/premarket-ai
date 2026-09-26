@@ -194,7 +194,15 @@ describe('generateDay: rule results', () => {
       const aiCodes = codesOf(item.ai?.evidence ?? []).filter(
         code => !ruleCodes.includes(code),
       );
-      expect(item.reason_codes).toEqual([...ruleCodes, ...aiCodes]);
+      // Then the verification's own codes (increment 4).
+      const earlier = [...ruleCodes, ...aiCodes];
+      const verifyCodes =
+        item.verdict_source === 'ai'
+          ? (item.verification?.reason_codes ?? []).filter(
+              code => !earlier.includes(code),
+            )
+          : [];
+      expect(item.reason_codes).toEqual([...earlier, ...verifyCodes]);
     }
     const [fake] = withCode('FAKE_TICKER');
     expect(

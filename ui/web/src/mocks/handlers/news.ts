@@ -16,6 +16,8 @@ import type {GeneratedDay} from '../data/generator';
 import {ruleRunOf, withRuleProgress} from '../data/rules';
 import {activeScenario} from '../scenarios';
 
+import {latestVerifyRun, reviewedItem} from './verify';
+
 import {
   notFound,
   rejectUnauthenticated,
@@ -71,17 +73,34 @@ export const newsHandlers = [
         type: 'bool_parsing',
       });
     }
-    const feed = scenarioFeed(db.day(date));
+    const pendingReview = parseBool(params.get('pending_review'));
+    const verdict = params.get('verdict');
+    if (pendingReview === undefined || !matchesVerdictParam(verdict)) {
+      return validationError({
+        loc: [
+          'query',
+          pendingReview === undefined ? 'pending_review' : 'verdict',
+        ],
+        msg: 'Input should be a valid value',
+        type: 'enum',
+      });
+    }
+    const day = db.day(date);
+    const feed = scenarioFeed(day);
     const items = feed.items
+      .map(reviewedItem)
       .filter(item => includeDuplicates || !item.is_dup)
       .filter(item => matchesTicker(item, params.get('ticker')))
       .filter(item => matchesText(item, params.get('q')))
+      .filter(item => verdict === null || item.verdict === verdict)
+      .filter(item => !pendingReview || item.review_status === 'PENDING')
       .map(withoutBody);
     const list: NewsListWire = {
       date,
       run: feed.run,
       rule_run: feed.ruleRun,
       ai_run: feed.aiRun,
+      verify_run: feed.run === null ? null : latestVerifyRun(day),
       count: items.length,
       items,
     };
@@ -125,18 +144,25 @@ export const newsHandlers = [
       // `id` as a string: the client must answer with a ContractError.
       return HttpResponse.json({...item, id: String(item.id)});
     }
-    return HttpResponse.json(item);
+    return HttpResponse.json(reviewedItem(item));
   }),
 ];
 
-/** The list endpoint sends items without their body, evidence and AI detail. */
+/** The list endpoint sends items without their body and their details. */
 function withoutBody({
   body,
   rule_evidence,
   ai,
+  verification,
   ...item
 }: NewsDetailWire): NewsItemWire {
   return item;
+}
+
+const VERDICTS = ['VERIFIED', 'UNVERIFIED', 'MISLEADING', 'FAKE'];
+
+function matchesVerdictParam(verdict: string | null): boolean {
+  return verdict === null || VERDICTS.includes(verdict);
 }
 
 function parseBool(value: string | null): boolean | undefined {

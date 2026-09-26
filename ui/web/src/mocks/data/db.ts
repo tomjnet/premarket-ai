@@ -1,5 +1,5 @@
 import type {TokenResponseWire} from '@/api/schemas/auth';
-import type {NewsDetailWire} from '@/api/schemas/news';
+import type {NewsDetailWire, Verdict} from '@/api/schemas/news';
 import {ENV} from '@/lib/env';
 import {todayInNewYork} from '@/lib/time';
 
@@ -9,6 +9,27 @@ import {MOCK_PASSWORD, MOCK_USERS} from './users';
 
 /** How fast the mock "model" writes: about 25 tokens a second. */
 const CHAT_TOKEN_DELAY_MS = 40;
+/** How long the mock verify run takes per item. */
+const RUN_ITEM_MS = 150;
+
+/** An analyst's decision on a review task (`POST /review/{id}`). */
+export interface ReviewRecord {
+  action: 'approve' | 'override';
+  /** The analyst's verdict (override only). */
+  verdict: Verdict | null;
+  comment: string;
+  reviewer: string;
+  decidedAt: string;
+}
+
+/** A verify run started with `POST /runs`. */
+export interface StartedRun {
+  runId: number;
+  date: string;
+  requestedBy: string;
+  /** Epoch ms: the run progresses one item every `runItemMs` from here. */
+  startedAt: number;
+}
 
 interface AccessToken {
   username: string;
@@ -50,6 +71,13 @@ export class MockDb {
   chatTokenDelayMs = CHAT_TOKEN_DELAY_MS;
   /** Users with a question being answered (one at a time each). */
   readonly chatsInFlight = new Set<string>();
+  /** Pause between two items of a started verify run. */
+  runItemMs = RUN_ITEM_MS;
+  /** Review decisions by task id (the reviewed item's id). */
+  readonly reviews = new Map<number, ReviewRecord>();
+  /** Verify runs started in this session, oldest first. */
+  readonly startedRuns: StartedRun[] = [];
+  private runCounter = 0;
   private readonly accessTokens = new Map<string, AccessToken>();
   private tokenCounter = 0;
   private readonly days = new Map<string, GeneratedDay>();
@@ -63,6 +91,10 @@ export class MockDb {
     this.sessionStore = memorySessionStore();
     this.chatTokenDelayMs = CHAT_TOKEN_DELAY_MS;
     this.chatsInFlight.clear();
+    this.runItemMs = RUN_ITEM_MS;
+    this.reviews.clear();
+    this.startedRuns.length = 0;
+    this.runCounter = 0;
     this.accessTokens.clear();
     this.runStarts.clear();
   }
@@ -139,6 +171,24 @@ export class MockDb {
       this.runStarts.set(date, since);
     }
     return since;
+  }
+
+  /** Starts a verify run of `date` for `username`. */
+  startRun(date: string, username: string): StartedRun {
+    this.runCounter += 1;
+    const run = {
+      runId: this.runCounter,
+      date,
+      requestedBy: username,
+      startedAt: this.now(),
+    };
+    this.startedRuns.push(run);
+    return run;
+  }
+
+  /** The runs started for `date`, newest first. */
+  runsOf(date: string): StartedRun[] {
+    return this.startedRuns.filter(run => run.date === date).reverse();
   }
 
   private issueToken(username: string): TokenResponseWire {

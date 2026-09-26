@@ -28,7 +28,7 @@ describe('ruleBadges', () => {
       ...checked,
       // Sorted, as the backend sends them.
       reasonCodes: [
-        'FABRICATED_CLAIM',
+        'AN_UNKNOWN_CODE',
         'FAKE_COMPANY',
         'FAKE_TICKER',
         'SPOOFED_SOURCE',
@@ -41,8 +41,28 @@ describe('ruleBadges', () => {
       ['FAKE TICKER', 'danger'],
       ['SPOOFED SOURCE', 'danger'],
       ['STALE', 'warning'],
-      ['FABRICATED CLAIM', 'neutral'],
+      ['AN UNKNOWN CODE', 'neutral'],
       ['ZERO DAY CODE', 'neutral'],
+    ]);
+  });
+
+  it('places the verification codes among the known ones (increment 4)', () => {
+    const badges = ruleBadges({
+      ...checked,
+      reasonCodes: [
+        'NO_CORROBORATION',
+        'SENSATIONAL_HEADLINE',
+        'NUMBER_MISMATCH',
+        'FABRICATED_CLAIM',
+        'FAKE_TICKER',
+      ],
+    });
+    expect(badges.map(badge => [badge.text, badge.tone])).toEqual([
+      ['FAKE TICKER', 'danger'],
+      ['FABRICATED CLAIM', 'danger'],
+      ['NUMBER MISMATCH', 'warning'],
+      ['SENSATIONAL HEADLINE', 'warning'],
+      ['NO CORROBORATION', 'neutral'],
     ]);
   });
 

@@ -230,11 +230,11 @@ describe('NewsDetailPage: rule checks', () => {
       http.get(apiUrl('/news/:id'), () =>
         HttpResponse.json({
           ...item,
-          reason_codes: ['FABRICATED_CLAIM'],
+          reason_codes: ['AN_UNKNOWN_CODE'],
           rule_evidence: [
             {
               check: 'entity',
-              code: 'FABRICATED_CLAIM',
+              code: 'AN_UNKNOWN_CODE',
               message: 'Body says <img src=x onerror=alert(1)> to the model.',
             },
           ],
@@ -250,7 +250,7 @@ describe('NewsDetailPage: rule checks', () => {
       ),
     ).toBeInTheDocument();
     expect(section.querySelector('img')).toBeNull();
-    expect(within(section).getByText('FABRICATED CLAIM')).toHaveAttribute(
+    expect(within(section).getByText('AN UNKNOWN CODE')).toHaveAttribute(
       'data-variant',
       'outline',
     );
@@ -499,5 +499,65 @@ describe('NewsDetailPage: keyboard', () => {
     await waitFor(() =>
       expect(document.activeElement).toBe(document.getElementById('main')),
     );
+  });
+});
+
+describe('NewsDetailPage: verification (increment 4)', () => {
+  function section(): HTMLElement {
+    return screen.getByRole('region', {name: 'Verification'});
+  }
+
+  it('shows the verdict, how it was decided and the evidence', async () => {
+    const item = todayItem(
+      entry =>
+        entry.verdict_source === 'ai' &&
+        entry.verification?.judge_verdict !== null &&
+        entry.verification?.evidence.some(e => e.url !== null) === true,
+    );
+    await openItem(item.id);
+    const verification = section();
+    expect(
+      within(verification).getByText(`Verdict: ${item.verdict?.toLowerCase()}`),
+    ).toBeInTheDocument();
+    expect(within(verification).getByText('Rule checks')).toBeInTheDocument();
+    expect(within(verification).getByText('LLM judge')).toBeInTheDocument();
+    const evidence = within(verification).getByRole('list');
+    expect(within(evidence).getByText('E1')).toBeInTheDocument();
+    const link = within(evidence).getByRole('link', {name: /8-K/});
+    expect(link).toHaveAttribute('href', expect.stringMatching(/^https:\/\//));
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer nofollow');
+  });
+
+  it('says an item waits for an analyst', async () => {
+    const item = todayItem(
+      entry =>
+        entry.verdict_source === 'ai' && entry.review_status === 'PENDING',
+    );
+    await openItem(item.id);
+    expect(
+      within(section()).getByText(/^Waiting for an analyst:/),
+    ).toBeInTheDocument();
+    const badges = screen.getByRole('list', {name: 'Verdict'});
+    expect(within(badges).getByText('PENDING REVIEW')).toBeInTheDocument();
+  });
+
+  it('says a hard rule decided FAKE without the judge', async () => {
+    const item = todayItem(
+      entry => entry.verdict_source === 'ai' && entry.verdict === 'FAKE',
+    );
+    await openItem(item.id);
+    expect(
+      within(section()).getByText('Not asked: a hard rule decides FAKE'),
+    ).toBeInTheDocument();
+  });
+
+  it('has no verification section before the verification', async () => {
+    const item = db
+      .day('2026-09-23')
+      .items.find(entry => !entry.is_dup && entry.rules_checked);
+    await openItem(item?.id ?? 0);
+    expect(
+      screen.queryByRole('region', {name: 'Verification'}),
+    ).not.toBeInTheDocument();
   });
 });

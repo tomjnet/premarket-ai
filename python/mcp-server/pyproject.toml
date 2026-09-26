@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "premarket-mcp-server"
+version = "0.1.0"
+description = "premarket-ai MCP server: read-only tools for the verify graph and agents"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+  # langchain-mcp-adapters (the client in ai-api) needs mcp < 2.
+  "mcp==1.30.0",
+  "uvicorn==0.54.0",
+  "psycopg[binary]==3.3.6",
+  "psycopg-pool==3.3.3",
+  "redis==8.1.0",
+  "httpx==0.28.1",
+  "chromadb-client==1.5.9",
+  "yfinance==1.7.0",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.1.1",
+  "fakeredis[lua]==2.38.0",
+  "ruff==0.11.8",
+]
+
+[project.scripts]
+mcp-server = "mcp_server.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# Google Python Style Guide (docs/Google_Python_Style_Guide_20260925.md).
+# Same settings as vendor-sim. The rule ruff can't check, "import modules,
+# not names" (2.2), is kept by review.
+[tool.ruff]
+line-length = 80
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W",  # pycodestyle, pyflakes
+  "I",            # import order (3.13)
+  "N",            # naming (3.16)
+  "D",            # docstrings (3.8)
+  "PL",           # pylint rules (2.1)
+  "B", "UP", "SIM",
+]
+ignore = [
+  "PLR09",    # too-many-*: disabled in Google's pylintrc too
+  "PLR2004",  # magic-value comparison: not a Google rule
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test modules and test functions need no docstrings (3.8.2.1).
+"tests/**" = ["D100", "D103"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+# One import per line, sorted by full module path within each group (3.13).
+force-single-line = true
+force-sort-within-sections = true
+single-line-exclusions = ["collections.abc", "typing"]
+known-first-party = ["mcp_server"]

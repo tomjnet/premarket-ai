@@ -19,6 +19,7 @@ def chat_model(
     cfg: config.LlmConfig,
     model: str | None = None,
     max_tokens: int | None = None,
+    response_headers: bool = False,
 ) -> language_models.BaseChatModel:
     """A chat model through the gateway (temperature 0).
 
@@ -26,6 +27,8 @@ def chat_model(
         cfg: The LLM settings.
         model: A gateway alias; None means the main model.
         max_tokens: Longest answer, or None for the model's default.
+        response_headers: Put the gateway's response headers (the call's
+            cost) in each answer's ``response_metadata``.
 
     Returns:
         The model.
@@ -41,6 +44,7 @@ def chat_model(
         timeout=cfg.timeout_s,
         max_retries=1,
         max_tokens=max_tokens,
+        include_response_headers=response_headers,
     )
 
 

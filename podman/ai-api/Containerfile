@@ -15,13 +15,23 @@
 #   fastpath-wheel      the premarket_fastpath wheel (scikit-build-core)
 #   test                pytest, including the C++ vs Python parity tests
 #   lint                ruff
-#   eval                rule/dedup eval on the seed-42 golden set (gates)
-#   ai-eval             image of the GPU evals (L3, model benchmark, RAGAS),
+#   eval                rule/dedup + rules-only verification eval on the
+#                       seed-42 golden set (gates; no model, no network)
+#   ml-base             base + CPU-only torch and transformers (increment 4)
+#   ai-eval             image of the GPU evals (L3, verification with the
+#                       judge, model benchmark, RAGAS) and of `ml-train`,
 #                       run against the stack: make -C python eval-ai
+#   worker              the verification worker (ai-worker): taskiq +
+#                       the verify graph + the classic ML baseline
 #   runtime             the API image (default)
 
 ARG PYTHON_IMAGE=docker.io/library/python:3.13-slim-trixie
 ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04
+# The classic ML baseline (increment 4): CPU-only torch from PyTorch's own
+# index (the default wheel bundles CUDA, gigabytes the worker never uses).
+ARG TORCH_VERSION=2.14.0
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG TRANSFORMERS_VERSION=5.17.0
 
 # ---------------------------------------------------------------------------
 # C++20 fastpath: the core library is tested like the other C++ projects.
@@ -108,14 +118,47 @@ RUN ruff check src tests evals && ruff format --check src tests evals
 FROM dev AS eval
 COPY --from=vendorsim . /tmp/vendor-sim
 RUN pip install --no-deps /tmp/vendor-sim && rm -rf /tmp/vendor-sim
-RUN python -m evals.rules_eval --check
+RUN python -m evals.rules_eval --check \
+ && python -m evals.verify_eval --check
+
+# ---------------------------------------------------------------------------
+# Increment 4: CPU-only torch + transformers for the classic ML baseline
+# (FinBERT, the fine-tuned DistilBERT). Only the worker and the eval image
+# have them; the API image stays small.
+FROM base AS ml-base
+ARG TORCH_VERSION
+ARG TORCH_INDEX
+ARG TRANSFORMERS_VERSION
+RUN pip install --index-url ${TORCH_INDEX} torch==${TORCH_VERSION} \
+ && pip install transformers==${TRANSFORMERS_VERSION}
 
 # The evals that need the GPU host (increment 3): the L3 paraphrase eval,
-# the local model benchmark and the RAGAS baseline. Built here, run on the
+# the verification eval with the LLM judge (increment 4), the local model
+# benchmark and the RAGAS baseline; plus `ml-train`. Built here, run on the
 # compose network against the gateway, chroma and the reranker.
-FROM dev AS ai-eval
+FROM ml-base AS ai-eval
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install -e ".[dev]"
+COPY tests ./tests
+COPY evals ./evals
 COPY --from=vendorsim . /tmp/vendor-sim
 RUN pip install --no-deps /tmp/vendor-sim && rm -rf /tmp/vendor-sim
+ENV HF_HOME=/tmp/hf \
+    ML_MODEL_DIR=/models
+
+# The verification worker: the API's code plus torch; it runs the taskiq
+# worker (the command is in compose.yaml). The models volume is mounted at
+# /models: a new volume is filled from this image, so the worker owns it.
+FROM ml-base AS worker
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install . && rm -rf src pyproject.toml \
+ && useradd --system --uid 10002 --no-create-home --home-dir /app api \
+ && mkdir -p /models/hf-cache && chown -R api /models
+ENV HF_HOME=/models/hf-cache \
+    ML_MODEL_DIR=/models
+USER api
 
 # ---------------------------------------------------------------------------
 FROM base AS runtime

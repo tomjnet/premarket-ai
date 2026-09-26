@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "premarket-ai-api"
 version = "0.1.0"
-description = "premarket-ai backend: auth, the news feed, rule checks and first AI"
+description = "premarket-ai backend: auth, the news feed, rule checks, AI and verification"
 license = "MIT"
 requires-python = ">=3.13"
 dependencies = [
@@ -33,6 +33,15 @@ dependencies = [
   "langfuse==4.15.6",
   "httpx==0.28.1",
   "numpy==2.5.3",
+  # Increment 4: the verify graph, the job queue, the MCP client.
+  # taskiq 0.13.0 (2026-09-26) breaks taskiq-redis 1.2.3: stay on 0.12.
+  # langchain-mcp-adapters needs mcp < 2.
+  "langgraph==1.2.12",
+  "langgraph-checkpoint-postgres==3.1.2",
+  "taskiq==0.12.6",
+  "taskiq-redis==1.2.3",
+  "langchain-mcp-adapters==0.3.2",
+  "mcp==1.30.0",
 ]
 
 [project.optional-dependencies]

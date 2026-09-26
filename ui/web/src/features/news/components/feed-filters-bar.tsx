@@ -7,7 +7,8 @@ import {Label} from '@/components/ui/label';
 import {isIsoDate} from '@/lib/time';
 
 import {MAX_QUERY_LENGTH, normalizeTicker} from '../feed';
-import type {FeedFilters} from '../feed';
+import type {FeedFilters, VerdictFilter} from '../feed';
+import {VERDICTS, verdictText} from '../verdicts';
 
 /** Text search waits this long after the last key before it searches. */
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -166,6 +167,32 @@ export function FeedFiltersBar({
       <Button type="submit" variant="outline">
         Apply
       </Button>
+      {/* After Apply: Tab from the text fields reaches Apply first. */}
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="feed-verdict">Verdict</Label>
+        <select
+          id="feed-verdict"
+          value={filters.verdict ?? ''}
+          onChange={event =>
+            onChange({
+              ...filters,
+              verdict:
+                event.target.value === ''
+                  ? undefined
+                  : (event.target.value as VerdictFilter),
+            })
+          }
+          className="h-8 rounded-lg border border-input bg-transparent px-2 text-sm"
+        >
+          <option value="">Any verdict</option>
+          {VERDICTS.map(verdict => (
+            <option key={verdict} value={verdict}>
+              {verdictText(verdict)}
+            </option>
+          ))}
+          <option value="PENDING">Pending review</option>
+        </select>
+      </div>
       <label className="flex h-8 items-center gap-2 text-sm">
         <input
           type="checkbox"

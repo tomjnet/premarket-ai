@@ -4,6 +4,7 @@ import type {
   IngestRunWire,
   NewsDetailWire,
   RuleRunWire,
+  VerifyRunWire,
 } from '@/api/schemas/news';
 import {
   addDays,
@@ -36,6 +37,7 @@ import {
   withRuleProgress,
 } from './rules';
 import type {DedupMatch, LegacyDup} from './rules';
+import {VERIFY_START_DATE, applyVerifyRun} from './verify';
 
 /**
  * Seeded, deterministic vendor feed: the same date always gives the same
@@ -89,6 +91,8 @@ export interface GeneratedDay {
   ruleRun: RuleRunWire | null;
   /** Null before AI_START_DATE (and on weekends). */
   aiRun: AiRunWire | null;
+  /** Null before VERIFY_START_DATE (and on weekends). */
+  verifyRun: VerifyRunWire | null;
   /** Newest first, duplicates included, as the default scenario serves it. */
   items: NewsDetailWire[];
   /**
@@ -132,6 +136,7 @@ export function generateDay(date: string, seed = MOCK_SEED): GeneratedDay {
       run,
       ruleRun: null,
       aiRun: null,
+      verifyRun: null,
       items: checked,
       ruleResults,
       legacy,
@@ -150,14 +155,44 @@ export function generateDay(date: string, seed = MOCK_SEED): GeneratedDay {
       run,
       ruleRun,
       aiRun: null,
+      verifyRun: null,
       items: checked,
       ruleResults,
       legacy,
       rulesRun,
     };
   }
-  const {items, aiRun} = applyAiRun(checked, planted, ruleRun.finished_at);
-  return {date, run, ruleRun, aiRun, items, ruleResults, legacy, rulesRun};
+  const enriched = applyAiRun(checked, planted, ruleRun.finished_at);
+  const aiRun = enriched.aiRun;
+  if (date < VERIFY_START_DATE || aiRun.finished_at === null) {
+    return {
+      date,
+      run,
+      ruleRun,
+      aiRun,
+      verifyRun: null,
+      items: enriched.items,
+      ruleResults,
+      legacy,
+      rulesRun,
+    };
+  }
+  const {items, verifyRun} = applyVerifyRun(
+    enriched.items,
+    date,
+    aiRun.finished_at,
+  );
+  return {
+    date,
+    run,
+    ruleRun,
+    aiRun,
+    verifyRun,
+    items,
+    ruleResults,
+    legacy,
+    rulesRun,
+  };
 }
 
 /**
@@ -178,6 +213,7 @@ export function emptyDay(date: string): GeneratedDay {
     run: null,
     ruleRun: null,
     aiRun: null,
+    verifyRun: null,
     items: [],
     ruleResults: [],
     legacy: new Map(),
@@ -552,6 +588,11 @@ function makeItem(
     summary: null,
     sentiment: null,
     ai: null,
+    verdict: null,
+    confidence: null,
+    review_status: null,
+    verdict_source: null,
+    verification: null,
   };
   const evidence = [
     ...entityEvidence(item),

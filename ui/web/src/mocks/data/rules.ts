@@ -35,6 +35,12 @@ export const UNCHECKED = {
   summary: null,
   sentiment: null,
   ai: null,
+  // Nor does the verify run verify them.
+  verdict: null,
+  confidence: null,
+  review_status: null,
+  verdict_source: null,
+  verification: null,
 } as const satisfies Partial<NewsDetailWire>;
 
 const REGISTRY_TICKERS = 10_381;

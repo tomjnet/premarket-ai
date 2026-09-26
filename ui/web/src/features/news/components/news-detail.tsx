@@ -14,9 +14,11 @@ import {aiStatusText} from '../ai';
 import {bodyParagraphs} from '../detail';
 import {feedSearch} from '../feed';
 import {dupTypeText, evidenceBadge, ruleBadges} from '../rules';
+import {verdictBadges} from '../verdicts';
 
 import {RuleBadgeView, RuleBadges} from './rule-badges';
 import {SentimentBadge} from './sentiment-badge';
+import {VerificationSection} from './verification-section';
 
 interface NewsDetailViewProps {
   item: NewsDetail;
@@ -64,8 +66,9 @@ export function NewsDetailView({item}: NewsDetailViewProps) {
             ))}
           </ul>
         )}
-        {/* Rule badges now; verdict badges join them in later increments. */}
-        <div data-slot="detail-badges">
+        {/* The verdict first (increment 4), then the check badges. */}
+        <div data-slot="detail-badges" className="flex flex-col gap-1.5">
+          <RuleBadges badges={verdictBadges(item)} label="Verdict" />
           <RuleBadges badges={ruleBadges(item)} />
         </div>
       </header>
@@ -88,6 +91,27 @@ export function NewsDetailView({item}: NewsDetailViewProps) {
           summary={item.summary}
           sentiment={item.sentiment}
         />
+      )}
+
+      {item.verification !== null && (
+        <VerificationSection
+          verification={item.verification}
+          inherited={item.verdictSource === 'inherited'}
+        />
+      )}
+      {item.verification === null && item.verdictSource === 'inherited' && (
+        <section
+          aria-labelledby="verification-heading"
+          className="flex flex-col gap-2 border-t pt-4"
+        >
+          <h2 id="verification-heading" className="text-lg font-semibold">
+            Verification
+          </h2>
+          <p className="text-sm">
+            A copy of an earlier day's story re-served as new: shown as
+            MISLEADING (the original was verified on its own date).
+          </p>
+        </section>
       )}
 
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 border-t pt-4 text-sm">

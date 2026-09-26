@@ -11,14 +11,20 @@ import {newsKeys} from '../query-keys';
 /** While a run is still arriving, the feed polls this often. */
 export const FEED_POLL_MS = 30_000;
 
-/** Poll only while the ingest, rule-check or AI run is `RUNNING`. */
+/**
+ * Poll only while the ingest, rule-check or AI run is `RUNNING`, or the
+ * verify run is queued or running.
+ */
 export function feedRefetchInterval(
   list: NewsList | undefined,
 ): number | false {
+  const verify = list?.verifyRun?.status;
   const running =
     list?.run?.status === 'RUNNING' ||
     list?.ruleRun?.status === 'RUNNING' ||
-    list?.aiRun?.status === 'RUNNING';
+    list?.aiRun?.status === 'RUNNING' ||
+    verify === 'RUNNING' ||
+    verify === 'QUEUED';
   return running ? FEED_POLL_MS : false;
 }
 
@@ -33,6 +39,8 @@ export function useNewsFeed(filters: FeedFilters) {
     ticker: filters.ticker,
     q: filters.q,
     includeDuplicates: filters.dups,
+    verdict: filters.verdict === 'PENDING' ? undefined : filters.verdict,
+    pendingReview: filters.verdict === 'PENDING' ? true : undefined,
   };
   return useQuery({
     queryKey: newsKeys.list(request),

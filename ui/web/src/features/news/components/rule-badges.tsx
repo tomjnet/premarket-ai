@@ -6,6 +6,7 @@ const VARIANTS = {
   danger: 'danger',
   warning: 'warning',
   neutral: 'outline',
+  success: 'success',
 } as const satisfies Record<BadgeTone, string>;
 
 interface RuleBadgeViewProps {
@@ -30,15 +31,17 @@ export function RuleBadgeView({badge}: RuleBadgeViewProps) {
 
 interface RuleBadgesProps {
   badges: readonly RuleBadge[];
+  /** The list's accessible name. */
+  label?: string;
 }
 
 /** An item's rule badges, as a labelled list. Nothing when there are none. */
-export function RuleBadges({badges}: RuleBadgesProps) {
+export function RuleBadges({badges, label = 'Rule checks'}: RuleBadgesProps) {
   if (badges.length === 0) {
     return null;
   }
   return (
-    <ul aria-label="Rule checks" className="flex flex-wrap gap-1.5">
+    <ul aria-label={label} className="flex flex-wrap gap-1.5">
       {badges.map(badge => (
         <li key={badge.key}>
           <RuleBadgeView badge={badge} />

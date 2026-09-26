@@ -66,6 +66,7 @@ def test_feed_matches_the_contract(harness):
         "run",
         "rule_run",
         "ai_run",
+        "verify_run",
         "count",
         "items",
     }
@@ -117,6 +118,10 @@ def test_feed_matches_the_contract(harness):
         "rules_checked",
         "summary",
         "sentiment",
+        "verdict",
+        "confidence",
+        "review_status",
+        "verdict_source",
     }
     assert _UTC_Z.match(item["published_at"])
     assert "body" not in item
@@ -146,6 +151,8 @@ def test_filters_are_passed_through(harness):
         ticker="MSFT",
         text="earnings",
         include_duplicates=True,
+        verdict=None,
+        pending_review=False,
     )
 
 
@@ -167,6 +174,7 @@ def test_no_run_for_the_date(harness):
         "run": None,
         "rule_run": None,
         "ai_run": None,
+        "verify_run": None,
         "count": 0,
         "items": [],
     }
@@ -213,6 +221,7 @@ def test_bad_parameters_are_422(harness):
         {"ticker": "AAPL;DROP"},
         {"q": "x" * 201},
         {"include_duplicates": "maybe"},
+        {"verdict": "TRUE"},
     ):
         response = harness.client.get("/news", params=params, headers=bearer)
         assert response.status_code == 422, params
@@ -316,3 +325,40 @@ def test_detail_before_the_ai_run_has_no_ai(harness):
     body = harness.client.get("/news/2002", headers=_bearer(harness)).json()
     assert body["ai"] is None
     assert body["summary"] is None
+
+
+def test_feed_shows_verdicts_and_the_verify_run(harness):
+    body = harness.client.get(
+        "/news",
+        params={"date": "2026-09-24", "include_duplicates": "true"},
+        headers=_bearer(harness),
+    ).json()
+    assert body["verify_run"]["status"] == "DONE"
+    assert body["verify_run"]["fake"] == 1
+    assert body["verify_run"]["requested_at"] == "2026-09-24T10:10:00Z"
+    by_id = {item["id"]: item for item in body["items"]}
+    assert by_id[2001]["verdict"] == "VERIFIED"
+    assert by_id[2002]["verdict"] == "FAKE"
+    assert by_id[2003]["verdict_source"] == "inherited"
+
+
+def test_verdict_filter(harness):
+    body = harness.client.get(
+        "/news",
+        params={"date": "2026-09-24", "verdict": "FAKE"},
+        headers=_bearer(harness),
+    ).json()
+    assert [item["id"] for item in body["items"]] == [2002]
+    assert harness.news.queries[-1].verdict == "FAKE"
+
+
+def test_detail_has_the_verification_and_evidence(harness):
+    body = harness.client.get("/news/2001", headers=_bearer(harness)).json()
+    verification = body["verification"]
+    assert verification["verdict"] == "VERIFIED"
+    assert verification["judge_model"] == "main-gpu4gb"
+    assert verification["verified_at"] == "2026-09-24T10:15:00Z"
+    assert verification["evidence"][0]["check"] == "entity"
+    assert verification["review"] is None
+    other = harness.client.get("/news/2002", headers=_bearer(harness)).json()
+    assert other["verification"] is None

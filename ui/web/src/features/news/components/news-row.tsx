@@ -5,6 +5,7 @@ import {formatEtTime} from '@/lib/time';
 import {cn} from '@/lib/utils';
 
 import {ruleBadges} from '../rules';
+import {verdictBadges} from '../verdicts';
 
 import {RuleBadges} from './rule-badges';
 import {SentimentBadge} from './sentiment-badge';
@@ -79,8 +80,9 @@ export function NewsRow({
             </button>
           ))}
           <span className="text-muted-foreground">{item.sourceDomain}</span>
-          {/* Rule badges now; verdict badges join them in later increments. */}
+          {/* The verdict first (increment 4), then the check badges. */}
           <div data-slot="row-badges" className="contents">
+            <RuleBadges badges={verdictBadges(item)} label="Verdict" />
             <RuleBadges badges={badges} />
             {markUnchecked && !item.rulesChecked && (
               <span className="text-xs text-muted-foreground">

@@ -18,6 +18,7 @@ describe('feedRefetchInterval', () => {
     run: {...run, status},
     ruleRun: null,
     aiRun: null,
+    verifyRun: null,
     count: 0,
     items: [],
   });

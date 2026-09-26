@@ -15,9 +15,13 @@ export async function pinClock(page: Page): Promise<void> {
 }
 
 /** Opens the login page (optionally in a scenario) and logs in by keyboard. */
-export async function logIn(page: Page, scenario = 'default'): Promise<void> {
+export async function logIn(
+  page: Page,
+  scenario = 'default',
+  username = 'trader1',
+): Promise<void> {
   await page.goto(`/login?scenario=${scenario}`);
-  await page.getByLabel('Username').fill('trader1');
+  await page.getByLabel('Username').fill(username);
   await page.getByLabel('Password').fill('demo');
   await page.getByLabel('Password').press('Enter');
   await expect(

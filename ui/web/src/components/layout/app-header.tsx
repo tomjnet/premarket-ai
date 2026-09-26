@@ -4,6 +4,7 @@ import {Link, NavLink} from 'react-router';
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {useSession} from '@/features/auth/session-context';
+import {canReview} from '@/features/review/review';
 import {formatLongDate, todayInNewYork} from '@/lib/time';
 
 /** The current page's link is marked by weight and underline, not colour. */
@@ -54,6 +55,13 @@ export function AppHeader() {
                   Ask the News
                 </NavLink>
               </li>
+              {canReview(user.role) && (
+                <li>
+                  <NavLink to="/review" className={navLinkClass}>
+                    Review queue
+                  </NavLink>
+                </li>
+              )}
             </ul>
           </nav>
         )}

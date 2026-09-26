@@ -4,7 +4,8 @@
 # Snippets are mounted at /etc/nginx/snippets/.
 #
 #   /api/*  -> ai-api (prefix stripped), rate limited per client IP
-#              (/api/chat streams server-sent events, unbuffered)
+#              (/api/chat and /api/runs/<id>/events stream server-sent
+#              events, unbuffered)
 #   /*      -> web-1 / web-2 (static UI), least-connections load balancing
 #
 # Every browser-facing response gets the site's security headers here, in
@@ -131,6 +132,28 @@ server {
         proxy_buffering off;
         proxy_cache off;
         proxy_pass http://pm_api/chat;
+    }
+
+    # A verify run's progress (increment 4): server-sent events for as long
+    # as the run lasts (ai-api ends the stream after an hour at most).
+    location ~ ^/api/runs/[0-9]+/events$ {
+        limit_req zone=pm_api burst=40 nodelay;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 1s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 3700s;
+        proxy_next_upstream off;
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header Server;
+        proxy_buffering off;
+        proxy_cache off;
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass http://pm_api;
     }
 
     location /api/ {

@@ -67,8 +67,9 @@ jobs:
           --target ${{ matrix.stage }} cpp/ingest
 
   # ai-api with the C++20 fastpath module: C++ stages, pytest (including
-  # the C++ vs Python parity tests), ruff, and the rule eval (eval harness
-  # v1: the deterministic layers, so it runs on hosted runners).
+  # the C++ vs Python parity tests), ruff, and the evals of the
+  # deterministic layers (rules, dedup, and the rules-only verdicts of
+  # eval harness v2), so they run on hosted runners.
   ai-api:
     runs-on: ubuntu-24.04
     strategy:
@@ -83,6 +84,8 @@ jobs:
           - eval
           # Increment 3: the GPU evals' image (run by gpu-evals.yml).
           - ai-eval
+          # Increment 4: the verification worker (with CPU torch).
+          - worker
           - runtime
     steps:
       - uses: actions/checkout@v4
@@ -93,6 +96,21 @@ jobs:
           --build-context fastpath=cpp/fastpath
           --build-context config=python/config
           --build-context vendorsim=python/vendor-sim python/ai-api
+
+  # Increment 4: the MCP server (read-only tools, SSRF guard, token).
+  mcp-server:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [test, lint, runtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: mcp-server ${{ matrix.stage }}
+        run: >
+          podman build -f podman/mcp-server/Containerfile
+          --target ${{ matrix.stage }}
+          --build-context config=python/config python/mcp-server
 
   web:
     runs-on: ubuntu-24.04

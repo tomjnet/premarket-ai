@@ -1,0 +1,42 @@
+# premarket-ai mcp-server (Python 3.13, FastMCP over streamable HTTP).
+# Build context: python/mcp-server, plus the named context "config"
+# (python/config: the lab universe, for a company's size rank):
+#   podman build -f podman/mcp-server/Containerfile --target runtime \
+#     --build-context config=python/config python/mcp-server
+# Stages: base -> test (pytest), lint (ruff), runtime (default).
+
+FROM docker.io/library/python:3.13-slim-trixie AS base
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PREMARKET_CONFIG_DIR=/app/config
+WORKDIR /app
+COPY --from=config universe.yaml /app/config/universe.yaml
+
+# ---------------------------------------------------------------------------
+FROM base AS dev
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install -e ".[dev]"
+COPY tests ./tests
+
+FROM dev AS test
+RUN pytest -q
+
+FROM dev AS lint
+RUN ruff check src tests && ruff format --check src tests
+
+# ---------------------------------------------------------------------------
+FROM base AS runtime
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install . && rm -rf src pyproject.toml \
+ && useradd --system --uid 10003 --no-create-home --home-dir /app mcp
+# Read-only root filesystem in compose: yfinance's caches go to /tmp.
+ENV XDG_CACHE_HOME=/tmp/cache \
+    HOME=/tmp
+USER mcp
+EXPOSE 8000
+# The healthcheck lives in compose.yaml (OCI images drop HEALTHCHECK).
+CMD ["mcp-server", "serve"]

@@ -196,8 +196,11 @@ describe('FeedPage: rule checks', {timeout: 30_000}, () => {
   });
 
   it('"Flagged only" with nothing flagged offers all items', async () => {
-    // Real companies from the vendor's outlets: no rule flags them.
-    const {user, router} = renderApp('/news?ticker=AAPL&flagged=1');
+    // Real companies from the vendor's outlets: no rule flags them (a date
+    // before the verification, whose codes count as flags too).
+    const {user, router} = renderApp(
+      '/news?date=2026-09-23&ticker=AAPL&flagged=1',
+    );
 
     expect(
       await screen.findByText(
@@ -210,7 +213,7 @@ describe('FeedPage: rule checks', {timeout: 30_000}, () => {
     expect(
       await screen.findByRole('list', {name: 'News items'}, SLOW_DOM),
     ).toBeInTheDocument();
-    expect(router.state.location.search).toBe('?date=2026-09-25&ticker=AAPL');
+    expect(router.state.location.search).toBe('?date=2026-09-23&ticker=AAPL');
   });
 
   it('before the rules ran for a date: says so, no badges, legacy duplicates', async () => {
@@ -499,7 +502,7 @@ describe('FeedPage: filters in the URL', {timeout: 30_000}, () => {
     const {user} = renderApp('/news?q=no-such-words');
 
     expect(
-      await screen.findByText('No items match this ticker or search.'),
+      await screen.findByText('No items match this ticker, search or verdict.'),
     ).toBeInTheDocument();
     await user.click(screen.getByRole('button', {name: 'Show all items'}));
     await waitFor(
@@ -718,5 +721,61 @@ describe('FeedPage: untrusted text and keyboard', () => {
     expect(
       screen.getByRole('button', {name: 'Turn on single-key shortcuts'}),
     ).toBeInTheDocument();
+  });
+});
+
+describe('FeedPage: verdicts (increment 4)', {timeout: 30_000}, () => {
+  it('shows a verdict badge on every row and the verify run', async () => {
+    await openFeed('/news?date=2026-09-25');
+    expect(
+      screen.getByText(/^Verdicts: \d+ verified · \d+ unverified/),
+    ).toBeInTheDocument();
+    for (const row of rows()) {
+      expect(
+        within(row).getByRole('list', {name: 'Verdict'}),
+      ).toBeInTheDocument();
+    }
+    const fake = db
+      .day('2026-09-25')
+      .items.find(item => !item.is_dup && item.verdict === 'FAKE');
+    const list = within(rowOf(fake?.id)).getByRole('list', {name: 'Verdict'});
+    expect(within(list).getByText('Verdict: fake')).toBeInTheDocument();
+  });
+
+  it('filters by verdict and by "Pending review" (in the URL)', async () => {
+    const {user, router} = await openFeed('/news?date=2026-09-25');
+    await user.selectOptions(
+      screen.getByRole('combobox', {name: 'Verdict'}),
+      'FAKE',
+    );
+    await waitFor(
+      () =>
+        expect(router.state.location.search).toBe(
+          '?date=2026-09-25&verdict=FAKE',
+        ),
+      SLOW_DOM,
+    );
+    await waitFor(() => {
+      for (const row of rows()) {
+        expect(within(row).getByText('Verdict: fake')).toBeInTheDocument();
+      }
+    }, SLOW_DOM);
+    await user.selectOptions(
+      screen.getByRole('combobox', {name: 'Verdict'}),
+      'PENDING',
+    );
+    await waitFor(() => {
+      for (const row of rows()) {
+        expect(within(row).getByText('PENDING REVIEW')).toBeInTheDocument();
+      }
+    }, SLOW_DOM);
+  });
+
+  it("says so for a date the verification hasn't run", async () => {
+    await openFeed('/news?date=2026-09-23');
+    expect(
+      screen.queryByText("The AI verification hasn't run for this date yet."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', {name: 'Verdict'})).toBeNull();
   });
 });

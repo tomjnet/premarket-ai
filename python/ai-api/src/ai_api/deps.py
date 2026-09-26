@@ -13,12 +13,28 @@ from ai_api import news
 from ai_api import sessions
 from ai_api import tokens
 from ai_api import users
+from ai_api import verdicts as verdicts_lib
 from ai_api.rag import ask as ask_lib
+from ai_api.verify import events as events_lib
 
 NOT_AUTHENTICATED = "Not authenticated"
 FORBIDDEN = "Forbidden"
 # Sec-Fetch-Site values a same-site page or a non-browser client sends.
 _TRUSTED_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+class Jobs(Protocol):
+    """Queues verification jobs (``worker.queue.Queue``)."""
+
+    async def run_day(self, run_id: int) -> None:
+        """Queues a verify run's coordinator."""
+        ...
+
+    async def resume(
+        self, run_id: int, news_id: int, thread_id: str, decision: dict
+    ) -> None:
+        """Queues the resume of a graph waiting for review."""
+        ...
 
 
 class Gate(Protocol):
@@ -45,6 +61,9 @@ class Services:
         ping: Raises if a backing service (database, Redis) is down.
         ask: "Ask the News"; None when the LLM isn't configured.
         chat_gate: The per-user chat lock.
+        verdicts: Verify runs and the review queue (increment 4).
+        queue: The job queue of the verification worker.
+        run_events: Run progress (Redis Streams).
     """
 
     settings: config.Settings
@@ -54,6 +73,9 @@ class Services:
     ping: Callable[[], Awaitable[None]]
     ask: ask_lib.AskService | None = None
     chat_gate: Gate | None = None
+    verdicts: verdicts_lib.VerdictStore | None = None
+    queue: Jobs | None = None
+    run_events: events_lib.RunEvents | None = None
 
 
 def get_services(request: fastapi.Request) -> Services:

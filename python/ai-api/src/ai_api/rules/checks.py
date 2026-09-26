@@ -313,6 +313,10 @@ class SourcePolicy:
             self, reputations={row.domain: row for row in rows}
         )
 
+    def reputation(self, host: str) -> Reputation | None:
+        """The reputation of ``host`` or of its closest listed parent."""
+        return self._reputation(host.strip().lower())
+
     def _reputation(self, host: str) -> Reputation | None:
         labels = host.split(".")
         for i in range(len(labels) - 1):

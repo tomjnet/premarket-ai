@@ -39,6 +39,7 @@ const wireList = {
     failed: 1,
     model: 'main-gpu4gb',
   },
+  verify_run: null,
   count: 1,
   items: [
     {
@@ -61,6 +62,12 @@ const wireList = {
       rules_checked: true,
       summary: 'Apple expanded its buyback by $10 billion, the vendor reports.',
       sentiment: 'bullish',
+      verdict: null,
+      confidence: null,
+      review_status: null,
+      verdict_source: null,
+      // Detail only (the list's schema drops it).
+      verification: null,
     },
   ],
 };
@@ -122,6 +129,7 @@ describe('news schemas', () => {
         failed: 1,
         model: 'main-gpu4gb',
       },
+      verifyRun: null,
       count: 1,
       items: [
         {
@@ -146,6 +154,10 @@ describe('news schemas', () => {
           summary:
             'Apple expanded its buyback by $10 billion, the vendor reports.',
           sentiment: 'bullish',
+          verdict: null,
+          confidence: null,
+          reviewStatus: null,
+          verdictSource: null,
         },
       ],
     });
@@ -285,6 +297,7 @@ describe('news schemas', () => {
         run: null,
         rule_run: null,
         ai_run: null,
+        verify_run: null,
         count: 0,
         items: [],
       }).run,

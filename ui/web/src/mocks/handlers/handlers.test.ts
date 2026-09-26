@@ -168,6 +168,7 @@ describe('news handlers', () => {
       run: null,
       rule_run: null,
       ai_run: null,
+      verify_run: null,
       count: 0,
       items: [],
     });

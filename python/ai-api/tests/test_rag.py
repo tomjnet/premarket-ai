@@ -8,6 +8,7 @@ import pathlib
 from langchain_core import messages
 from langchain_core.language_models import fake_chat_models
 
+from ai_api.guard import llama_guard
 from ai_api.llm import tracing
 from ai_api.rag import ask
 from ai_api.rag import chunking
@@ -258,7 +259,23 @@ def _hit(chunk_id, text, source="fed_press"):
     )
 
 
-def _service(answer, order=None, vendor=None):
+class _FakeGuard:
+    enabled = True
+
+    def __init__(self, question_safe=True, answer_safe=True):
+        self.question_safe = question_safe
+        self.answer_safe = answer_safe
+
+    async def check_question(self, question):
+        del question
+        return llama_guard.Verdict(True, self.question_safe, ("S2",))
+
+    async def check_answer(self, question, answer):
+        del question, answer
+        return llama_guard.Verdict(True, self.answer_safe, ("S2",))
+
+
+def _service(answer, order=None, vendor=None, guard=None):
     model = fake_chat_models.GenericFakeChatModel(
         messages=iter([messages.AIMessage(content=answer)])
     )
@@ -278,6 +295,7 @@ def _service(answer, order=None, vendor=None):
         members=universe.load(_CONFIG_DIR),
         vendor_lookup=lookup,
         model_name="main-gpu4gb",
+        guard=guard,
     )
 
 
@@ -312,6 +330,41 @@ def test_advice_answer_is_replaced_by_a_refusal():
     assert result["refused"] is True
     assert result["answer"].startswith("I can't give investment advice")
     assert result["citations"] == []
+
+
+def test_llama_guard_refuses_an_unsafe_question():
+    service = _service("never used", guard=_FakeGuard(question_safe=False))
+    result = asyncio.run(service.ask("How do I launder money?", _DAY))
+    assert result["guard_blocked"] is True
+    assert result["refused"] is True
+    assert result["sources"] == []
+    assert result["answer"] == ask.GUARD_REFUSAL
+
+
+def test_an_advice_question_is_not_blocked_by_the_guard():
+    class AdviceGuard(_FakeGuard):
+        async def check_question(self, question):
+            del question
+            return llama_guard.Verdict(True, False, ("S6",))
+
+    service = _service(
+        "I can't give investment advice. [1]", guard=AdviceGuard()
+    )
+    result = asyncio.run(service.ask("Should I buy NVDA?", _DAY))
+    assert result["guard_blocked"] is False
+    assert result["sources"] != []
+
+
+def test_llama_guard_blocks_an_unsafe_answer():
+    service = _service("Rates held [1].", guard=_FakeGuard(answer_safe=False))
+    result = asyncio.run(service.ask("What did the Fed do?", _DAY))
+    assert result["guard_blocked"] is True
+    assert result["answer"] == ask.GUARD_REFUSAL
+    safe = _service("Rates held [1].", guard=_FakeGuard())
+    assert (
+        asyncio.run(safe.ask("What did the Fed do?", _DAY))["guard_blocked"]
+        is False
+    )
 
 
 def test_vendor_items_are_added_as_unverified_sources():

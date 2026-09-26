@@ -3,9 +3,11 @@
 # code from a fork never runs on the runner.
 #
 # Increment 3: the L3 paraphrase + guard eval (gated against
-# python/ai-api/evals/ai_baseline.json). The model benchmark and the RAG
-# baseline need the corpus and an hour of GPU time: they run by hand
-# (`make -C python bench-models` / `eval-rag`).
+# python/ai-api/evals/ai_baseline.json). Increment 4: the verdicts with the
+# LLM judge (eval harness v2: confusion matrix, reason codes, the injection
+# red-team set; gated against evals/verify_baseline.json, mode "judge").
+# The model benchmark and the RAG baseline need the corpus and an hour of
+# GPU time: they run by hand (`make -C python bench-models` / `eval-rag`).
 name: gpu-evals
 
 on:
@@ -25,7 +27,7 @@ concurrency:
 jobs:
   ai-eval:
     runs-on: [self-hosted, gpu-ollama]
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       # Its own compose project, so the evals never touch the demo stack.
       COMPOSE_PROJECT_NAME: premarket-ci
@@ -38,7 +40,7 @@ jobs:
           sed -i "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=$OLLAMA_BASE_URL|" .env
       - name: LLM gateway
         run: podman compose --profile ai up -d --wait llm-gateway
-      - name: L3 paraphrase + guard eval (fails on regression)
+      - name: L3 + guard eval, verdicts with the judge (fails on regression)
         run: make -C python eval-ai
       - name: Stop the gateway
         if: always()

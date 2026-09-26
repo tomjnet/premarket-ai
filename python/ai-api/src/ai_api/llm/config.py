@@ -64,6 +64,8 @@ class LlmConfig:
             ``main-<profile>``).
         embed_model: Alias of the embedding model (EMBED_MODEL, default
             ``embed-<profile>``).
+        guard_model: Alias of Llama Guard (GUARD_MODEL, default
+            ``guard-<profile>``).
         embed_dims: The embedding size (EMBED_DIMS, default by profile).
         timeout_s: Per-call timeout (LLM_TIMEOUT_S).
         concurrency: Calls in flight at once (LLM_CONCURRENCY). Ollama on
@@ -78,6 +80,7 @@ class LlmConfig:
     hw_profile: str = "gpu4gb"
     main_model: str = "main-gpu4gb"
     embed_model: str = "embed-gpu4gb"
+    guard_model: str = "guard-gpu4gb"
     embed_dims: int = 768
     timeout_s: float = 300.0
     concurrency: int = 2
@@ -121,6 +124,7 @@ class LlmConfig:
             hw_profile=profile,
             main_model=_alias(env, "LLM_MAIN_MODEL", f"main-{profile}"),
             embed_model=_alias(env, "EMBED_MODEL", f"embed-{profile}"),
+            guard_model=_alias(env, "GUARD_MODEL", f"guard-{profile}"),
             embed_dims=int(dims),
             timeout_s=_positive(env, "LLM_TIMEOUT_S", 300.0),
             concurrency=int(_positive(env, "LLM_CONCURRENCY", 2)),

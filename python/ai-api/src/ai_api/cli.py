@@ -13,11 +13,15 @@ Usage:
     ai-api corpus                     download and index the trusted corpus
     ai-api reindex                    rebuild the vector store from Postgres
     ai-api llm-status                 the gateway's aliases, a test call
+    ai-api verify --date YYYY-MM-DD   queue a verify run, follow it to the end
+    ai-api expire --date YYYY-MM-DD   market open: pending reviews expire
+    ai-api ml-train                   fine-tune the DistilBERT baseline
     ai-api smoke --base-url URL --date YYYY-MM-DD
                                       the increment's "done when" check
 
-Every command except ``health`` and ``openapi`` runs as the database owner,
-in the one-shot ``ai-api-init`` container.
+Every command except ``health``, ``openapi`` and ``ml-train`` runs as the
+database owner, in the one-shot ``ai-api-init`` container (``ml-train``
+runs in the ``ai-eval`` image, which has vendor-sim's generator and torch).
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import datetime
 import json
 import logging
 import os
+import pathlib
 import sys
 import time
 from typing import Any
@@ -236,6 +241,7 @@ def _smoke(base_url: str, day: datetime.date) -> int:
                 and bool(detail.json().get("rule_evidence")),
             )
     _smoke_ai(check, api, bearer, day, counts)
+    _smoke_verify(check, api, bearer, day, counts, password)
     check(
         "news: unknown id is 404",
         _call("GET", f"{api}/news/999999999999", bearer).status == 404,
@@ -350,6 +356,127 @@ def _smoke_ai(
     )
 
 
+def _login(api: str, username: str, password: str) -> dict[str, str]:
+    reply = _call(
+        "POST",
+        f"{api}/auth/login",
+        form={"username": username, "password": password},
+    )
+    if reply.status != 200:
+        return {}
+    return {"Authorization": f"Bearer {reply.json()['access_token']}"}
+
+
+def _smoke_verify(
+    check: Any,
+    api: str,
+    bearer: dict[str, str],
+    day: datetime.date,
+    counts: dict[str, Any],
+    password: str,
+) -> None:
+    """Increment 4: verdicts with evidence, the review queue, a review."""
+    check(
+        "verify: verify run DONE for the date",
+        counts["verify_run"] == "DONE",
+        str(counts["verify_run"]),
+    )
+    check(
+        "verify: a verdict with evidence for every unique item",
+        counts["unique"] > 0
+        and counts["verified"] == counts["unique"]
+        and counts["with_evidence"] == counts["unique"]
+        and counts["verify_failed"] == 0,
+        f"{counts['verified']} verdicts ({counts['with_evidence']} with "
+        f"evidence, {counts['verify_failed']} failed) for "
+        f"{counts['unique']} unique items",
+    )
+    feed = _call("GET", f"{api}/news?date={day.isoformat()}", bearer)
+    if feed.status == 200:
+        items = feed.json()["items"]
+        verdicts = {i["verdict"] for i in items}
+        check(
+            "news: every item in the feed has a verdict",
+            bool(items) and None not in verdicts,
+            ", ".join(sorted(v or "none" for v in verdicts)),
+        )
+        injected = [
+            i for i in items if "INJECTION_ATTEMPT" in i["reason_codes"]
+        ]
+        check(
+            "guard: injection items are flagged and still judged",
+            all(i["verdict"] is not None for i in injected),
+            f"{len(injected)} flagged: "
+            + ", ".join(
+                f"{i['vendor_item_id']} {i['verdict']}" for i in injected
+            ),
+        )
+    check(
+        "review: a trader can't open the review queue (403)",
+        _call("GET", f"{api}/review", bearer).status == 403,
+    )
+    analyst = _login(api, "analyst1", password)
+    check("review: analyst1 logs in", bool(analyst))
+    if not analyst:
+        return
+    queue = _call(
+        "GET", f"{api}/review?date={day.isoformat()}&status=PENDING", analyst
+    )
+    pending = queue.json()["items"] if queue.status == 200 else []
+    check(
+        "review: low-confidence items wait in the review queue",
+        queue.status == 200 and len(pending) == counts["pending"],
+        f"HTTP {queue.status}: {len(pending)} in the queue, "
+        f"{counts['pending']} pending in the database",
+    )
+    runs = _call("GET", f"{api}/runs?date={day.isoformat()}", analyst)
+    if runs.status == 200 and runs.json()["items"]:
+        run_id = runs.json()["items"][0]["run_id"]
+        stream = _call(
+            "GET", f"{api}/runs/{run_id}/events", analyst, timeout_s=30
+        )
+        kinds = [name for name, _ in _sse_events(stream.body)]
+        check(
+            "runs: the event stream replays to run.done",
+            stream.status == 200 and kinds[-1:] == ["run.done"],
+            f"HTTP {stream.status}: {len(kinds)} events",
+        )
+    if not pending:
+        return
+    task = pending[0]
+    decided = _call(
+        "POST",
+        f"{api}/review/{task['id']}",
+        analyst,
+        body={"action": "approve"},
+    )
+    check(
+        "review: the analyst approves the top item",
+        decided.status == 200 and decided.json()["status"] == "APPROVED",
+        f"HTTP {decided.status}",
+    )
+    again = _call(
+        "POST",
+        f"{api}/review/{task['id']}",
+        analyst,
+        body={"action": "approve"},
+    )
+    check("review: a second decision is 409", again.status == 409)
+    status = None
+    for _ in range(30):
+        detail = _call("GET", f"{api}/news/{task['item_id']}", analyst)
+        verification = (detail.json() or {}).get("verification") or {}
+        status = verification.get("review_status")
+        if status == "APPROVED":
+            break
+        time.sleep(2)
+    check(
+        "review: the worker resumes the graph (verdict APPROVED)",
+        status == "APPROVED",
+        f"review_status {status}",
+    )
+
+
 def _database_counts(day: datetime.date) -> dict[str, Any]:
     """What the smoke check compares the website with (as the owner)."""
     owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
@@ -394,6 +521,36 @@ def _database_counts(day: datetime.date) -> dict[str, Any]:
             counts["summarized"],
             counts["fallbacks"],
             counts["skipped"],
+        ) = row
+        row = conn.execute(
+            "SELECT status FROM ai.verify_run WHERE feed_date = %s"
+            " ORDER BY requested_at DESC LIMIT 1",
+            (day,),
+        ).fetchone()
+        counts["verify_run"] = None if row is None else row[0]
+        row = conn.execute(
+            "SELECT count(*) FROM ai.news_item n"
+            " JOIN ai.rule_check c ON c.news_id = n.id"
+            " LEFT JOIN ai.duplicate_link d ON d.news_id = n.id"
+            " WHERE n.feed_date = %s AND d.news_id IS NULL",
+            (day,),
+        ).fetchone()
+        counts["unique"] = row[0]
+        row = conn.execute(
+            "SELECT count(*) FILTER (WHERE v.verdict IS NOT NULL),"
+            " count(*) FILTER (WHERE v.status = 'FAILED'),"
+            " count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ai.evidence e"
+            "   WHERE e.news_id = v.news_id)),"
+            " count(*) FILTER (WHERE v.review_status = 'PENDING')"
+            " FROM ai.verification v JOIN ai.news_item n ON n.id = v.news_id"
+            " WHERE n.feed_date = %s",
+            (day,),
+        ).fetchone()
+        (
+            counts["verified"],
+            counts["verify_failed"],
+            counts["with_evidence"],
+            counts["pending"],
         ) = row
         try:
             row = conn.execute(
@@ -512,6 +669,148 @@ def _llm_status() -> int:
     return 0 if len(vector) == llm.embed_dims else 1
 
 
+def _owner_queue() -> Any:
+    from ai_api.worker import queue  # noqa: PLC0415
+
+    host = os.environ.get("REDIS_HOST", "redis")
+    password = os.environ.get("REDIS_PASSWORD", "")
+    return queue.Queue(queue.make_broker(host, password))
+
+
+async def _follow(run_id: int, timeout_s: float) -> dict[str, Any]:
+    """Prints a run's events until it ends; returns the last event."""
+    from redis import asyncio as aioredis  # noqa: PLC0415
+
+    from ai_api.verify import events  # noqa: PLC0415
+
+    redis = aioredis.Redis(
+        host=os.environ.get("REDIS_HOST", "redis"),
+        password=os.environ.get("REDIS_PASSWORD", ""),
+        decode_responses=True,
+        socket_timeout=30,
+    )
+    reader = events.RunEvents(redis)
+    after = "0"
+    started = time.monotonic()
+    last: dict[str, Any] = {}
+    try:
+        while time.monotonic() - started < timeout_s:
+            for event_id, kind, data in await reader.read(run_id, after):
+                after = event_id
+                last = {"kind": kind, **data}
+                if kind == "item":
+                    flag = "  -> review" if data.get("review") else ""
+                    verdict = data.get("verdict") or "FAILED"
+                    print(
+                        f"  [{data['done']}/{data['total']}] "
+                        f"{data.get('vendor_item_id', data['news_id'])} "
+                        f"{verdict}{flag}",
+                        flush=True,
+                    )
+                elif kind == "run.started":
+                    print(f"  {data['total']} unique items queued", flush=True)
+                if kind in events.FINAL_KINDS:
+                    return last
+    finally:
+        await redis.aclose()
+    return {"kind": "timeout"}
+
+
+def _verify(day: datetime.date, timeout_s: float) -> int:
+    """Queues a verify run of ``day`` (as the owner) and follows it."""
+    owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
+    with psycopg.connect(owner.dsn()) as conn:
+        statuses = conn.execute(
+            "SELECT (SELECT status FROM ai.rule_run WHERE feed_date = %(d)s"
+            "        ORDER BY started_at DESC LIMIT 1),"
+            "       (SELECT status FROM ai.ai_run WHERE feed_date = %(d)s"
+            "        ORDER BY started_at DESC LIMIT 1),"
+            "       (SELECT run_id FROM ai.verify_run WHERE feed_date = %(d)s"
+            "        AND status IN ('QUEUED', 'RUNNING') LIMIT 1)",
+            {"d": day},
+        ).fetchone()
+        if statuses[0] != "DONE" or statuses[1] != "DONE":
+            print(
+                f"verify: {day}: rule run {statuses[0] or 'missing'}, AI run "
+                f"{statuses[1] or 'missing'}; run `make -C python rules "
+                "enrich DATE=...` first",
+                file=sys.stderr,
+            )
+            return 1
+        if statuses[2] is not None:
+            print(f"verify: run {statuses[2]} of {day} is in progress")
+            run_id = statuses[2]
+        else:
+            run_id = conn.execute(
+                "INSERT INTO ai.verify_run (feed_date, requested_by)"
+                " VALUES (%s, 'cli') RETURNING run_id",
+                (day,),
+            ).fetchone()[0]
+            conn.commit()
+
+    async def queue_and_follow() -> dict[str, Any]:
+        if statuses[2] is None:
+            jobs = _owner_queue()
+            await jobs.start()
+            try:
+                await jobs.run_day(run_id)
+            finally:
+                await jobs.stop()
+            print(f"verify {day}: run {run_id} queued", flush=True)
+        return await _follow(run_id, timeout_s)
+
+    last = asyncio.run(queue_and_follow())
+    if last.get("kind") != "run.done":
+        print(f"verify {day}: run {run_id} {last}", file=sys.stderr)
+        return 1
+    print(
+        f"verify {day}: {last['done']} verified -> {last['verified']} VERIFIED,"
+        f" {last['unverified']} UNVERIFIED, {last['misleading']} MISLEADING,"
+        f" {last['fake']} FAKE; {last['pending_review']} to review,"
+        f" {last['escalated']} escalated, {last['failed']} failed"
+        f" ({last['total_ms']} ms)"
+    )
+    return 1 if last["failed"] else 0
+
+
+def _expire(day: datetime.date) -> int:
+    """Market open: the day's pending reviews expire (the graphs resume)."""
+    from ai_api import verdicts  # noqa: PLC0415
+
+    owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
+    with psycopg.connect(owner.dsn()) as conn:
+        expired = verdicts.expire_pending(conn, day)
+        conn.commit()
+
+    async def resume_all() -> None:
+        jobs = _owner_queue()
+        await jobs.start()
+        try:
+            for task in expired:
+                await jobs.resume(
+                    task["run_id"],
+                    task["news_id"],
+                    task["thread_id"],
+                    {"action": "expire"},
+                )
+        finally:
+            await jobs.stop()
+
+    if expired:
+        asyncio.run(resume_all())
+    print(f"expire {day}: {len(expired)} pending reviews expired")
+    return 0
+
+
+def _ml_train() -> int:
+    from ai_api.ml import train  # noqa: PLC0415
+
+    model_dir = pathlib.Path(os.environ.get("ML_MODEL_DIR", "/models"))
+    info = train.train(model_dir)
+    print(json.dumps(info, indent=2))
+    return 0
+
+
 def _report(results: list[tuple[str, bool, str]]) -> int:
     for name, ok, detail in results:
         suffix = f"  ({detail})" if detail else ""
@@ -545,12 +844,18 @@ def main(argv: list[str] | None = None) -> int:
             "corpus",
             "reindex",
             "llm-status",
+            "verify",
+            "expire",
+            "ml-train",
             "smoke",
         ),
     )
     parser.add_argument("--base-url", default="http://edge:8080")
     parser.add_argument(
         "--date", type=datetime.date.fromisoformat, default=None
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=7200, help="verify: seconds"
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -573,6 +878,8 @@ def main(argv: list[str] | None = None) -> int:
             return _reindex()
         if args.command == "llm-status":
             return _llm_status()
+        if args.command == "ml-train":
+            return _ml_train()
         day = args.date
         if day is None:
             day = datetime.datetime.now(_NEW_YORK).date()
@@ -582,6 +889,10 @@ def main(argv: list[str] | None = None) -> int:
             return _dedup_rebuild(day)
         if args.command == "enrich":
             return _enrich(day)
+        if args.command == "verify":
+            return _verify(day, args.timeout)
+        if args.command == "expire":
+            return _expire(day)
         return _smoke(args.base_url, day)
     except (config.ConfigError, fastpath.FastpathMissingError) as error:
         print(f"configuration error: {error}", file=sys.stderr)

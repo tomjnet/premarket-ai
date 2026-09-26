@@ -7,6 +7,10 @@ From increment 2 the API reads raw news only through ``ai.v_raw_news`` and
 Duplicates: once the rules have checked an item, ``is_dup`` / ``dup_of``
 come from the rule engine (URL, exact and near copies, also of earlier
 days). Before that, they're the legacy exact-hash flags.
+
+Verdicts (increment 4): a unique item shows its own; a duplicate shows its
+original's (``verdict_source = inherited``), except a stale copy, which is
+re-served old news and so MISLEADING.
 """
 
 from __future__ import annotations
@@ -52,15 +56,33 @@ WITH items AS (
          CASE WHEN c.news_id IS NULL THEN r.dup_of
               ELSE o.vendor_item_id END AS dup_of,
          d.dup_type,
-         -- Rule codes, then the AI run's (guard, language, L3), no repeats.
+         -- Rule codes, then the AI run's (guard, language, L3), then the
+         -- verification's, no repeats.
          coalesce(c.reason_codes, '{}') || ARRAY(
            SELECT code FROM unnest(coalesce(a.reason_codes, '{}')) AS code
            WHERE code <> ALL (coalesce(c.reason_codes, '{}'))
+         ) || ARRAY(
+           SELECT code FROM unnest(coalesce(v.reason_codes, '{}')) AS code
+           WHERE code <> ALL (coalesce(c.reason_codes, '{}')
+                              || coalesce(a.reason_codes, '{}'))
          ) AS reason_codes,
          c.evidence,
          a.status AS ai_status, a.summary, a.sentiment, a.summary_source,
          a.evidence AS ai_evidence, a.model AS ai_model,
          a.prompt_version, a.enriched_at,
+         n.id AS news_id,
+         CASE WHEN v.news_id IS NOT NULL THEN v.verdict::text
+              WHEN d.news_id IS NOT NULL AND d.stale THEN 'MISLEADING'
+              ELSE cv.verdict::text END AS verdict,
+         CASE WHEN v.news_id IS NOT NULL THEN v.confidence
+              WHEN d.news_id IS NOT NULL AND d.stale THEN 0.9
+              ELSE cv.confidence END AS confidence,
+         CASE WHEN v.news_id IS NOT NULL THEN v.review_status
+              ELSE cv.review_status END AS review_status,
+         CASE WHEN v.news_id IS NOT NULL AND v.verdict IS NOT NULL
+                THEN 'ai'
+              WHEN d.news_id IS NOT NULL AND (d.stale OR cv.verdict IS NOT NULL)
+                THEN 'inherited' END AS verdict_source,
          -- Copies in the same feed (a later day's stale copy isn't here).
          (SELECT count(*) FROM ai.duplicate_link x
           JOIN ai.news_item xn ON xn.id = x.news_id
@@ -73,6 +95,8 @@ WITH items AS (
   LEFT JOIN ai.duplicate_link d ON d.news_id = n.id
   LEFT JOIN ai.news_item o ON o.id = d.canonical_id
   LEFT JOIN ai.news_ai a ON a.news_id = n.id
+  LEFT JOIN ai.verification v ON v.news_id = n.id
+  LEFT JOIN ai.verification cv ON cv.news_id = d.canonical_id
   WHERE {where}
 )
 """
@@ -85,6 +109,8 @@ WHERE (%(ticker)s::text IS NULL OR %(ticker)s::text = ANY (tickers))
   AND (%(dups)s OR NOT is_dup)
   AND (%(pattern)s::text IS NULL
        OR headline ILIKE %(pattern)s OR body ILIKE %(pattern)s)
+  AND (%(verdict)s::text IS NULL OR verdict = %(verdict)s)
+  AND (NOT %(pending)s OR review_status = 'PENDING')
 ORDER BY published_at DESC, id DESC
 LIMIT {_MAX_ITEMS}
 """
@@ -118,6 +144,40 @@ _DETAIL_SQL = (
     _ITEMS_CTE.replace("{where}", "r.id = %(id)s") + "SELECT * FROM items"
 )
 
+_VERIFY_RUN_SQL = """
+SELECT * FROM ai.verify_run
+WHERE feed_date = %(day)s
+ORDER BY requested_at DESC, run_id DESC
+LIMIT 1
+"""
+
+# The item's own verification, or its original's for a duplicate.
+_VERIFICATION_SQL = """
+SELECT v.*
+FROM ai.v_raw_news r
+JOIN ai.news_item n USING (feed_date, vendor_item_id)
+LEFT JOIN ai.duplicate_link d ON d.news_id = n.id
+JOIN ai.verification v ON v.news_id = coalesce(d.canonical_id, n.id)
+WHERE r.id = %(id)s
+"""
+
+_EVIDENCE_SQL = """
+SELECT e.seq, e.check_type AS "check", e.code, e.message, e.source, e.url,
+       e.title
+FROM ai.evidence e
+WHERE e.news_id = %(news_id)s
+ORDER BY e.seq
+"""
+
+_REVIEW_SQL = """
+SELECT id, status, reasons, ai_verdict, final_verdict, reviewer, comment,
+       created_at, decided_at
+FROM ai.review_task
+WHERE news_id = %(news_id)s
+ORDER BY created_at DESC, id DESC
+LIMIT 1
+"""
+
 
 @dataclasses.dataclass(frozen=True)
 class NewsQuery:
@@ -128,12 +188,16 @@ class NewsQuery:
         ticker: Only items tagged with this ticker (upper case).
         text: Case-insensitive substring of the headline or body.
         include_duplicates: Also return items flagged as duplicates.
+        verdict: Only items with this verdict.
+        pending_review: Only items waiting for an analyst.
     """
 
     day: datetime.date
     ticker: str | None = None
     text: str | None = None
     include_duplicates: bool = False
+    verdict: str | None = None
+    pending_review: bool = False
 
 
 class NewsStore(Protocol):
@@ -163,6 +227,22 @@ class NewsStore(Protocol):
 
     async def extraction(self, item_id: int) -> list[dict[str, Any]]:
         """The item's extracted companies and claims (``kind``, ``text``)."""
+        ...
+
+    async def latest_verify_run(
+        self, day: datetime.date
+    ) -> dict[str, Any] | None:
+        """Returns the latest verify run of ``day``, or None."""
+        ...
+
+    async def verification(
+        self, item_id: int
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
+        """The verification, its evidence and the latest review task.
+
+        A duplicate gets its original's. ``({}, [], None)`` when the item
+        isn't verified.
+        """
         ...
 
 
@@ -232,6 +312,8 @@ class PostgresNewsStore:
             "ticker": query.ticker,
             "dups": query.include_duplicates,
             "pattern": None if query.text is None else like_pattern(query.text),
+            "verdict": query.verdict,
+            "pending": query.pending_review,
         }
         async with self._pool.connection() as conn:
             cur = conn.cursor(row_factory=rows.dict_row)
@@ -248,3 +330,24 @@ class PostgresNewsStore:
             cur = conn.cursor(row_factory=rows.dict_row)
             await cur.execute(_EXTRACTION_SQL, {"id": item_id})
             return await cur.fetchall()
+
+    async def latest_verify_run(
+        self, day: datetime.date
+    ) -> dict[str, Any] | None:
+        """Returns the latest verify run of ``day``, or None."""
+        return await self._one(_VERIFY_RUN_SQL, {"day": day})
+
+    async def verification(
+        self, item_id: int
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
+        """See ``NewsStore.verification``."""
+        found = await self._one(_VERIFICATION_SQL, {"id": item_id})
+        if found is None:
+            return {}, [], None
+        params = {"news_id": found["news_id"]}
+        async with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=rows.dict_row)
+            await cur.execute(_EVIDENCE_SQL, params)
+            evidence = await cur.fetchall()
+        review = await self._one(_REVIEW_SQL, params)
+        return found, evidence, review

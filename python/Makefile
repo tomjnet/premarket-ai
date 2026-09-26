@@ -20,12 +20,15 @@ API_BUILD = $(ENGINE) build -f podman/ai-api/Containerfile \
   --build-context fastpath=cpp/fastpath --build-context config=python/config \
   --build-context vendorsim=python/vendor-sim python/ai-api
 WEB_BUILD = $(ENGINE) build -f podman/web/Containerfile ui/web
+MCP_BUILD = $(ENGINE) build -f podman/mcp-server/Containerfile \
+  --build-context config=python/config python/mcp-server
 # The GPU evals run on the compose network (gateway, chroma, reranker).
 EVAL_RUN = $(COMPOSE) --profile eval run --rm --no-deps ai-eval
 PSQL = $(COMPOSE) exec -T postgres psql -U premarket -d premarket
 # Increment 1 runs the legacy pipeline and the website side by side;
 # increment 2 adds the C++20 ingester (profile legacy) and the rule checks;
-# increment 3 adds the LLM gateway, chroma and the reranker (profile ai).
+# increment 3 adds the LLM gateway, chroma and the reranker (profile ai);
+# increment 4 adds ai-worker, mcp-server and searxng (profile ai).
 # `run` always uses --no-deps: with Podman, compose recreates the running
 # postgres for every `run` with dependencies, and ai-api would lose its
 # connections for a few seconds. `up` (or `demo`) starts everything first.
@@ -35,7 +38,8 @@ SECRETS = JWT_SECRET REDIS_PASSWORD AI_DB_PASSWORD LLM_GATEWAY_KEY \
   LANGFUSE_KEY_ID LANGFUSE_SECRET LANGFUSE_DB_PASSWORD \
   LANGFUSE_CLICKHOUSE_PASSWORD LANGFUSE_MINIO_PASSWORD \
   LANGFUSE_REDIS_PASSWORD LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY \
-  LANGFUSE_NEXTAUTH_SECRET LANGFUSE_INIT_USER_PASSWORD
+  LANGFUSE_NEXTAUTH_SECRET LANGFUSE_INIT_USER_PASSWORD \
+  WORKER_DB_PASSWORD MCP_DB_PASSWORD MCP_SERVICE_TOKEN SEARXNG_SECRET
 # Settings added to an older .env (from increments 0 and 1).
 NEW_SETTINGS = WEB_PORT WEB_BIND DEMO_USER_PASSWORD ACCESS_TOKEN_TTL_S \
   REFRESH_TOKEN_TTL_S LOGIN_MAX_FAILURES LOGIN_LOCKOUT_S \
@@ -46,7 +50,10 @@ NEW_SETTINGS = WEB_PORT WEB_BIND DEMO_USER_PASSWORD ACCESS_TOKEN_TTL_S \
   LLM_CONCURRENCY OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY \
   DEDUP_COSINE_MIN DEDUP_PARAPHRASE_MIN_WORD_EDITS RAG_TOP_K RAG_TOP_N \
   RERANKER_MODEL RERANKER_MEM RERANKER_THREADS CORPUS_MONTHS CORPUS_MAX_FILINGS CORPUS_MAX_RELEASES \
-  LANGFUSE_TRACING LANGFUSE_PORT LANGFUSE_INIT_USER_EMAIL
+  LANGFUSE_TRACING LANGFUSE_PORT LANGFUSE_INIT_USER_EMAIL \
+  HITL_CONFIDENCE_MIN JUDGE_CLOUD_MODEL LLM_MONTHLY_BUDGET_USD LLAMA_GUARD   GUARD_NEWS_REVIEW \
+  ML_BASELINE WORKER_CONCURRENCY WORKER_MEM MCP_BIND MCP_PORT \
+  WEB_SEARCH_PER_MIN PRICES_PER_MIN
 WEB_PORT ?= $(shell grep -s '^WEB_PORT=' $(ROOT)/.env | cut -d= -f2)
 
 .DEFAULT_GOAL := help
@@ -54,7 +61,9 @@ WEB_PORT ?= $(shell grep -s '^WEB_PORT=' $(ROOT)/.env | cut -d= -f2)
         cpp-asan cpp-tsan cpp-bench sanitizers check demo ingest report \
         runs pdf feed-summary psql reset api-test api-lint web-image smoke \
         enrich corpus reindex llm-status ai-runs eval-image eval-ai \
-        bench-models eval-rag obs-up obs-down \
+        bench-models eval-rag obs-up obs-down verify demo-open \
+        verify-runs review-queue mcp-test mcp-lint mcp-tools mcp-call \
+        ml-train worker-logs \
         web openapi audit ingest-legacy ingest-modern parity rules registry \
         dedup-rebuild rule-runs eval bench ingest-test ingest-lint \
         ingest-asan ingest-tsan fastpath-test fastpath-lint fastpath-asan
@@ -79,11 +88,13 @@ env: ## Create .env from .env.example and fill empty secrets with random values
 	@chmod 600 $(ROOT)/.env
 
 # --- build and run ----------------------------------------------------------
-build: env ## Build the images (vendor-sim, legacy, ingest, ai-api, web)
+build: env ## Build the images (vendor-sim, legacy, ingest, ai-api, worker, mcp, web)
 	cd $(ROOT) && $(VENDOR_BUILD) --target runtime -t $(PREFIX)/vendor-sim:dev
 	cd $(ROOT) && $(LEGACY_BUILD) --target runtime -t $(PREFIX)/legacy:dev
 	cd $(ROOT) && $(INGEST_BUILD) --target runtime -t $(PREFIX)/ingest:dev
 	cd $(ROOT) && $(API_BUILD) --target runtime -t $(PREFIX)/ai-api:dev
+	cd $(ROOT) && $(API_BUILD) --target worker -t $(PREFIX)/ai-api:worker
+	cd $(ROOT) && $(MCP_BUILD) --target runtime -t $(PREFIX)/mcp-server:dev
 	cd $(ROOT) && $(WEB_BUILD) --target runtime -t $(PREFIX)/web:dev
 
 up: build ## Build (cached) and start everything: both ingesters + website
@@ -105,6 +116,7 @@ reset: ## Stop the stack and DELETE its volumes (database, PDFs, labels)
 web: ## Print the website URL and the demo logins
 	@echo "Website: http://localhost:$(or $(WEB_PORT),8080)"
 	@echo "Logins:  trader1, analyst1, admin1 (password: DEMO_USER_PASSWORD in .env)"
+	@echo "Review:  analyst1 or admin1 -> Review queue; MCP: make -C python mcp-tools"
 
 obs-up: ## Start Langfuse (profile observability); set LANGFUSE_TRACING=true
 	cd $(ROOT) && $(COMPOSE) --profile observability up -d --wait
@@ -115,9 +127,10 @@ obs-down: ## Stop Langfuse (its volumes are kept)
 	cd $(ROOT) && $(COMPOSE) --profile observability stop
 
 # --- tests ------------------------------------------------------------------
-test: ## Unit tests: pytest (vendor-sim, ai-api + parity) + GoogleTest (C++)
+test: ## Unit tests: pytest (vendor-sim, ai-api + parity, mcp) + GoogleTest (C++)
 	cd $(ROOT) && $(VENDOR_BUILD) --target test -t $(PREFIX)/vendor-sim:test
 	$(MAKE) --no-print-directory api-test
+	$(MAKE) --no-print-directory mcp-test
 	$(MAKE) --no-print-directory cpp-test
 	$(MAKE) --no-print-directory ingest-test
 	$(MAKE) --no-print-directory fastpath-test
@@ -125,6 +138,7 @@ test: ## Unit tests: pytest (vendor-sim, ai-api + parity) + GoogleTest (C++)
 lint: ## Style: ruff + clang-format/cpplint/clang-tidy (all C++ projects)
 	cd $(ROOT) && $(VENDOR_BUILD) --target lint -t $(PREFIX)/vendor-sim:lint
 	$(MAKE) --no-print-directory api-lint
+	$(MAKE) --no-print-directory mcp-lint
 	$(MAKE) --no-print-directory cpp-lint
 	$(MAKE) --no-print-directory ingest-lint
 	$(MAKE) --no-print-directory fastpath-lint
@@ -135,17 +149,28 @@ api-test: ## ai-api pytest (auth, news, rules, dedup, C++ vs Python parity)
 api-lint: ## ai-api ruff
 	cd $(ROOT) && $(API_BUILD) --target lint -t $(PREFIX)/ai-api:lint
 
+mcp-test: ## mcp-server pytest (tools, SSRF guard, token, host check)
+	cd $(ROOT) && $(MCP_BUILD) --target test -t $(PREFIX)/mcp-server:test
+
+mcp-lint: ## mcp-server ruff
+	cd $(ROOT) && $(MCP_BUILD) --target lint -t $(PREFIX)/mcp-server:lint
+
 web-image: ## Build only the web image (production UI bundle + nginx)
 	cd $(ROOT) && $(WEB_BUILD) --target runtime -t $(PREFIX)/web:dev
 
-eval: ## Rule/dedup eval on the seed-42 golden set (fails on regression)
+eval: ## Rule/dedup + rules-only verdict eval on the golden set (gates)
 	cd $(ROOT) && $(API_BUILD) --target eval -t $(PREFIX)/ai-api:eval
 
-eval-image: ## Build the image of the GPU evals (L3, benchmark, RAGAS)
+eval-image: ## Build the GPU eval image (L3, verdicts, benchmark, RAGAS, ml-train)
 	cd $(ROOT) && $(API_BUILD) --target ai-eval -t $(PREFIX)/ai-api:ai-eval
 
-eval-ai: eval-image ## L3 paraphrase + guard eval on the golden set (GPU host)
+eval-ai: eval-image ## L3 + guard eval, verdicts with the LLM judge (GPU host)
 	cd $(ROOT) && $(EVAL_RUN) python -m evals.ai_eval --check
+	cd $(ROOT) && $(EVAL_RUN) python -m evals.verify_eval --judge --ml \
+	  --check --out /out
+
+ml-train: eval-image ## Fine-tune the DistilBERT baseline (CPU, ~10 min)
+	cd $(ROOT) && $(EVAL_RUN) ai-api ml-train
 
 bench-models: eval-image ## Local model benchmark -> docs/benchmarks (GPU host)
 	cd $(ROOT) && $(EVAL_RUN) python -m evals.bench_models --out /out
@@ -203,8 +228,10 @@ check: test lint sanitizers eval ## Everything CI runs
 
 # The increment's "done when", through the edge: C++20 parity PASS, the rule
 # run DONE, the feed hides exactly the rule duplicates and shows FAKE badges,
-# plus the increment 1 security checks.
-smoke: ## Website check for DATE: parity, rules, badges, login, headers
+# every unique item has a verdict with evidence, low-confidence items wait in
+# the review queue (an analyst approves one and the worker resumes it), plus
+# the security checks of increment 1.
+smoke: ## Website check for DATE: verdicts, review, rules, login, headers
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api smoke --base-url http://edge:8080 --date $(DATE)
 
@@ -219,15 +246,15 @@ audit: ## Last 20 auth events (logins, failures, lockouts, logouts)
 	  client_ip FROM ai.audit_log ORDER BY id DESC LIMIT 20"
 
 # --- the demo day -----------------------------------------------------------
-demo: up ## Whole day: history + DATE (ingest, rules, AI), corpus, PDF, check
+demo: up ## Whole day: history + DATE (ingest, rules, AI, verify), corpus, PDF, check
 	@for i in $$(seq $(HISTORY_DAYS) -1 1); do \
 	  d=$$(date -d "$(DATE) -$$i day" +%F); \
 	  echo "== history $$d"; \
 	  $(MAKE) --no-print-directory ingest parity rules DATE=$$d || exit 1; \
 	done
 	$(MAKE) --no-print-directory corpus
-	$(MAKE) --no-print-directory ingest parity rules enrich report runs pdf \
-	  smoke web DATE=$(DATE)
+	$(MAKE) --no-print-directory ingest parity rules enrich verify report \
+	  runs pdf smoke web DATE=$(DATE)
 
 ingest: ingest-legacy ingest-modern ## Ingest DATE with both ingesters
 
@@ -269,6 +296,39 @@ ai-runs: ## Last 10 AI runs (paraphrases, summaries, fallbacks, time)
 	  paraphrases AS para, conflicts AS conf, injections AS inj, summarized, \
 	  fallbacks AS fb, skipped, failed, model, llm_ms, total_ms \
 	  FROM ai.ai_run ORDER BY run_id DESC LIMIT 10"
+
+verify: ## AI verification of DATE: queue the run, follow it (GPU host)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api verify --date $(DATE)
+
+demo-open: ## Market open for DATE: pending reviews expire (verdicts stand)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api expire --date $(DATE)
+
+verify-runs: ## Last 10 verify runs (verdicts, reviews, escalations, time)
+	@cd $(ROOT) && $(PSQL) -c "SELECT run_id, feed_date, status, total, \
+	  done, verified AS ver, unverified AS unv, misleading AS mis, fake, \
+	  pending_review AS review, escalated AS esc, failed, requested_by, \
+	  total_ms FROM ai.verify_run ORDER BY run_id DESC LIMIT 10"
+
+review-queue: ## The pending reviews, highest market impact first
+	@cd $(ROOT) && $(PSQL) -c "SELECT t.id, n.vendor_item_id, t.ai_verdict \
+	  AS ai, round(t.ai_confidence::numeric, 2) AS conf, t.reasons, \
+	  round(t.impact_score::numeric, 2) AS impact FROM ai.review_task t \
+	  JOIN ai.news_item n ON n.id = t.news_id WHERE t.status = 'PENDING' \
+	  ORDER BY t.impact_score DESC LIMIT 30"
+
+worker-logs: ## Follow the verification worker's log
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) logs -f --tail=100 ai-worker
+
+mcp-tools: ## List the MCP server's tools (through MCP, with the token)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) exec -T mcp-server mcp-server tools
+
+TOOL ?= lookup_company
+ARGS ?= {"query": "AAPL"}
+mcp-call: ## Call one MCP tool: TOOL=lookup_company ARGS='{"query": "AAPL"}'
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) exec -T mcp-server \
+	  mcp-server call $(TOOL) '$(ARGS)'
 
 dedup-rebuild: ## Re-index the 7-day dedup window ending at DATE into Redis
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \

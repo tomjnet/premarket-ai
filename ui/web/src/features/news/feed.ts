@@ -1,4 +1,4 @@
-import type {NewsItem, NewsList} from '@/api/schemas/news';
+import type {NewsItem, NewsList, Verdict} from '@/api/schemas/news';
 import {
   formatEtTime,
   isIsoDate,
@@ -8,9 +8,20 @@ import {
 
 import {isFlagged} from './rules';
 
+/** The verdict filter: one verdict, or the items waiting for review. */
+export type VerdictFilter = Verdict | 'PENDING';
+
+const VERDICT_FILTERS: readonly VerdictFilter[] = [
+  'VERIFIED',
+  'UNVERIFIED',
+  'MISLEADING',
+  'FAKE',
+  'PENDING',
+];
+
 /**
  * The feed's filters. They live in the URL:
- * `/news?date=&ticker=&q=&dups=1&flagged=1`.
+ * `/news?date=&ticker=&q=&dups=1&flagged=1&verdict=`.
  */
 export interface FeedFilters {
   /** Trading date, `YYYY-MM-DD`. */
@@ -24,6 +35,8 @@ export interface FeedFilters {
    * the API returned; the API has no such parameter.
    */
   flagged: boolean;
+  /** Only items with this verdict, or waiting for review (increment 4). */
+  verdict?: VerdictFilter;
 }
 
 const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/;
@@ -53,6 +66,7 @@ export function parseFeedFilters(
     q: q === '' ? undefined : q,
     dups: params.get('dups') === '1',
     flagged: params.get('flagged') === '1',
+    verdict: VERDICT_FILTERS.find(value => value === params.get('verdict')),
   };
 }
 
@@ -70,6 +84,9 @@ export function feedSearch(filters: FeedFilters): string {
   }
   if (filters.flagged) {
     params.set('flagged', '1');
+  }
+  if (filters.verdict !== undefined) {
+    params.set('verdict', filters.verdict);
   }
   return `?${params.toString()}`;
 }
@@ -107,7 +124,10 @@ export function duplicateCount(list: NewsList): number {
  */
 export function feedSummary(list: NewsList, filters: FeedFilters): string {
   const parts: string[] = [];
-  const filtered = filters.ticker !== undefined || filters.q !== undefined;
+  const filtered =
+    filters.ticker !== undefined ||
+    filters.q !== undefined ||
+    filters.verdict !== undefined;
   const items = plural(list.count, filtered ? 'matching item' : 'item');
   if (filters.flagged) {
     parts.push(`${list.items.filter(isFlagged).length} of ${items} flagged`);

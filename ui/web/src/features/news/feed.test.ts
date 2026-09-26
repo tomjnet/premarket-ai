@@ -124,6 +124,10 @@ function item(
     rulesChecked: true,
     summary: null,
     sentiment: null,
+    verdict: null,
+    confidence: null,
+    reviewStatus: null,
+    verdictSource: null,
   };
 }
 
@@ -156,6 +160,7 @@ describe('visibleItems', () => {
 describe('feedSummary', () => {
   const list: NewsList = {
     date: '2026-09-24',
+    verifyRun: null,
     run: {
       runId: 1,
       status: 'DONE',
@@ -230,7 +235,13 @@ describe('duplicateCount', () => {
     duplicates: 11,
     flagged: 9,
   };
-  const list = {date: '2026-09-24', count: 0, items: [], aiRun: null};
+  const list = {
+    date: '2026-09-24',
+    count: 0,
+    items: [],
+    aiRun: null,
+    verifyRun: null,
+  };
   const aiRun = {
     status: 'DONE' as const,
     finishedAt: null,
