@@ -44,6 +44,8 @@ def _item(row: dict[str, Any], *, with_body: bool) -> dict[str, Any]:
         "dup_type": row["dup_type"],
         "copies": row["copies"],
         "rules_checked": row["rules_checked"],
+        "summary": row.get("summary"),
+        "sentiment": row.get("sentiment"),
     }
     if with_body:
         fields["body"] = row["body"]
@@ -51,6 +53,29 @@ def _item(row: dict[str, Any], *, with_body: bool) -> dict[str, Any]:
             schemas.RuleEvidenceOut(**entry) for entry in row["evidence"] or []
         ]
     return fields
+
+
+def _ai_detail(
+    row: dict[str, Any], extraction: list[dict[str, Any]]
+) -> schemas.AiDetailOut | None:
+    if row.get("ai_status") is None:
+        return None
+    return schemas.AiDetailOut(
+        status=row["ai_status"],
+        model=row["ai_model"],
+        prompt_version=row["prompt_version"],
+        enriched_at=schemas.utc_z(row["enriched_at"]),
+        summary_source=row["summary_source"],
+        companies=[
+            schemas.CompanyOut(name=e["text"], ticker=e["ticker"])
+            for e in extraction
+            if e["kind"] == "entity"
+        ],
+        claims=[e["text"] for e in extraction if e["kind"] == "claim"],
+        evidence=[
+            schemas.AiEvidenceOut(**entry) for entry in row["ai_evidence"] or []
+        ],
+    )
 
 
 @router.get("/news")
@@ -73,8 +98,8 @@ async def list_news(
         include_duplicates: Also return items flagged as duplicates.
 
     Returns:
-        The date's ingest run and rule run (or null) and the matching
-        items with their rule results.
+        The date's ingest, rule and AI runs (or null) and the matching
+        items with their rule results and summaries.
     """
     if day is None:
         day = datetime.datetime.now(_NEW_YORK).date()
@@ -87,6 +112,7 @@ async def list_news(
     )
     run = await services.news.latest_run(day)
     rule_run = await services.news.latest_rule_run(day)
+    ai_run = await services.news.latest_ai_run(day)
     rows = await services.news.items(query)
     items = [schemas.NewsItemOut(**_item(row, with_body=False)) for row in rows]
     return schemas.NewsListOut(
@@ -95,6 +121,7 @@ async def list_news(
         rule_run=(
             None if rule_run is None else schemas.RuleRunOut.from_row(rule_run)
         ),
+        ai_run=None if ai_run is None else schemas.AiRunOut.from_row(ai_run),
         count=len(items),
         items=items,
     )
@@ -105,7 +132,7 @@ async def get_news_item(
     services: deps.ServicesDep,
     item_id: Annotated[int, fastapi.Path(ge=1, le=2**63 - 1)],
 ) -> schemas.NewsDetailOut:
-    """One item with its full body and the rule evidence.
+    """One item with its full body, the rule evidence and the AI results.
 
     Raises:
         fastapi.HTTPException: 404 when there is no such item.
@@ -113,4 +140,7 @@ async def get_news_item(
     row = await services.news.item(item_id)
     if row is None:
         raise fastapi.HTTPException(status_code=404, detail=_NOT_FOUND)
-    return schemas.NewsDetailOut(**_item(row, with_body=True))
+    extraction = await services.news.extraction(item_id)
+    return schemas.NewsDetailOut(
+        **_item(row, with_body=True), ai=_ai_detail(row, extraction)
+    )

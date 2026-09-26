@@ -52,8 +52,15 @@ WITH items AS (
          CASE WHEN c.news_id IS NULL THEN r.dup_of
               ELSE o.vendor_item_id END AS dup_of,
          d.dup_type,
-         coalesce(c.reason_codes, '{}') AS reason_codes,
+         -- Rule codes, then the AI run's (guard, language, L3), no repeats.
+         coalesce(c.reason_codes, '{}') || ARRAY(
+           SELECT code FROM unnest(coalesce(a.reason_codes, '{}')) AS code
+           WHERE code <> ALL (coalesce(c.reason_codes, '{}'))
+         ) AS reason_codes,
          c.evidence,
+         a.status AS ai_status, a.summary, a.sentiment, a.summary_source,
+         a.evidence AS ai_evidence, a.model AS ai_model,
+         a.prompt_version, a.enriched_at,
          -- Copies in the same feed (a later day's stale copy isn't here).
          (SELECT count(*) FROM ai.duplicate_link x
           JOIN ai.news_item xn ON xn.id = x.news_id
@@ -65,6 +72,7 @@ WITH items AS (
   LEFT JOIN ai.rule_check c ON c.news_id = n.id
   LEFT JOIN ai.duplicate_link d ON d.news_id = n.id
   LEFT JOIN ai.news_item o ON o.id = d.canonical_id
+  LEFT JOIN ai.news_ai a ON a.news_id = n.id
   WHERE {where}
 )
 """
@@ -81,6 +89,30 @@ ORDER BY published_at DESC, id DESC
 LIMIT {_MAX_ITEMS}
 """
 )
+
+_AI_RUN_SQL = """
+SELECT status, finished_at, items, paraphrases, conflicts, summarized,
+       fallbacks, failed, model
+FROM ai.ai_run
+WHERE feed_date = %(day)s
+ORDER BY started_at DESC, run_id DESC
+LIMIT 1
+"""
+
+_EXTRACTION_SQL = """
+SELECT 'entity' AS kind, e.seq, e.name AS text, e.ticker
+FROM ai.v_raw_news r
+JOIN ai.news_item n USING (feed_date, vendor_item_id)
+JOIN ai.entity e ON e.news_id = n.id
+WHERE r.id = %(id)s
+UNION ALL
+SELECT 'claim', c.seq, c.text, NULL
+FROM ai.v_raw_news r
+JOIN ai.news_item n USING (feed_date, vendor_item_id)
+JOIN ai.claim c ON c.news_id = n.id
+WHERE r.id = %(id)s
+ORDER BY 1, 2
+"""
 
 _DETAIL_SQL = (
     _ITEMS_CTE.replace("{where}", "r.id = %(id)s") + "SELECT * FROM items"
@@ -117,12 +149,20 @@ class NewsStore(Protocol):
         """Returns the latest rule run of ``day``, or None."""
         ...
 
+    async def latest_ai_run(self, day: datetime.date) -> dict[str, Any] | None:
+        """Returns the latest AI run of ``day``, or None."""
+        ...
+
     async def items(self, query: NewsQuery) -> list[dict[str, Any]]:
         """Returns the matching items, newest first (with ``body``)."""
         ...
 
     async def item(self, item_id: int) -> dict[str, Any] | None:
         """Returns one item (with ``body`` and ``evidence``), or None."""
+        ...
+
+    async def extraction(self, item_id: int) -> list[dict[str, Any]]:
+        """The item's extracted companies and claims (``kind``, ``text``)."""
         ...
 
 
@@ -181,6 +221,10 @@ class PostgresNewsStore:
         """Returns the latest rule run of ``day``, or None."""
         return await self._one(_RULE_RUN_SQL, {"day": day})
 
+    async def latest_ai_run(self, day: datetime.date) -> dict[str, Any] | None:
+        """Returns the latest AI run of ``day``, or None."""
+        return await self._one(_AI_RUN_SQL, {"day": day})
+
     async def items(self, query: NewsQuery) -> list[dict[str, Any]]:
         """Returns the matching items, newest first (with ``body``)."""
         params = {
@@ -197,3 +241,10 @@ class PostgresNewsStore:
     async def item(self, item_id: int) -> dict[str, Any] | None:
         """Returns one item (with ``body`` and ``evidence``), or None."""
         return await self._one(_DETAIL_SQL, {"id": item_id})
+
+    async def extraction(self, item_id: int) -> list[dict[str, Any]]:
+        """The item's extracted companies and claims (``kind``, ``text``)."""
+        async with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=rows.dict_row)
+            await cur.execute(_EXTRACTION_SQL, {"id": item_id})
+            return await cur.fetchall()

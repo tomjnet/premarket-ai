@@ -1,10 +1,11 @@
 import {Link} from 'react-router';
 
-import type {NewsList, RuleRun} from '@/api/schemas/news';
+import type {AiRun, NewsList, RuleRun} from '@/api/schemas/news';
 import {Alert, AlertDescription, AlertTitle} from '@/components/ui/alert';
 import {Skeleton} from '@/components/ui/skeleton';
 import {formatLongDate, isWeekend} from '@/lib/time';
 
+import {aiRunSummary} from '../ai';
 import {feedFallbackDate, feedSearch, feedSummary} from '../feed';
 import type {FeedFilters} from '../feed';
 import {ruleRunSummary} from '../rules';
@@ -108,6 +109,27 @@ export function RunStatus({list, filters, today}: RunStatusProps) {
       {feedSummary(list, filters)}
     </p>
   );
+}
+
+interface AiRunStatusProps {
+  aiRun: AiRun | null;
+}
+
+/**
+ * The date's AI run: its counts when `DONE`, progress while `RUNNING`, a
+ * notice when `FAILED` or when it hasn't run.
+ */
+export function AiRunStatus({aiRun}: AiRunStatusProps) {
+  const text = aiRunSummary(aiRun);
+  if (aiRun?.status === 'FAILED') {
+    return (
+      <Alert role="status">
+        <AlertTitle>The AI run failed</AlertTitle>
+        <AlertDescription>{text}</AlertDescription>
+      </Alert>
+    );
+  }
+  return <p className="text-sm text-muted-foreground">{text}</p>;
 }
 
 interface RuleRunStatusProps {

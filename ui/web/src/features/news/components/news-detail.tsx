@@ -1,7 +1,7 @@
 import {ExternalLink} from 'lucide-react';
 import {Link} from 'react-router';
 
-import type {NewsDetail} from '@/api/schemas/news';
+import type {AiDetail, NewsDetail, Sentiment} from '@/api/schemas/news';
 import {
   formatEtTime,
   formatLongDate,
@@ -10,11 +10,13 @@ import {
 } from '@/lib/time';
 import {safeHttpUrl} from '@/lib/url';
 
+import {aiStatusText} from '../ai';
 import {bodyParagraphs} from '../detail';
 import {feedSearch} from '../feed';
 import {dupTypeText, evidenceBadge, ruleBadges} from '../rules';
 
 import {RuleBadgeView, RuleBadges} from './rule-badges';
+import {SentimentBadge} from './sentiment-badge';
 
 interface NewsDetailViewProps {
   item: NewsDetail;
@@ -79,6 +81,14 @@ export function NewsDetailView({item}: NewsDetailViewProps) {
       </div>
 
       <RuleChecks item={item} />
+
+      {item.ai !== null && (
+        <AiSection
+          ai={item.ai}
+          summary={item.summary}
+          sentiment={item.sentiment}
+        />
+      )}
 
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 border-t pt-4 text-sm">
         <dt className="text-muted-foreground">Feed date</dt>
@@ -145,6 +155,108 @@ function RuleChecks({item}: RuleChecksProps) {
           ))}
         </ul>
       )}
+    </section>
+  );
+}
+
+interface AiSectionProps {
+  ai: AiDetail;
+  summary: string | null;
+  sentiment: Sentiment | null;
+}
+
+/**
+ * What the AI run made of the item. Everything here is model or server
+ * output about untrusted vendor text: plain text only, and labelled as
+ * machine-written.
+ */
+function AiSection({ai, summary, sentiment}: AiSectionProps) {
+  return (
+    <section
+      aria-labelledby="ai-heading"
+      className="flex flex-col gap-3 border-t pt-4"
+    >
+      <h2 id="ai-heading" className="text-lg font-semibold">
+        AI
+      </h2>
+      <p className="text-sm text-muted-foreground">
+        {aiStatusText(ai.status)}. Written by a language model from the vendor's
+        text; it can be wrong.
+      </p>
+      {summary !== null && (
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-semibold">Summary</h3>
+          <p className="break-words">{summary}</p>
+          {ai.summarySource === 'fallback' && (
+            <p className="text-sm text-muted-foreground">
+              Lead sentence: the model couldn't summarize this item.
+            </p>
+          )}
+        </div>
+      )}
+      {sentiment !== null && (
+        <p>
+          <SentimentBadge sentiment={sentiment} />
+        </p>
+      )}
+      {ai.status === 'DONE' && (
+        <>
+          <div className="flex flex-col gap-1">
+            <h3 className="text-sm font-semibold">Companies</h3>
+            {ai.companies.length === 0 ? (
+              <p className="text-sm text-muted-foreground">None found.</p>
+            ) : (
+              <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                {ai.companies.map((company, index) => (
+                  <li key={index} className="break-words">
+                    {company.name}
+                    {company.ticker !== null && (
+                      <span className="font-mono"> ({company.ticker})</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="flex flex-col gap-1">
+            <h3 className="text-sm font-semibold">Claims</h3>
+            {ai.claims.length === 0 ? (
+              <p className="text-sm text-muted-foreground">None found.</p>
+            ) : (
+              <ul className="flex list-disc flex-col gap-1 pl-5 text-sm">
+                {ai.claims.map((claim, index) => (
+                  <li key={index} className="break-words">
+                    {claim}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+      {ai.evidence.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-semibold">AI checks</h3>
+          <ul className="flex flex-col gap-2 text-sm">
+            {ai.evidence.map((evidence, index) => (
+              <li
+                key={index}
+                className="flex flex-col items-start gap-1 sm:flex-row sm:gap-2"
+              >
+                <RuleBadgeView badge={evidenceBadge(evidence)} />
+                <span className="break-words">{evidence.message}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Model {ai.model} · prompt {ai.promptVersion} ·{' '}
+        <time dateTime={ai.enrichedAt}>
+          {formatLongDate(newYorkDateOf(ai.enrichedAt))},{' '}
+          {formatEtTime(ai.enrichedAt)} ET
+        </time>
+      </p>
     </section>
   );
 }

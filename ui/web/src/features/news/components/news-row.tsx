@@ -7,6 +7,7 @@ import {cn} from '@/lib/utils';
 import {ruleBadges} from '../rules';
 
 import {RuleBadges} from './rule-badges';
+import {SentimentBadge} from './sentiment-badge';
 
 interface NewsRowProps {
   item: NewsItem;
@@ -86,11 +87,22 @@ export function NewsRow({
                 Not checked yet
               </span>
             )}
+            {item.sentiment !== null && (
+              <SentimentBadge sentiment={item.sentiment} />
+            )}
           </div>
         </div>
-        <p className="text-sm break-words text-muted-foreground">
-          {item.excerpt}
-        </p>
+        {/* The AI summary when there is one, else the vendor's excerpt. */}
+        {item.summary === null ? (
+          <p className="text-sm break-words text-muted-foreground">
+            {item.excerpt}
+          </p>
+        ) : (
+          <p data-slot="row-summary" className="text-sm break-words">
+            <span className="font-medium">AI summary: </span>
+            {item.summary}
+          </p>
+        )}
         {item.isDup && (
           <p className="text-xs font-medium">
             Duplicate of {item.dupOf ?? 'an earlier item'}

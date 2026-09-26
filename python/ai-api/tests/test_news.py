@@ -61,7 +61,14 @@ def test_feed_matches_the_contract(harness):
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"date", "run", "rule_run", "count", "items"}
+    assert set(body) == {
+        "date",
+        "run",
+        "rule_run",
+        "ai_run",
+        "count",
+        "items",
+    }
     assert body["date"] == "2026-09-24"
     assert body["count"] == len(body["items"]) == 2
     assert body["run"] == {
@@ -78,6 +85,17 @@ def test_feed_matches_the_contract(harness):
         "items": 3,
         "duplicates": 1,
         "flagged": 1,
+    }
+    assert body["ai_run"] == {
+        "status": "DONE",
+        "finished_at": "2026-09-24T10:09:00Z",
+        "items": 2,
+        "paraphrases": 0,
+        "conflicts": 0,
+        "summarized": 2,
+        "fallbacks": 0,
+        "failed": 0,
+        "model": "main-gpu4gb",
     }
     item = body["items"][0]
     assert set(item) == {
@@ -97,6 +115,8 @@ def test_feed_matches_the_contract(harness):
         "dup_type",
         "copies",
         "rules_checked",
+        "summary",
+        "sentiment",
     }
     assert _UTC_Z.match(item["published_at"])
     assert "body" not in item
@@ -146,6 +166,7 @@ def test_no_run_for_the_date(harness):
         "date": "2026-09-26",
         "run": None,
         "rule_run": None,
+        "ai_run": None,
         "count": 0,
         "items": [],
     }
@@ -270,3 +291,28 @@ def test_settings_reject_placeholder_secrets():
         assert "JWT_SECRET" in str(e)
         return
     raise AssertionError("placeholder accepted")
+
+
+def test_detail_has_the_ai_results(harness):
+    body = harness.client.get("/news/2001", headers=_bearer(harness)).json()
+    assert body["summary"] == "Apple said item 1 happened."
+    assert body["sentiment"] == "neutral"
+    assert body["ai"] == {
+        "status": "DONE",
+        "model": "main-gpu4gb",
+        "prompt_version": "enrich-v1",
+        "enriched_at": "2026-09-24T10:05:00Z",
+        "summary_source": "llm",
+        "companies": [{"name": "Apple Inc.", "ticker": "AAPL"}],
+        "claims": ["Apple said X."],
+        "evidence": [],
+    }
+
+
+def test_detail_before_the_ai_run_has_no_ai(harness):
+    harness.news.rows[1].update(
+        ai_status=None, summary=None, sentiment=None, summary_source=None
+    )
+    body = harness.client.get("/news/2002", headers=_bearer(harness)).json()
+    assert body["ai"] is None
+    assert body["summary"] is None

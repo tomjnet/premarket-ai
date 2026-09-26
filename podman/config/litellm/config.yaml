@@ -1,0 +1,137 @@
+# premarket-ai LLM gateway (LiteLLM proxy): one OpenAI-compatible endpoint
+# for the local models on the GPU host (Ollama) and the cloud providers.
+#
+# ai-api never names a provider model. It asks for a task alias plus the
+# hardware profile, `<task>-<HW_PROFILE>`:
+#   main-*   extract, summaries, sentiment, "Ask the News"
+#   embed-*  RAG embeddings and dedup L3 (768 or 1024 dimensions)
+#   guard-*  Llama Guard (increment 4)
+# `cloud-*` are the cloud models (OpenAI is the default cloud provider);
+# `bench-*` are the local model benchmark candidates.
+#
+# The gpu4gb main model is the winner of the local model benchmark
+# (make -C python bench-models, results in docs/benchmarks/).
+# Changing a tag here needs `make -C python up` (the gateway reloads it).
+
+model_list:
+  # --- gpu4gb: GTX 1650, 4 GB VRAM (one model on the GPU at a time) --------
+  - model_name: main-gpu4gb
+    litellm_params:
+      model: ollama_chat/qwen3:4b-instruct
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 8192
+      temperature: 0
+  - model_name: embed-gpu4gb
+    litellm_params:
+      model: ollama/nomic-embed-text
+      api_base: os.environ/OLLAMA_BASE_URL
+  - model_name: guard-gpu4gb
+    litellm_params:
+      model: ollama_chat/llama-guard3:1b
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+
+  # --- gpu8gb ---------------------------------------------------------------
+  - model_name: main-gpu8gb
+    litellm_params:
+      model: ollama_chat/qwen3:8b
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 8192
+      temperature: 0
+  - model_name: embed-gpu8gb
+    litellm_params:
+      model: ollama/bge-m3
+      api_base: os.environ/OLLAMA_BASE_URL
+  - model_name: guard-gpu8gb
+    litellm_params:
+      model: ollama_chat/llama-guard3:1b
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+
+  # --- gpu16gb+ -------------------------------------------------------------
+  - model_name: main-gpu16gb
+    litellm_params:
+      model: ollama_chat/qwen3:14b
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 16384
+      temperature: 0
+  - model_name: embed-gpu16gb
+    litellm_params:
+      model: ollama/bge-m3
+      api_base: os.environ/OLLAMA_BASE_URL
+  - model_name: guard-gpu16gb
+    litellm_params:
+      model: ollama_chat/llama-guard3:8b
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+
+  # --- cpu: no GPU (slow; the cloud is recommended for judge and brief) -----
+  - model_name: main-cpu
+    litellm_params:
+      model: ollama_chat/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 8192
+      temperature: 0
+  - model_name: embed-cpu
+    litellm_params:
+      model: ollama/nomic-embed-text
+      api_base: os.environ/OLLAMA_BASE_URL
+  - model_name: guard-cpu
+    litellm_params:
+      model: ollama_chat/llama-guard3:1b
+      api_base: os.environ/OLLAMA_BASE_URL
+      temperature: 0
+
+  # --- cloud (keys in .env; unused until a task is routed here) -------------
+  - model_name: cloud-openai
+    litellm_params:
+      model: openai/gpt-5-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: cloud-anthropic
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: cloud-google
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  # --- local model benchmark candidates (gpu4gb, Q4) ------------------------
+  # Qwen3 4B is the non-thinking 2507 instruct build: the hybrid qwen3:4b
+  # spends most of its tokens thinking, which a 100-item batch can't afford.
+  - model_name: bench-qwen3-4b
+    litellm_params:
+      model: ollama_chat/qwen3:4b-instruct
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 8192
+      temperature: 0
+  - model_name: bench-llama3.2-3b
+    litellm_params:
+      model: ollama_chat/llama3.2:3b
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 8192
+      temperature: 0
+  - model_name: bench-phi4-mini
+    litellm_params:
+      model: ollama_chat/phi4-mini
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 8192
+      temperature: 0
+  - model_name: bench-gemma3-4b
+    litellm_params:
+      model: ollama_chat/gemma3:4b
+      api_base: os.environ/OLLAMA_BASE_URL
+      num_ctx: 8192
+      temperature: 0
+
+litellm_settings:
+  # Unknown params (a provider that lacks one) are dropped, not errors.
+  drop_params: true
+  # Ollama on a 4 GB GPU can take a while to swap models in.
+  request_timeout: 300
+  num_retries: 1
+  # No telemetry from the lab.
+  telemetry: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

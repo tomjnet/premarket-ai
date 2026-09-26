@@ -6,7 +6,7 @@ import {AppShell} from '@/components/layout/root-layout';
 import {ErrorPage} from '@/components/pages/error-page';
 import {RequireAuth, RequireRole} from '@/features/auth/require-auth';
 import {apiUrl} from '@/lib/env';
-import {SCENARIO_STORAGE_KEY} from '@/lib/mock-scenarios';
+import {SCENARIOS, SCENARIO_STORAGE_KEY} from '@/lib/mock-scenarios';
 import {formatLongDate, todayInNewYork} from '@/lib/time';
 import {db} from '@/mocks/data/db';
 import {server} from '@/mocks/node';
@@ -94,7 +94,7 @@ describe('app shell', () => {
     expect(await screen.findByText('MOCK API')).toBeInTheDocument();
     const switcher = screen.getByLabelText('Mock scenario');
     expect(switcher).toHaveValue('failed');
-    expect(screen.getAllByRole('option')).toHaveLength(10);
+    expect(screen.getAllByRole('option')).toHaveLength(SCENARIOS.length);
     // Changing the select alone doesn't reload; Apply does.
     const apply = screen.getByRole('button', {name: 'Apply (reloads)'});
     expect(apply).toBeDisabled();

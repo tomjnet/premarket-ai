@@ -16,6 +16,9 @@ Role = Literal["TRADER", "ANALYST", "ADMIN"]
 RunStatus = Literal["RUNNING", "DONE", "FAILED"]
 DupType = Literal["url", "exact", "near", "paraphrase"]
 RuleCheck = Literal["entity", "source", "dedup", "stale"]
+AiCheck = Literal["guard", "language", "dedup"]
+AiStatus = Literal["DONE", "SKIPPED", "DUPLICATE", "FAILED"]
+Sentiment = Literal["bullish", "neutral", "bearish"]
 
 
 def utc_z(value: datetime.datetime) -> str:
@@ -90,11 +93,38 @@ class RuleRunOut(pydantic.BaseModel):
         )
 
 
+class AiRunOut(pydantic.BaseModel):
+    """The latest AI run (summaries, L3) of a feed date."""
+
+    status: RunStatus
+    finished_at: str | None
+    items: int
+    paraphrases: int
+    conflicts: int
+    summarized: int
+    fallbacks: int
+    failed: int
+    model: str
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> AiRunOut:
+        """Builds the model from an ``ai.ai_run`` row."""
+        finished = row["finished_at"]
+        fields = {k: row[k] for k in cls.model_fields if k != "finished_at"}
+        return cls(
+            finished_at=None if finished is None else utc_z(finished),
+            **fields,
+        )
+
+
 class NewsItemOut(pydantic.BaseModel):
     """One item of ``GET /news``.
 
     ``is_dup`` / ``dup_of`` come from the rule engine once
     ``rules_checked`` is true, else from the legacy exact-hash flags.
+    ``reason_codes`` are the rules' codes, then the AI run's.
+    ``summary`` and ``sentiment`` are null until the AI run
+    summarized the item.
     """
 
     id: int
@@ -113,6 +143,8 @@ class NewsItemOut(pydantic.BaseModel):
     dup_type: DupType | None
     copies: int
     rules_checked: bool
+    summary: str | None
+    sentiment: Sentiment | None
 
 
 class RuleEvidenceOut(pydantic.BaseModel):
@@ -123,11 +155,44 @@ class RuleEvidenceOut(pydantic.BaseModel):
     message: str
 
 
+class AiEvidenceOut(pydantic.BaseModel):
+    """Why the AI run flagged an item; plain text."""
+
+    check: AiCheck
+    code: str | None
+    message: str
+
+
+class CompanyOut(pydantic.BaseModel):
+    """A company the item names (extracted by the model)."""
+
+    name: str
+    ticker: str | None
+
+
+class AiDetailOut(pydantic.BaseModel):
+    """What the AI run did with an item.
+
+    ``summary_source`` is ``fallback`` when the model couldn't write a
+    clean summary and the story's lead sentence is shown instead.
+    """
+
+    status: AiStatus
+    model: str
+    prompt_version: str
+    enriched_at: str
+    summary_source: Literal["llm", "fallback"] | None
+    companies: list[CompanyOut]
+    claims: list[str]
+    evidence: list[AiEvidenceOut]
+
+
 class NewsDetailOut(NewsItemOut):
-    """``GET /news/{id}``: the item, its full body and rule evidence."""
+    """``GET /news/{id}``: the item, its body, rule and AI evidence."""
 
     body: str
     rule_evidence: list[RuleEvidenceOut]
+    ai: AiDetailOut | None
 
 
 class NewsListOut(pydantic.BaseModel):
@@ -136,8 +201,18 @@ class NewsListOut(pydantic.BaseModel):
     date: str
     run: IngestRunOut | None
     rule_run: RuleRunOut | None
+    ai_run: AiRunOut | None
     count: int
     items: list[NewsItemOut]
+
+
+class ChatIn(pydantic.BaseModel):
+    """``POST /chat``: one question about the news."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    question: str = pydantic.Field(min_length=3, max_length=500)
+    date: datetime.date | None = None
 
 
 class HealthOut(pydantic.BaseModel):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 import dataclasses
-from typing import Annotated
+from typing import Annotated, Protocol
 
 import fastapi
 
@@ -13,11 +13,24 @@ from ai_api import news
 from ai_api import sessions
 from ai_api import tokens
 from ai_api import users
+from ai_api.rag import ask as ask_lib
 
 NOT_AUTHENTICATED = "Not authenticated"
 FORBIDDEN = "Forbidden"
 # Sec-Fetch-Site values a same-site page or a non-browser client sends.
 _TRUSTED_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+class Gate(Protocol):
+    """One chat question in flight per user (``routes.chat.ChatGate``)."""
+
+    async def enter(self, user: str) -> bool:
+        """True when the user had no question in flight."""
+        ...
+
+    async def leave(self, user: str) -> None:
+        """Frees the user's slot."""
+        ...
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,6 +43,8 @@ class Services:
         news: The news feed.
         sessions: Login sessions and throttling.
         ping: Raises if a backing service (database, Redis) is down.
+        ask: "Ask the News"; None when the LLM isn't configured.
+        chat_gate: The per-user chat lock.
     """
 
     settings: config.Settings
@@ -37,6 +52,8 @@ class Services:
     news: news.NewsStore
     sessions: sessions.SessionStore
     ping: Callable[[], Awaitable[None]]
+    ask: ask_lib.AskService | None = None
+    chat_gate: Gate | None = None
 
 
 def get_services(request: fastapi.Request) -> Services:

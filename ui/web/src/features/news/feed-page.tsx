@@ -7,6 +7,7 @@ import {formatLongDate, todayInNewYork} from '@/lib/time';
 
 import {FeedFiltersBar} from './components/feed-filters-bar';
 import {
+  AiRunStatus,
   FeedSkeleton,
   NoFeed,
   RuleRunStatus,
@@ -159,6 +160,8 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
         <RunStatus list={list} filters={filters} today={today} />
       )}
       <RuleRunStatus ruleRun={list.ruleRun} />
+      {/* Only once the rules have run: the AI run comes after them. */}
+      {list.ruleRun !== null && <AiRunStatus aiRun={list.aiRun} />}
       {items.length > 0 && shown.length === 0 && (
         <div className="flex flex-col items-start gap-2 py-6">
           <p>No item in this view was flagged by the rule checks.</p>

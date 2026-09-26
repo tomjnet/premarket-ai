@@ -1,0 +1,12 @@
+{
+  "eval": "ai_eval",
+  "seed": 42,
+  "metrics": {
+    "l3.recall.paraphrase": 1.0,
+    "l3.precision": 1.0,
+    "l3.link_accuracy": 1.0,
+    "INJECTION_ATTEMPT.recall": 1.0,
+    "INJECTION_ATTEMPT.precision": 1.0,
+    "language.false_flags": 0.0
+  }
+}

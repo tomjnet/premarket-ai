@@ -20,28 +20,41 @@ API_BUILD = $(ENGINE) build -f podman/ai-api/Containerfile \
   --build-context fastpath=cpp/fastpath --build-context config=python/config \
   --build-context vendorsim=python/vendor-sim python/ai-api
 WEB_BUILD = $(ENGINE) build -f podman/web/Containerfile ui/web
+# The GPU evals run on the compose network (gateway, chroma, reranker).
+EVAL_RUN = $(COMPOSE) --profile eval run --rm --no-deps ai-eval
 PSQL = $(COMPOSE) exec -T postgres psql -U premarket -d premarket
 # Increment 1 runs the legacy pipeline and the website side by side;
-# increment 2 adds the C++20 ingester (profile legacy) and the rule checks.
+# increment 2 adds the C++20 ingester (profile legacy) and the rule checks;
+# increment 3 adds the LLM gateway, chroma and the reranker (profile ai).
 # `run` always uses --no-deps: with Podman, compose recreates the running
 # postgres for every `run` with dependencies, and ai-api would lose its
 # connections for a few seconds. `up` (or `demo`) starts everything first.
 PROFILES = --profile legacy --profile ai
 # Secrets `env` fills with random values when .env has them empty or missing.
-SECRETS = JWT_SECRET REDIS_PASSWORD AI_DB_PASSWORD
+SECRETS = JWT_SECRET REDIS_PASSWORD AI_DB_PASSWORD LLM_GATEWAY_KEY \
+  LANGFUSE_KEY_ID LANGFUSE_SECRET LANGFUSE_DB_PASSWORD \
+  LANGFUSE_CLICKHOUSE_PASSWORD LANGFUSE_MINIO_PASSWORD \
+  LANGFUSE_REDIS_PASSWORD LANGFUSE_SALT LANGFUSE_ENCRYPTION_KEY \
+  LANGFUSE_NEXTAUTH_SECRET LANGFUSE_INIT_USER_PASSWORD
 # Settings added to an older .env (from increments 0 and 1).
 NEW_SETTINGS = WEB_PORT WEB_BIND DEMO_USER_PASSWORD ACCESS_TOKEN_TTL_S \
   REFRESH_TOKEN_TTL_S LOGIN_MAX_FAILURES LOGIN_LOCKOUT_S \
   LAB_UNIVERSE_SIZE INGEST_WORKERS INGEST_QUEUE_CAPACITY \
   INGEST_DEDUP_WINDOW_DAYS INGEST_CPU_AFFINITY SEC_USER_AGENT \
   REGISTRY_MAX_AGE_DAYS STALE_MAX_AGE_DAYS DEDUP_WINDOW_DAYS \
-  DEDUP_SIMHASH_NGRAM DEDUP_SIMHASH_MAX_HAMMING DEDUP_NEAR_MAX_WORD_EDITS
+  DEDUP_SIMHASH_NGRAM DEDUP_SIMHASH_MAX_HAMMING DEDUP_NEAR_MAX_WORD_EDITS \
+  LLM_CONCURRENCY OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY \
+  DEDUP_COSINE_MIN DEDUP_PARAPHRASE_MIN_WORD_EDITS RAG_TOP_K RAG_TOP_N \
+  RERANKER_MODEL RERANKER_MEM RERANKER_THREADS CORPUS_MONTHS CORPUS_MAX_FILINGS CORPUS_MAX_RELEASES \
+  LANGFUSE_TRACING LANGFUSE_PORT LANGFUSE_INIT_USER_EMAIL
 WEB_PORT ?= $(shell grep -s '^WEB_PORT=' $(ROOT)/.env | cut -d= -f2)
 
 .DEFAULT_GOAL := help
 .PHONY: help env build up down logs ps test lint cpp-test cpp-lint \
         cpp-asan cpp-tsan cpp-bench sanitizers check demo ingest report \
         runs pdf feed-summary psql reset api-test api-lint web-image smoke \
+        enrich corpus reindex llm-status ai-runs eval-image eval-ai \
+        bench-models eval-rag obs-up obs-down \
         web openapi audit ingest-legacy ingest-modern parity rules registry \
         dedup-rebuild rule-runs eval bench ingest-test ingest-lint \
         ingest-asan ingest-tsan fastpath-test fastpath-lint fastpath-asan
@@ -93,6 +106,14 @@ web: ## Print the website URL and the demo logins
 	@echo "Website: http://localhost:$(or $(WEB_PORT),8080)"
 	@echo "Logins:  trader1, analyst1, admin1 (password: DEMO_USER_PASSWORD in .env)"
 
+obs-up: ## Start Langfuse (profile observability); set LANGFUSE_TRACING=true
+	cd $(ROOT) && $(COMPOSE) --profile observability up -d --wait
+	@echo "Langfuse: http://localhost:$(or $(LANGFUSE_PORT),3000)"
+	@echo "Login:    LANGFUSE_INIT_USER_EMAIL / LANGFUSE_INIT_USER_PASSWORD in .env"
+
+obs-down: ## Stop Langfuse (its volumes are kept)
+	cd $(ROOT) && $(COMPOSE) --profile observability stop
+
 # --- tests ------------------------------------------------------------------
 test: ## Unit tests: pytest (vendor-sim, ai-api + parity) + GoogleTest (C++)
 	cd $(ROOT) && $(VENDOR_BUILD) --target test -t $(PREFIX)/vendor-sim:test
@@ -119,6 +140,18 @@ web-image: ## Build only the web image (production UI bundle + nginx)
 
 eval: ## Rule/dedup eval on the seed-42 golden set (fails on regression)
 	cd $(ROOT) && $(API_BUILD) --target eval -t $(PREFIX)/ai-api:eval
+
+eval-image: ## Build the image of the GPU evals (L3, benchmark, RAGAS)
+	cd $(ROOT) && $(API_BUILD) --target ai-eval -t $(PREFIX)/ai-api:ai-eval
+
+eval-ai: eval-image ## L3 paraphrase + guard eval on the golden set (GPU host)
+	cd $(ROOT) && $(EVAL_RUN) python -m evals.ai_eval --check
+
+bench-models: eval-image ## Local model benchmark -> docs/benchmarks (GPU host)
+	cd $(ROOT) && $(EVAL_RUN) python -m evals.bench_models --out /out
+
+eval-rag: eval-image ## RAGAS baseline of "Ask the News" -> docs/benchmarks
+	cd $(ROOT) && $(EVAL_RUN) python -m evals.rag_eval --out /out
 
 cpp-test: ## C++11 legacy: debug build + ctest
 	cd $(ROOT) && $(LEGACY_BUILD) --target test -t $(PREFIX)/legacy:test
@@ -186,14 +219,15 @@ audit: ## Last 20 auth events (logins, failures, lockouts, logouts)
 	  client_ip FROM ai.audit_log ORDER BY id DESC LIMIT 20"
 
 # --- the demo day -----------------------------------------------------------
-demo: up ## Whole day now: history + DATE (both ingesters, rules), PDF, check
+demo: up ## Whole day: history + DATE (ingest, rules, AI), corpus, PDF, check
 	@for i in $$(seq $(HISTORY_DAYS) -1 1); do \
 	  d=$$(date -d "$(DATE) -$$i day" +%F); \
 	  echo "== history $$d"; \
 	  $(MAKE) --no-print-directory ingest parity rules DATE=$$d || exit 1; \
 	done
-	$(MAKE) --no-print-directory ingest parity rules report runs pdf smoke \
-	  web DATE=$(DATE)
+	$(MAKE) --no-print-directory corpus
+	$(MAKE) --no-print-directory ingest parity rules enrich report runs pdf \
+	  smoke web DATE=$(DATE)
 
 ingest: ingest-legacy ingest-modern ## Ingest DATE with both ingesters
 
@@ -213,6 +247,28 @@ rules: ## Rule checks for DATE: dedup L0-L2, SEC registry, sources, stale
 registry: ## Refresh the SEC ticker registry now (needs SEC_USER_AGENT)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api registry
+
+enrich: ## First AI for DATE: dedup L3, summaries, sentiment (GPU host)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api enrich --date $(DATE)
+
+corpus: ## Download new EDGAR/Fed/SEC documents and index them (SEC_USER_AGENT)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api corpus
+
+reindex: ## Rebuild the vector store (chroma) from ai.chunk
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api reindex
+
+llm-status: ## The gateway's aliases, one embedding and one chat call
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api llm-status
+
+ai-runs: ## Last 10 AI runs (paraphrases, summaries, fallbacks, time)
+	@cd $(ROOT) && $(PSQL) -c "SELECT run_id, feed_date, status, items, \
+	  paraphrases AS para, conflicts AS conf, injections AS inj, summarized, \
+	  fallbacks AS fb, skipped, failed, model, llm_ms, total_ms \
+	  FROM ai.ai_run ORDER BY run_id DESC LIMIT 10"
 
 dedup-rebuild: ## Re-index the 7-day dedup window ending at DATE into Redis
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \

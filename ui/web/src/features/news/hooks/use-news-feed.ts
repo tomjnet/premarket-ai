@@ -11,12 +11,14 @@ import {newsKeys} from '../query-keys';
 /** While a run is still arriving, the feed polls this often. */
 export const FEED_POLL_MS = 30_000;
 
-/** Poll only while the ingest run or the rule-check run is `RUNNING`. */
+/** Poll only while the ingest, rule-check or AI run is `RUNNING`. */
 export function feedRefetchInterval(
   list: NewsList | undefined,
 ): number | false {
   const running =
-    list?.run?.status === 'RUNNING' || list?.ruleRun?.status === 'RUNNING';
+    list?.run?.status === 'RUNNING' ||
+    list?.ruleRun?.status === 'RUNNING' ||
+    list?.aiRun?.status === 'RUNNING';
   return running ? FEED_POLL_MS : false;
 }
 

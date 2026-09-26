@@ -7,6 +7,9 @@ import {emptyDay, generateDay, parseItemId} from './generator';
 import type {GeneratedDay} from './generator';
 import {MOCK_PASSWORD, MOCK_USERS} from './users';
 
+/** How fast the mock "model" writes: about 25 tokens a second. */
+const CHAT_TOKEN_DELAY_MS = 40;
+
 interface AccessToken {
   username: string;
   expiresAt: number;
@@ -43,6 +46,10 @@ export class MockDb {
   now: () => number = () => Date.now();
   today: () => string = () => todayInNewYork();
   sessionStore: SessionStore = memorySessionStore();
+  /** Pause between two streamed answer tokens of `POST /chat`. */
+  chatTokenDelayMs = CHAT_TOKEN_DELAY_MS;
+  /** Users with a question being answered (one at a time each). */
+  readonly chatsInFlight = new Set<string>();
   private readonly accessTokens = new Map<string, AccessToken>();
   private tokenCounter = 0;
   private readonly days = new Map<string, GeneratedDay>();
@@ -54,6 +61,8 @@ export class MockDb {
     this.now = () => Date.now();
     this.today = () => todayInNewYork();
     this.sessionStore = memorySessionStore();
+    this.chatTokenDelayMs = CHAT_TOKEN_DELAY_MS;
+    this.chatsInFlight.clear();
     this.accessTokens.clear();
     this.runStarts.clear();
   }

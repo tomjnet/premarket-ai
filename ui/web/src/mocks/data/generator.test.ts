@@ -3,12 +3,14 @@ import {describe, expect, it} from 'vitest';
 import {ingestRunWireSchema, newsDetailWireSchema} from '@/api/schemas/news';
 import {addDays, isWeekend, previousTradingDate} from '@/lib/time';
 
+import {AI_MODEL, AI_START_DATE} from './ai';
 import {
   DUPLICATES_PER_DAY,
   FOOTER,
   HEADLINE_PREFIX,
   ITEMS_PER_DAY,
   NEAR_COPIES_PER_DAY,
+  PARAPHRASES_PER_DAY,
   RULES_START_DATE,
   generateDay,
   parseItemId,
@@ -36,10 +38,10 @@ describe('generateDay', () => {
       publishedAt: newest?.published_at,
     }).toMatchInlineSnapshot(`
       {
-        "headline": "[SYNTHETIC] <script>alert("headline")</script> Umbrix Robotics reports <b>record</b> orders (update)",
-        "id": 2458095,
-        "publishedAt": "2026-09-24T09:33:00Z",
-        "vendorItemId": "VND-20260924-095",
+        "headline": "[SYNTHETIC] Meta reaffirms full-year outlook of about 6% revenue growth (update)",
+        "id": 2458096,
+        "publishedAt": "2026-09-24T09:14:00Z",
+        "vendorItemId": "VND-20260924-096",
       }
     `);
   });
@@ -59,11 +61,11 @@ describe('generateDay', () => {
     });
   });
 
-  it('gives a weekday 100 items, 9 legacy and 14 rule duplicates, newest first', () => {
+  it('gives a weekday 100 items, 9 legacy, 14 rule and 2 AI duplicates, newest first', () => {
     const day = generateDay(THURSDAY);
     expect(day.items).toHaveLength(ITEMS_PER_DAY);
     expect(day.items.filter(item => item.is_dup)).toHaveLength(
-      DUPLICATES_PER_DAY + NEAR_COPIES_PER_DAY,
+      DUPLICATES_PER_DAY + NEAR_COPIES_PER_DAY + PARAPHRASES_PER_DAY,
     );
     expect([...day.legacy.values()].filter(flags => flags.is_dup)).toHaveLength(
       DUPLICATES_PER_DAY,
@@ -154,7 +156,10 @@ describe('generateDay: rule results', () => {
       finished_at: '2026-09-24T09:30:45Z',
       items: ITEMS_PER_DAY,
       duplicates: DUPLICATES_PER_DAY + NEAR_COPIES_PER_DAY,
-      flagged: day.items.filter(item => item.reason_codes.length > 0).length,
+      // The rule run counts its own codes, not the AI run's.
+      flagged: day.items.filter(item =>
+        item.rule_evidence.some(entry => entry.code !== null),
+      ).length,
     });
   });
 
@@ -178,15 +183,18 @@ describe('generateDay: rule results', () => {
     expect(clean.length).toBeGreaterThan(40);
   });
 
-  it('explains each code in the evidence, sorted and plain text', () => {
+  it('explains each code in the evidence: rule codes sorted, then AI codes', () => {
+    const codesOf = (evidence: ReadonlyArray<{code: string | null}>) => [
+      ...new Set(
+        evidence.flatMap(entry => (entry.code === null ? [] : [entry.code])),
+      ),
+    ];
     for (const item of day.items) {
-      const codes = new Set(
-        item.rule_evidence.flatMap(entry =>
-          entry.code === null ? [] : [entry.code],
-        ),
+      const ruleCodes = codesOf(item.rule_evidence).sort();
+      const aiCodes = codesOf(item.ai?.evidence ?? []).filter(
+        code => !ruleCodes.includes(code),
       );
-      expect([...codes].sort()).toEqual(item.reason_codes);
-      expect([...item.reason_codes].sort()).toEqual(item.reason_codes);
+      expect(item.reason_codes).toEqual([...ruleCodes, ...aiCodes]);
     }
     const [fake] = withCode('FAKE_TICKER');
     expect(
@@ -206,7 +214,7 @@ describe('generateDay: rule results', () => {
       expect(day.legacy.get(item.id)).toEqual({is_dup: false, dup_of: null});
     }
     expect(new Set(day.items.map(item => item.dup_type))).toEqual(
-      new Set([null, 'exact', 'url', 'near']),
+      new Set([null, 'exact', 'url', 'near', 'paraphrase']),
     );
   });
 
@@ -231,6 +239,102 @@ describe('generateDay: rule results', () => {
       DUPLICATES_PER_DAY,
     );
     expect(early.items.every(item => item.copies === 0)).toBe(true);
+  });
+});
+
+describe('generateDay: AI run', () => {
+  const day = generateDay(THURSDAY);
+  const unique = day.items.filter(item => item.ai !== null);
+  const withStatus = (status: string) =>
+    unique.filter(item => item.ai?.status === status);
+  const withCode = (code: string) =>
+    day.items.filter(item => item.reason_codes.includes(code));
+
+  it('enriches only the unique checked items, and counts the run', () => {
+    for (const item of day.items) {
+      const ruleDuplicate = item.is_dup && item.dup_type !== 'paraphrase';
+      expect(item.ai === null).toBe(ruleDuplicate);
+    }
+    expect(day.aiRun).toEqual({
+      status: 'DONE',
+      finished_at: '2026-09-24T09:36:45Z',
+      items: ITEMS_PER_DAY - DUPLICATES_PER_DAY - NEAR_COPIES_PER_DAY,
+      paraphrases: PARAPHRASES_PER_DAY,
+      conflicts: 1,
+      summarized: unique.filter(item => item.summary !== null).length,
+      fallbacks: unique.filter(item => item.ai?.summary_source === 'fallback')
+        .length,
+      failed: 1,
+      model: AI_MODEL,
+    });
+    expect(day.aiRun?.fallbacks).toBeGreaterThan(0);
+  });
+
+  it('links the paraphrases to their originals (L3)', () => {
+    const paraphrases = withStatus('DUPLICATE');
+    expect(paraphrases).toHaveLength(PARAPHRASES_PER_DAY);
+    for (const item of paraphrases) {
+      expect(item).toMatchObject({
+        is_dup: true,
+        dup_type: 'paraphrase',
+        summary: null,
+        sentiment: null,
+      });
+      expect(item.ai?.evidence[0]?.message).toMatch(/^Paraphrase \(L3/);
+      const original = day.items.find(
+        other => other.vendor_item_id === item.dup_of,
+      );
+      expect(original?.is_dup).toBe(false);
+      expect(original?.copies).toBeGreaterThan(0);
+    }
+  });
+
+  it('flags injection attempts and other languages; explains a conflicting version', () => {
+    const [injection] = withCode('INJECTION_ATTEMPT');
+    expect(injection?.body).toContain('Ignore previous instructions');
+    expect(injection?.ai?.evidence[0]?.check).toBe('guard');
+    expect(injection?.ai?.claims.join(' ')).not.toContain('Ignore');
+    const [foreign] = withCode('UNSUPPORTED_LANGUAGE');
+    expect(foreign).toMatchObject({summary: null, sentiment: null});
+    expect(foreign?.ai?.status).toBe('SKIPPED');
+    // A conflicting version is evidence only: no reason code (backend).
+    expect(withCode('CONFLICTING_VERSION')).toEqual([]);
+    const conflicts = unique.filter(item =>
+      item.ai?.evidence.some(entry => /key facts differ/.test(entry.message)),
+    );
+    expect(conflicts).toHaveLength(1);
+    const [conflict] = conflicts;
+    expect(conflict?.is_dup).toBe(false);
+    expect(conflict?.summary).not.toBeNull();
+    expect(conflict?.ai?.evidence.at(-1)).toMatchObject({
+      check: 'dedup',
+      code: null,
+    });
+  });
+
+  it('writes one-line summaries with a sentiment, and lead sentences as fallbacks', () => {
+    for (const item of withStatus('DONE')) {
+      expect(item.summary).not.toBeNull();
+      expect(item.sentiment).not.toBeNull();
+      expect([...(item.summary ?? '')].length).toBeLessThanOrEqual(280);
+      expect(item.summary).not.toMatch(/[\n<]/);
+    }
+    const fallbacks = unique.filter(
+      item => item.ai?.summary_source === 'fallback',
+    );
+    for (const item of fallbacks) {
+      expect(item.sentiment).toBe('neutral');
+      expect(item.body).toContain(item.summary?.slice(0, 20));
+    }
+    expect(new Set(unique.map(item => item.sentiment))).toContain('bullish');
+  });
+
+  it(`has no AI run before ${AI_START_DATE}`, () => {
+    const early = generateDay(addDays(AI_START_DATE, -1));
+    expect(early.ruleRun).not.toBeNull();
+    expect(early.aiRun).toBeNull();
+    expect(early.items.every(item => item.ai === null)).toBe(true);
+    expect(early.items.every(item => item.summary === null)).toBe(true);
   });
 });
 

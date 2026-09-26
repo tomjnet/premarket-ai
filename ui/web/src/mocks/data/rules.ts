@@ -31,6 +31,10 @@ export const UNCHECKED = {
   copies: 0,
   rules_checked: false,
   rule_evidence: [],
+  // The AI run only enriches checked items.
+  summary: null,
+  sentiment: null,
+  ai: null,
 } as const satisfies Partial<NewsDetailWire>;
 
 const REGISTRY_TICKERS = 10_381;

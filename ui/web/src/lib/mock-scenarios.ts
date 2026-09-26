@@ -14,6 +14,9 @@ export const SCENARIOS = [
   'expired-session',
   'logged-out',
   'contract-drift',
+  'chat-error',
+  'chat-busy',
+  'chat-unavailable',
 ] as const;
 
 export type ScenarioName = (typeof SCENARIOS)[number];

@@ -11,6 +11,7 @@ import {
   DUPLICATES_PER_DAY,
   ITEMS_PER_DAY,
   NEAR_COPIES_PER_DAY,
+  PARAPHRASES_PER_DAY,
 } from '../data/generator';
 import {setScenario} from '../scenarios';
 
@@ -128,13 +129,20 @@ describe('news handlers', () => {
     const list = await news(`date=${THURSDAY}`, accessToken);
     // The rule engine's duplicates (near copies too); the ingest run keeps
     // the legacy count.
-    expect(list.count).toBe(ITEMS_PER_DAY - RULE_DUPLICATES);
+    // Plus the AI run's paraphrases.
+    expect(list.count).toBe(
+      ITEMS_PER_DAY - RULE_DUPLICATES - PARAPHRASES_PER_DAY,
+    );
     expect(list.items.every(item => !item.is_dup)).toBe(true);
     expect(list.run?.dups).toBe(DUPLICATES_PER_DAY);
     expect(list.rule_run).toMatchObject({
       status: 'DONE',
       items: ITEMS_PER_DAY,
       duplicates: RULE_DUPLICATES,
+    });
+    expect(list.ai_run).toMatchObject({
+      status: 'DONE',
+      paraphrases: PARAPHRASES_PER_DAY,
     });
     const all = await news(
       `date=${THURSDAY}&include_duplicates=true`,
@@ -159,6 +167,7 @@ describe('news handlers', () => {
       date: SATURDAY,
       run: null,
       rule_run: null,
+      ai_run: null,
       count: 0,
       items: [],
     });
@@ -188,6 +197,8 @@ describe('news handlers', () => {
     expect(parsed.body.length).toBeGreaterThan(0);
     expect(first).not.toHaveProperty('body');
     expect(first).not.toHaveProperty('rule_evidence');
+    expect(first).not.toHaveProperty('ai');
+    expect(parsed).toHaveProperty('ai');
 
     const missing = await get('/news/999', accessToken);
     expect(missing).toMatchObject({status: 404, body: {detail: 'Not found'}});
@@ -279,6 +290,9 @@ describe('scenarios', () => {
       items: RULES_FAILED_ITEMS,
     });
     expect(list.rule_run?.finished_at).not.toBeNull();
+    // The AI run waits for a finished rule run.
+    expect(list.ai_run).toBeNull();
+    expect(list.items.every(item => item.summary === null)).toBe(true);
     expect(list.items.filter(item => item.rules_checked)).toHaveLength(
       RULES_FAILED_ITEMS,
     );
@@ -379,5 +393,68 @@ describe('scenarios', () => {
     expect(status).toBe(200);
     const result = newsDetailWireSchema.safeParse(body);
     expect(result.error?.issues[0]?.path).toEqual(['id']);
+  });
+});
+
+describe('chat handler', () => {
+  async function ask(body: unknown, accessToken?: string) {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (accessToken !== undefined) {
+      headers.Authorization = `Bearer ${accessToken}`;
+    }
+    return fetch('/api/chat', {
+      method: 'POST',
+      headers,
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+  }
+
+  beforeEach(() => {
+    db.chatTokenDelayMs = 0;
+  });
+
+  it('needs a valid bearer token', async () => {
+    const response = await ask({question: 'What is new?'});
+    expect(response.status).toBe(401);
+  });
+
+  it('answers with an event stream', async () => {
+    const response = await ask({question: 'What is new?'}, await token());
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('text/event-stream');
+    const text = await response.text();
+    expect(text.startsWith('event: sources\ndata: ')).toBe(true);
+    expect(text).toContain('event: token\n');
+    expect(text.trimEnd().split('\n\n').at(-1)).toMatch(/^event: done\n/);
+  });
+
+  it('validates the body like FastAPI (422)', async () => {
+    const accessToken = await token();
+    const cases: Array<[unknown, string]> = [
+      ['not json', 'json_invalid'],
+      [{}, 'missing'],
+      [{question: 7}, 'string_type'],
+      [{question: 'Hi'}, 'string_too_short'],
+      [{question: 'x'.repeat(501)}, 'string_too_long'],
+      [
+        {question: 'What is new?', date: '2026-13-01'},
+        'date_from_datetime_parsing',
+      ],
+      [{question: 'What is new?', model: 'big'}, 'extra_forbidden'],
+    ];
+    for (const [body, type] of cases) {
+      const response = await ask(body, accessToken);
+      expect(response.status).toBe(422);
+      const parsed = errorBodySchema.parse(await response.json());
+      expect(Array.isArray(parsed.detail) ? parsed.detail[0]?.type : '').toBe(
+        type,
+      );
+    }
+    // 500 characters, one of them an emoji: allowed (counted in characters).
+    const ok = await ask({question: `${'x'.repeat(499)}📈`}, accessToken);
+    expect(ok.status).toBe(200);
+    await ok.text();
   });
 });

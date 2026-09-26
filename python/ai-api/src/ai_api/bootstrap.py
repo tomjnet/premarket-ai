@@ -97,6 +97,9 @@ def grant_api_role(
         "GRANT USAGE ON SEQUENCE ai.audit_log_id_seq TO {role}",
         "GRANT SELECT ON ai.v_raw_news, ai.v_ingest_run, ai.news_item,"
         " ai.duplicate_link, ai.rule_check, ai.rule_run TO {role}",
+        # Increment 3: summaries, extraction and the trusted corpus.
+        "GRANT SELECT ON ai.ai_run, ai.news_ai, ai.entity, ai.claim,"
+        " ai.document, ai.chunk TO {role}",
     )
     for statement in statements:
         conn.execute(

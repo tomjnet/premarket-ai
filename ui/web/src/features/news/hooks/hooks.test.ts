@@ -17,6 +17,7 @@ describe('feedRefetchInterval', () => {
     date: '2026-09-25',
     run: {...run, status},
     ruleRun: null,
+    aiRun: null,
     count: 0,
     items: [],
   });
@@ -45,6 +46,26 @@ describe('feedRefetchInterval', () => {
     ).toBe(FEED_POLL_MS);
     expect(
       feedRefetchInterval({...done, ruleRun: {...ruleRun, status: 'FAILED'}}),
+    ).toBe(false);
+  });
+
+  it('also polls while the AI run is RUNNING', () => {
+    const aiRun = {
+      finishedAt: null,
+      items: 86,
+      paraphrases: 0,
+      conflicts: 0,
+      summarized: 10,
+      fallbacks: 0,
+      failed: 0,
+      model: 'main-gpu4gb',
+    };
+    const done = list('DONE');
+    expect(
+      feedRefetchInterval({...done, aiRun: {...aiRun, status: 'RUNNING'}}),
+    ).toBe(FEED_POLL_MS);
+    expect(
+      feedRefetchInterval({...done, aiRun: {...aiRun, status: 'DONE'}}),
     ).toBe(false);
   });
 });

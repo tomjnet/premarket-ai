@@ -1,6 +1,7 @@
 import {fireEvent, screen, waitFor, within} from '@testing-library/react';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
+import type {NewsDetailWire} from '@/api/schemas/news';
 import {db} from '@/mocks/data/db';
 import {server} from '@/mocks/node';
 import {setScenario} from '@/mocks/scenarios';
@@ -12,8 +13,9 @@ const NOW = new Date('2026-09-25T13:00:00Z');
 // Re-rendering ~100 rows twice (StrictMode) in jsdom takes a moment, more
 // so when all test files run in parallel. waitFor returns as soon as it can.
 const SLOW_DOM = {timeout: 10_000};
-// 100 items, 14 of them duplicates by the rule checks (9 of them by legacy).
-const SHOWN_BY_DEFAULT = 86;
+// 100 items: 14 duplicates by the rule checks (9 of them by legacy) and 2
+// paraphrases by the AI run.
+const SHOWN_BY_DEFAULT = 84;
 
 beforeEach(() => {
   vi.useFakeTimers({toFake: ['Date']});
@@ -71,7 +73,7 @@ describe('FeedPage: default day', {timeout: 30_000}, () => {
       within(main).getByText('Friday, September 25, 2026'),
     ).toBeInTheDocument();
     expect(
-      screen.getByText('86 items · 14 duplicates hidden · updated 05:30 ET'),
+      screen.getByText('84 items · 16 duplicates hidden · updated 05:30 ET'),
     ).toBeInTheDocument();
     const all = rows();
     expect(all).toHaveLength(SHOWN_BY_DEFAULT);
@@ -95,9 +97,9 @@ describe('FeedPage: default day', {timeout: 30_000}, () => {
 
     await waitFor(() => expect(rows()).toHaveLength(100), SLOW_DOM);
     expect(router.state.location.search).toContain('dups=1');
-    expect(screen.getAllByText(/^Duplicate of VND-/)).toHaveLength(14);
+    expect(screen.getAllByText(/^Duplicate of VND-/)).toHaveLength(16);
     expect(
-      screen.getByText('100 items · 14 duplicates shown · updated 05:30 ET'),
+      screen.getByText('100 items · 16 duplicates shown · updated 05:30 ET'),
     ).toBeInTheDocument();
   });
 });
@@ -178,7 +180,7 @@ describe('FeedPage: rule checks', {timeout: 30_000}, () => {
     expect(requests).toBe(0);
     expect(
       screen.getByText(
-        `${flagged} of ${SHOWN_BY_DEFAULT} items flagged · 14 duplicates hidden · updated 05:30 ET`,
+        `${flagged} of ${SHOWN_BY_DEFAULT} items flagged · 16 duplicates hidden · updated 05:30 ET`,
       ),
     ).toBeInTheDocument();
     for (const row of rows()) {
@@ -240,6 +242,75 @@ describe('FeedPage: rule checks', {timeout: 30_000}, () => {
 
     expect(rows().length).toBeGreaterThan(0);
     await expectNoA11yViolations(container);
+  });
+});
+
+describe('FeedPage: AI run', {timeout: 30_000}, () => {
+  const day = () => db.day('2026-09-25');
+  const find = (test: (item: NewsDetailWire) => boolean) => {
+    const item = day().items.find(test);
+    if (item === undefined) {
+      throw new Error('No such item in the mock feed');
+    }
+    return item;
+  };
+  const summaryOf = (row: HTMLElement) =>
+    row.querySelector('[data-slot="row-summary"]')?.textContent ?? null;
+
+  it('summarizes the AI run in the header', async () => {
+    await openFeed('/news?ticker=AAPL');
+    const aiRun = day().aiRun;
+
+    expect(
+      screen.getByText(
+        `AI: ${aiRun?.summarized} summarized · 2 paraphrases · ${aiRun?.fallbacks} lead sentences used · 1 failed`,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('shows the summary instead of the excerpt, with its sentiment', async () => {
+    const summarized = find(
+      item => item.summary !== null && item.sentiment === 'bullish',
+    );
+    const unsummarized = find(
+      item => !item.is_dup && item.rules_checked && item.summary === null,
+    );
+    await openFeed('/news?dups=1');
+
+    const row = rowOf(summarized.id);
+    expect(summaryOf(row)).toBe(`AI summary: ${summarized.summary ?? ''}`);
+    expect(within(row).queryByText(summarized.excerpt)).not.toBeInTheDocument();
+    expect(within(row).getByText('Sentiment: bullish')).toBeInTheDocument();
+
+    const plain = rowOf(unsummarized.id);
+    expect(summaryOf(plain)).toBeNull();
+    expect(within(plain).getByText(unsummarized.excerpt)).toBeInTheDocument();
+    expect(within(plain).queryByText(/^Sentiment:/)).not.toBeInTheDocument();
+  });
+
+  it('shows the AI run badges, and marks paraphrases as duplicates', async () => {
+    await openFeed('/news?dups=1');
+
+    for (const [code, text] of [
+      ['INJECTION_ATTEMPT', 'INJECTION ATTEMPT'],
+      ['UNSUPPORTED_LANGUAGE', 'UNSUPPORTED LANGUAGE'],
+    ]) {
+      const item = find(entry => entry.reason_codes.includes(code ?? ''));
+      expect(badgeTexts(rowOf(item.id))).toContain(text);
+    }
+    const paraphrase = find(item => item.dup_type === 'paraphrase');
+    expect(badgeTexts(rowOf(paraphrase.id))).toContain(
+      'DUPLICATE · paraphraseDuplicate (paraphrase)',
+    );
+  });
+
+  it('says when the AI run has not run for a date', async () => {
+    await openFeed('/news?date=2026-09-23&ticker=AAPL');
+
+    expect(
+      screen.getByText("AI summaries haven't run for this date yet."),
+    ).toBeInTheDocument();
+    expect(document.querySelector('[data-slot="row-summary"]')).toBeNull();
   });
 });
 
@@ -521,7 +592,7 @@ describe('FeedPage: scenarios', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await waitFor(() => expect(rows()).toHaveLength(100), SLOW_DOM);
     expect(
-      screen.getByText('100 items · 14 duplicates shown · updated 05:30 ET'),
+      screen.getByText('100 items · 16 duplicates shown · updated 05:30 ET'),
     ).toBeInTheDocument();
     const callsAtDone = newsCalls;
     await vi.advanceTimersByTimeAsync(90_000);

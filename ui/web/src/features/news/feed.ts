@@ -88,12 +88,14 @@ function plural(count: number, word: string): string {
 
 /**
  * How many duplicates the `include_duplicates` filter drops: the rule
- * engine's count once it has checked the whole date, else the ingest run's
- * legacy count.
+ * engine's count once it has checked the whole date (plus the AI run's
+ * paraphrases once it is done), else the ingest run's legacy count.
  */
 export function duplicateCount(list: NewsList): number {
   if (list.ruleRun?.status === 'DONE') {
-    return list.ruleRun.duplicates;
+    const paraphrases =
+      list.aiRun?.status === 'DONE' ? list.aiRun.paraphrases : 0;
+    return list.ruleRun.duplicates + paraphrases;
   }
   return list.run?.dups ?? 0;
 }

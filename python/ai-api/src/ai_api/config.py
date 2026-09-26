@@ -13,6 +13,9 @@ import pathlib
 from psycopg import conninfo
 
 from ai_api.dedup import config as dedup_config
+from ai_api.llm import config as llm_config
+from ai_api.llm import tracing
+from ai_api.rag import config as rag_config
 
 # Values from .env.example that must never reach a running service.
 _PLACEHOLDERS = frozenset({"change-me", "changeme", "secret"})
@@ -138,6 +141,9 @@ class Settings:
         login_max_failures: Failed logins per username before a lockout.
         login_lockout_s: Failure window and lockout length.
         expose_docs: Serve /docs and /openapi.json (off in the stack).
+        llm: The gateway settings; None turns "Ask the News" off.
+        rag: The vector store and reranker; None turns it off too.
+        tracing: Langfuse settings.
     """
 
     database: Database
@@ -151,6 +157,9 @@ class Settings:
     login_max_failures: int = 5
     login_lockout_s: int = 900
     expose_docs: bool = False
+    llm: llm_config.LlmConfig | None = None
+    rag: rag_config.RagConfig | None = None
+    tracing: tracing.TracingConfig = tracing.TracingConfig()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -184,7 +193,31 @@ class Settings:
             login_max_failures=_positive_int(env, "LOGIN_MAX_FAILURES", 5),
             login_lockout_s=_positive_int(env, "LOGIN_LOCKOUT_S", 900),
             expose_docs=_bool(env, "EXPOSE_DOCS"),
+            llm=_optional_llm(env),
+            rag=_rag(env),
+            tracing=tracing.TracingConfig.from_env(env),
         )
+
+
+def _optional_llm(env: Mapping[str, str]) -> llm_config.LlmConfig | None:
+    """The LLM settings, or None when LLM_GATEWAY_KEY isn't set at all."""
+    if not env.get("LLM_GATEWAY_KEY", "").strip():
+        return None
+    return _llm(env)
+
+
+def _llm(env: Mapping[str, str]) -> llm_config.LlmConfig:
+    try:
+        return llm_config.LlmConfig.from_env(env)
+    except llm_config.LlmConfigError as e:
+        raise ConfigError(str(e)) from e
+
+
+def _rag(env: Mapping[str, str]) -> rag_config.RagConfig:
+    try:
+        return rag_config.RagConfig.from_env(env)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
 
 
 def ai_db_password(env: Mapping[str, str]) -> str:
@@ -275,6 +308,64 @@ class RulesSettings:
                 env, "REGISTRY_MAX_AGE_DAYS", 7
             ),
             stale_max_age_days=_positive_int(env, "STALE_MAX_AGE_DAYS", 30),
+            config_dir=pathlib.Path(
+                env.get("PREMARKET_CONFIG_DIR", "/app/config")
+            ),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class AiSettings:
+    """Settings of ``ai-api enrich`` and ``ai-api corpus`` (as the owner).
+
+    Attributes:
+        owner: The database owner's connection parameters.
+        redis_host: Redis host (L3 vector index).
+        redis_password: Redis password.
+        dedup: Duplicate-check thresholds (DEDUP_*).
+        llm: The gateway settings.
+        rag: The vector store and corpus settings.
+        tracing: Langfuse settings.
+        sec_user_agent: SEC_USER_AGENT (the corpus downloads from SEC).
+        config_dir: Folder with ``universe.yaml`` (PREMARKET_CONFIG_DIR).
+    """
+
+    owner: Database
+    redis_host: str
+    redis_password: str = dataclasses.field(repr=False)
+    llm: llm_config.LlmConfig
+    dedup: dedup_config.DedupConfig = dedup_config.DedupConfig()
+    rag: rag_config.RagConfig = rag_config.RagConfig()
+    tracing: tracing.TracingConfig = tracing.TracingConfig()
+    sec_user_agent: str = ""
+    config_dir: pathlib.Path = pathlib.Path("/app/config")
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> AiSettings:
+        """Builds the settings from environment variables.
+
+        Args:
+            env: The environment.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ConfigError: A setting is missing or invalid.
+        """
+        try:
+            dedup = dedup_config.DedupConfig.from_env(env)
+        except ValueError as e:
+            raise ConfigError(str(e)) from e
+        return cls(
+            owner=Database.from_env(env, "PGUSER", "PGPASSWORD"),
+            redis_host=env.get("REDIS_HOST", "redis"),
+            redis_password=_secret(env, "REDIS_PASSWORD"),
+            llm=_llm(env),
+            dedup=dedup,
+            rag=_rag(env),
+            tracing=tracing.TracingConfig.from_env(env),
+            sec_user_agent=env.get("SEC_USER_AGENT", "").strip(),
             config_dir=pathlib.Path(
                 env.get("PREMARKET_CONFIG_DIR", "/app/config")
             ),

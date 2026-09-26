@@ -230,11 +230,11 @@ describe('NewsDetailPage: rule checks', () => {
       http.get(apiUrl('/news/:id'), () =>
         HttpResponse.json({
           ...item,
-          reason_codes: ['INJECTION_ATTEMPT'],
+          reason_codes: ['FABRICATED_CLAIM'],
           rule_evidence: [
             {
               check: 'entity',
-              code: 'INJECTION_ATTEMPT',
+              code: 'FABRICATED_CLAIM',
               message: 'Body says <img src=x onerror=alert(1)> to the model.',
             },
           ],
@@ -250,10 +250,115 @@ describe('NewsDetailPage: rule checks', () => {
       ),
     ).toBeInTheDocument();
     expect(section.querySelector('img')).toBeNull();
-    expect(within(section).getByText('INJECTION ATTEMPT')).toHaveAttribute(
+    expect(within(section).getByText('FABRICATED CLAIM')).toHaveAttribute(
       'data-variant',
       'outline',
     );
+  });
+});
+
+describe('NewsDetailPage: AI', () => {
+  function aiSection(): HTMLElement {
+    return screen.getByRole('region', {name: 'AI'});
+  }
+
+  it('shows the summary, sentiment, companies, claims and model', async () => {
+    const item = todayItem(
+      entry =>
+        entry.ai?.status === 'DONE' &&
+        entry.ai.summary_source === 'llm' &&
+        entry.ai.evidence.length === 0 &&
+        entry.tickers.length > 0,
+    );
+    const {container} = await openItem(item.id);
+
+    const section = aiSection();
+    expect(within(section).getByText(item.summary ?? '')).toBeInTheDocument();
+    expect(
+      within(section).getByText(`Sentiment: ${item.sentiment ?? ''}`),
+    ).toBeInTheDocument();
+    for (const company of item.ai?.companies ?? []) {
+      expect(section.textContent).toContain(
+        `${company.name} (${company.ticker ?? ''})`,
+      );
+    }
+    for (const claim of item.ai?.claims ?? []) {
+      expect(within(section).getByText(claim)).toBeInTheDocument();
+    }
+    expect(
+      within(section).getByText(/^Model main-gpu4gb · prompt enrich-v1/),
+    ).toBeInTheDocument();
+    expect(
+      within(section).queryByText(/couldn't summarize/),
+    ).not.toBeInTheDocument();
+    await expectNoA11yViolations(container);
+  });
+
+  it('marks a lead-sentence fallback', async () => {
+    const item = todayItem(entry => entry.ai?.summary_source === 'fallback');
+    await openItem(item.id);
+
+    expect(
+      within(aiSection()).getByText(
+        "Lead sentence: the model couldn't summarize this item.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('lists the AI checks as badges and plain text', async () => {
+    const item = todayItem(entry =>
+      entry.reason_codes.includes('INJECTION_ATTEMPT'),
+    );
+    await openItem(item.id);
+
+    const section = aiSection();
+    expect(within(section).getByText('INJECTION ATTEMPT')).toHaveAttribute(
+      'data-variant',
+      'danger',
+    );
+    expect(
+      within(section).getByText(/^Instruction-like text removed/),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('list', {name: 'Rule checks'})).getByText(
+        'INJECTION ATTEMPT',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('explains a skipped item and a paraphrase, without a summary', async () => {
+    const foreign = todayItem(entry =>
+      entry.reason_codes.includes('UNSUPPORTED_LANGUAGE'),
+    );
+    const {unmount} = await openItem(foreign.id);
+    expect(
+      within(aiSection()).getByText(/^Skipped \(not sent to the model\)/),
+    ).toBeInTheDocument();
+    expect(
+      within(aiSection()).getByText('UNSUPPORTED LANGUAGE'),
+    ).toBeInTheDocument();
+    expect(
+      within(aiSection()).queryByRole('heading', {name: 'Summary'}),
+    ).not.toBeInTheDocument();
+    unmount();
+
+    const paraphrase = todayItem(entry => entry.dup_type === 'paraphrase');
+    await openItem(paraphrase.id);
+    expect(
+      within(aiSection()).getByText(/^Not summarized: a paraphrase/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        `Yes, duplicate of ${paraphrase.dup_of ?? ''} (paraphrase)`,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('has no AI section when the AI run has not seen the item', async () => {
+    const item = todayItem(entry => entry.ai === null);
+    await openItem(item.id);
+
+    expect(screen.queryByRole('region', {name: 'AI'})).not.toBeInTheDocument();
   });
 });
 

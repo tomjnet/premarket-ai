@@ -122,6 +122,8 @@ function item(
     dupType: null,
     copies: 0,
     rulesChecked: true,
+    summary: null,
+    sentiment: null,
   };
 }
 
@@ -163,6 +165,7 @@ describe('feedSummary', () => {
       dups: 9,
     },
     ruleRun: null,
+    aiRun: null,
     count: 91,
     items: [],
   };
@@ -227,7 +230,39 @@ describe('duplicateCount', () => {
     duplicates: 11,
     flagged: 9,
   };
-  const list = {date: '2026-09-24', count: 0, items: []};
+  const list = {date: '2026-09-24', count: 0, items: [], aiRun: null};
+  const aiRun = {
+    status: 'DONE' as const,
+    finishedAt: null,
+    items: 86,
+    paraphrases: 2,
+    conflicts: 1,
+    summarized: 82,
+    fallbacks: 3,
+    failed: 1,
+    model: 'main-gpu4gb',
+  };
+
+  it('adds the AI run paraphrases once both runs are DONE', () => {
+    const done = {...ruleRun, status: 'DONE' as const};
+    expect(duplicateCount({...list, run, ruleRun: done, aiRun})).toBe(13);
+    expect(
+      duplicateCount({
+        ...list,
+        run,
+        ruleRun: done,
+        aiRun: {...aiRun, status: 'RUNNING'},
+      }),
+    ).toBe(11);
+    expect(
+      duplicateCount({
+        ...list,
+        run,
+        ruleRun: {...ruleRun, status: 'RUNNING'},
+        aiRun,
+      }),
+    ).toBe(9);
+  });
 
   it('uses the legacy count until the rule run is DONE', () => {
     expect(duplicateCount({...list, run, ruleRun: null})).toBe(9);

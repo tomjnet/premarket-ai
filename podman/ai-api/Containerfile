@@ -16,6 +16,8 @@
 #   test                pytest, including the C++ vs Python parity tests
 #   lint                ruff
 #   eval                rule/dedup eval on the seed-42 golden set (gates)
+#   ai-eval             image of the GPU evals (L3, model benchmark, RAGAS),
+#                       run against the stack: make -C python eval-ai
 #   runtime             the API image (default)
 
 ARG PYTHON_IMAGE=docker.io/library/python:3.13-slim-trixie
@@ -82,6 +84,10 @@ WORKDIR /app
 COPY --from=config universe.yaml sources.yaml /app/config/
 COPY --from=fastpath-wheel /wheels /wheels
 RUN pip install /wheels/*.whl && rm -rf /wheels
+# langchain-chroma without its declared full chromadb: pyproject.toml
+# installs the thin HTTP client (chromadb-client), which is all it needs
+# against the chroma server, and saves ~300 MB (onnxruntime, kubernetes).
+RUN pip install --no-deps langchain-chroma==1.1.0
 
 FROM base AS dev
 COPY pyproject.toml ./
@@ -103,6 +109,13 @@ FROM dev AS eval
 COPY --from=vendorsim . /tmp/vendor-sim
 RUN pip install --no-deps /tmp/vendor-sim && rm -rf /tmp/vendor-sim
 RUN python -m evals.rules_eval --check
+
+# The evals that need the GPU host (increment 3): the L3 paraphrase eval,
+# the local model benchmark and the RAGAS baseline. Built here, run on the
+# compose network against the gateway, chroma and the reranker.
+FROM dev AS ai-eval
+COPY --from=vendorsim . /tmp/vendor-sim
+RUN pip install --no-deps /tmp/vendor-sim && rm -rf /tmp/vendor-sim
 
 # ---------------------------------------------------------------------------
 FROM base AS runtime

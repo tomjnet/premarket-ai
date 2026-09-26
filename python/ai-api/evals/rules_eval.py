@@ -97,8 +97,17 @@ def _config_dir() -> pathlib.Path:
     return _HERE.parents[1] / "config"
 
 
-async def _run_engine() -> list[tuple[engine.ItemResult, generator.Label]]:
-    """Checks every day in order; returns the scored days' results."""
+async def run_engine(
+    all_days: bool = False,
+) -> list[tuple[engine.ItemResult, generator.Label]]:
+    """Checks every day in order.
+
+    Args:
+        all_days: Return the history days too (the L3 eval needs them).
+
+    Returns:
+        The results and labels of the scored days (or of every day).
+    """
     cfg = dedup_config.DedupConfig()
     redis = fakeredis.FakeAsyncRedis(decode_responses=True)
     dedup = service.DedupService(store.DedupStore(redis, cfg.ttl_s), cfg)
@@ -130,7 +139,7 @@ async def _run_engine() -> list[tuple[engine.ItemResult, generator.Label]]:
             )
             next_id += 1
         results = await rules.check_items(items)
-        if day in _SCORED_DAYS:
+        if all_days or day in _SCORED_DAYS:
             scored += [(r, labels[r.item.vendor_item_id]) for r in results]
         day += datetime.timedelta(days=1)
     return scored
@@ -250,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-baseline", action="store_true")
     args = parser.parse_args(argv)
 
-    metrics, details = _metrics(asyncio.run(_run_engine()))
+    metrics, details = _metrics(asyncio.run(run_engine()))
     baseline = {}
     if _BASELINE.exists():
         baseline = json.loads(_BASELINE.read_text(encoding="utf-8"))["metrics"]

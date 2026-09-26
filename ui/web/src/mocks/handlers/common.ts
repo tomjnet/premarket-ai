@@ -38,13 +38,22 @@ export function serverError(): Response {
   });
 }
 
+function bearerToken(request: Request): string {
+  const header = request.headers.get('Authorization') ?? '';
+  return header.startsWith('Bearer ') ? header.slice(7) : '';
+}
+
+/** The user of the request's bearer token, if it is valid. */
+export function requestUser(request: Request): string | undefined {
+  return db.userForToken(bearerToken(request));
+}
+
 /**
  * A `401` response when the request has no valid bearer token (or the
  * `expired-session` scenario expires it), undefined when it may go on.
  */
 export function rejectUnauthenticated(request: Request): Response | undefined {
-  const header = request.headers.get('Authorization') ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const token = bearerToken(request);
   if (takeForcedExpiry()) {
     // Revoke the token rather than failing one call: the app may cancel
     // that call (StrictMode, a quick filter change), and the next call

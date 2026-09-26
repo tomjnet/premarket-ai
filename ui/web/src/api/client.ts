@@ -31,8 +31,8 @@ type SessionListener = (
   change: SessionChange,
 ) => void;
 
-/** One call to the backend. */
-export interface RequestOptions<T> {
+/** What every call to the backend has, JSON or stream. */
+interface CallRequest {
   method?: 'GET' | 'POST';
   /** Contract path, for example `/news` or `/news/42`. */
   path: string;
@@ -40,6 +40,14 @@ export interface RequestOptions<T> {
   query?: Record<string, string | undefined>;
   /** Sent as `application/x-www-form-urlencoded` (OAuth2 password flow). */
   form?: Record<string, string>;
+  /** Sent as `application/json`. */
+  json?: unknown;
+  /** Cancels the call (TanStack Query passes one); rejects with AbortError. */
+  signal?: AbortSignal;
+}
+
+/** One call to the backend. */
+export interface RequestOptions<T> extends CallRequest {
   /** Parses the `2xx` body into the UI model. */
   schema: z.ZodType<T>;
   /**
@@ -47,9 +55,10 @@ export interface RequestOptions<T> {
    * Off for the auth endpoints themselves. Default: true.
    */
   auth?: boolean;
-  /** Cancels the call (TanStack Query passes one); rejects with AbortError. */
-  signal?: AbortSignal;
 }
+
+/** A call whose `2xx` answer is a `text/event-stream` (always with auth). */
+export type StreamOptions = CallRequest;
 
 /** Options every API function accepts. */
 export interface CallOptions {
@@ -68,6 +77,13 @@ interface RawResponse {
   status: number;
   body: unknown;
 }
+
+/** A `2xx` stream, or any other answer with its (parsed) body. */
+type StreamResponse =
+  | {status: number; stream: ReadableStream<Uint8Array>; contentType: string}
+  | RawResponse;
+
+const EVENT_STREAM = 'text/event-stream';
 
 /**
  * fetch wrapper for the backend contract: base URL, bearer token, one shared
@@ -151,6 +167,37 @@ export class ApiClient {
     return this.parse(options, retry);
   }
 
+  /**
+   * A call answered with server-sent events (`POST /chat`): the same token,
+   * refresh-once-on-`401` and error rules as `request`, but a `2xx` answer
+   * is returned as its body stream. The timeout covers the wait for the
+   * response headers only; the caller's signal cancels the stream.
+   */
+  async stream(options: StreamOptions): Promise<ReadableStream<Uint8Array>> {
+    const token = this.session?.accessToken;
+    let response = await this.sendForStream(options, token);
+    if (response.status === 401) {
+      await this.recoverFrom401(token);
+      response = await this.sendForStream(options, this.session?.accessToken);
+      if (response.status === 401) {
+        this.expireSession();
+        throw new SessionExpiredError();
+      }
+    }
+    const endpoint = `${options.method ?? 'GET'} ${options.path}`;
+    if (!('stream' in response)) {
+      throw httpError(endpoint, response);
+    }
+    if (!response.contentType.startsWith(EVENT_STREAM)) {
+      response.stream.cancel().catch(() => undefined);
+      console.error(
+        `Unexpected response from ${endpoint}: content type "${response.contentType}"`,
+      );
+      throw new ContractError(endpoint, '', `Expected ${EVENT_STREAM}`);
+    }
+    return response.stream;
+  }
+
   private async requestRefresh(): Promise<Session> {
     const generation = this.generation;
     try {
@@ -202,19 +249,63 @@ export class ApiClient {
     }
   }
 
-  private async send<T>(
-    options: RequestOptions<T>,
+  private send(
+    options: CallRequest,
     token: string | undefined,
   ): Promise<RawResponse> {
+    return this.exchange(
+      options,
+      token,
+      'application/json',
+      async response => ({
+        status: response.status,
+        body: readBody(await response.text()),
+      }),
+    );
+  }
+
+  private sendForStream(
+    options: CallRequest,
+    token: string | undefined,
+  ): Promise<StreamResponse> {
+    return this.exchange(options, token, EVENT_STREAM, async response => {
+      if (response.status >= 200 && response.status < 300) {
+        const stream = response.body;
+        if (stream !== null) {
+          return {
+            status: response.status,
+            stream,
+            contentType: response.headers.get('Content-Type') ?? '',
+          };
+        }
+      }
+      return {status: response.status, body: readBody(await response.text())};
+    });
+  }
+
+  /**
+   * Sends one request and reads its response with `read`, within the
+   * timeout. Network failures become `NetworkError`; a caller's abort is
+   * rethrown as is.
+   */
+  private async exchange<R>(
+    options: CallRequest,
+    token: string | undefined,
+    accept: string,
+    read: (response: Response) => Promise<R>,
+  ): Promise<R> {
     const method = options.method ?? 'GET';
     const endpoint = `${method} ${options.path}`;
-    const headers = new Headers({Accept: 'application/json'});
+    const headers = new Headers({Accept: accept});
     if (token !== undefined) {
       headers.set('Authorization', `Bearer ${token}`);
     }
-    let body: URLSearchParams | undefined;
+    let body: URLSearchParams | string | undefined;
     if (options.form !== undefined) {
       body = new URLSearchParams(options.form);
+    } else if (options.json !== undefined) {
+      body = JSON.stringify(options.json);
+      headers.set('Content-Type', 'application/json');
     }
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), this.timeoutMs);
@@ -231,7 +322,7 @@ export class ApiClient {
         credentials: 'include',
         signal,
       });
-      return {status: response.status, body: readBody(await response.text())};
+      return await read(response);
     } catch (error: unknown) {
       if (options.signal?.aborted === true) {
         // The caller cancelled: not an error to show (Query ignores it).
@@ -246,7 +337,7 @@ export class ApiClient {
     }
   }
 
-  private url<T>(options: RequestOptions<T>): string {
+  private url(options: CallRequest): string {
     const url = apiUrl(options.path, this.options.baseUrl);
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options.query ?? {})) {
@@ -261,12 +352,7 @@ export class ApiClient {
   private parse<T>(options: RequestOptions<T>, response: RawResponse): T {
     const endpoint = `${options.method ?? 'GET'} ${options.path}`;
     if (response.status < 200 || response.status >= 300) {
-      const error = errorBodySchema.safeParse(response.body);
-      throw new HttpError(
-        endpoint,
-        response.status,
-        error.success ? error.data.detail : undefined,
-      );
+      throw httpError(endpoint, response);
     }
     const result = options.schema.safeParse(response.body);
     if (result.success) {
@@ -288,6 +374,16 @@ export class ApiClient {
       listener(this.session, change);
     }
   }
+}
+
+/** The error for a non-`2xx` answer, with FastAPI's `detail` if it has one. */
+function httpError(endpoint: string, response: RawResponse): HttpError {
+  const error = errorBodySchema.safeParse(response.body);
+  return new HttpError(
+    endpoint,
+    response.status,
+    error.success ? error.data.detail : undefined,
+  );
 }
 
 /** JSON when the body is JSON, the raw text otherwise, undefined if empty. */

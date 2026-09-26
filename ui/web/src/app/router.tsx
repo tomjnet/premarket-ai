@@ -5,6 +5,7 @@ import {ErrorPage} from '@/components/pages/error-page';
 import {NotFoundPage} from '@/components/pages/status-page';
 import {LoginPage} from '@/features/auth/login-page';
 import {RequireAuth} from '@/features/auth/require-auth';
+import {ChatPage} from '@/features/chat/chat-page';
 import {FeedPage} from '@/features/news/feed-page';
 import {NewsDetailPage} from '@/features/news/news-detail-page';
 
@@ -27,6 +28,7 @@ export const routes: RouteObject[] = [
               {index: true, element: <FeedPage />},
               {path: 'news', element: <FeedPage />},
               {path: 'news/:id', element: <NewsDetailPage />},
+              {path: 'chat', element: <ChatPage />},
               {path: '*', element: <NotFoundPage />},
             ],
           },

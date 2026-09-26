@@ -1,6 +1,7 @@
 import {HttpResponse, http} from 'msw';
 
 import type {
+  AiRunWire,
   IngestRunWire,
   NewsDetailWire,
   NewsItemWire,
@@ -80,6 +81,7 @@ export const newsHandlers = [
       date,
       run: feed.run,
       rule_run: feed.ruleRun,
+      ai_run: feed.aiRun,
       count: items.length,
       items,
     };
@@ -127,10 +129,11 @@ export const newsHandlers = [
   }),
 ];
 
-/** The list endpoint sends items without their body and evidence. */
+/** The list endpoint sends items without their body, evidence and AI detail. */
 function withoutBody({
   body,
   rule_evidence,
+  ai,
   ...item
 }: NewsDetailWire): NewsItemWire {
   return item;
@@ -168,6 +171,8 @@ function matchesText(item: NewsDetailWire, q: string | null): boolean {
 interface ScenarioFeed {
   run: IngestRunWire | null;
   ruleRun: RuleRunWire | null;
+  /** The AI run needs a finished rule run: null in the partial scenarios. */
+  aiRun: AiRunWire | null;
   items: NewsDetailWire[];
 }
 
@@ -178,7 +183,7 @@ function scenarioFeed(day: GeneratedDay): ScenarioFeed {
   }
   switch (activeScenario()) {
     case 'empty':
-      return {run: null, ruleRun: null, items: []};
+      return {run: null, ruleRun: null, aiRun: null, items: []};
     case 'running': {
       const steps = Math.floor(
         (db.now() - db.runningSince(day.date)) / RUNNING_STEP_MS,
@@ -232,6 +237,7 @@ function partialFeed(
         .length,
     },
     ruleRun: ruleRunFor(day, items, status === 'RUNNING' ? 'RUNNING' : 'DONE'),
+    aiRun: null,
     items,
   };
 }
@@ -246,7 +252,12 @@ function rulesFailedFeed(day: GeneratedDay): ScenarioFeed {
     day.legacy,
     item => day.rulesRun && checkedIds.has(item.id),
   );
-  return {run: day.run, ruleRun: ruleRunFor(day, items, 'FAILED'), items};
+  return {
+    run: day.run,
+    ruleRun: ruleRunFor(day, items, 'FAILED'),
+    aiRun: null,
+    items,
+  };
 }
 
 function ruleRunFor(

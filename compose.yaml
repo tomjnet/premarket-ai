@@ -4,14 +4,19 @@
 # replicas and the edge proxy in front of them. Increment 2 (rule checks): the
 # C++20 ingester in parallel with the legacy one (shadow schema `ingest`),
 # and the rule checks, run by `ai-api rules` in the ai-api-init container.
-# Profiles: legacy (inc 0+), ai (inc 1+), observability, full.
+# Increment 3 (first AI): the LLM gateway (LiteLLM), ChromaDB, the reranker,
+# and `ai-api enrich` / `ai-api corpus` in the ai-api-init container; the
+# `observability` profile adds Langfuse.
+# Profiles: legacy (inc 0+), ai (inc 1+), observability (inc 3+), full.
 #   podman compose --profile legacy --profile ai up -d
-# Ollama is not a service: it runs on the GPU host (from increment 3).
+# Ollama is not a service: it runs on the GPU host (OLLAMA_BASE_URL).
 #
-# Only `edge` publishes a port. Browsers reach the UI and the API through it:
+# Only `edge` (and Langfuse, when on) publishes a port:
 #   browser -> edge (rate limits, security headers, load balancing)
 #                ├── /      -> web-1 | web-2   (static UI)
-#                └── /api/  -> ai-api          (auth, news) -> postgres, redis
+#                └── /api/  -> ai-api          (auth, news, chat)
+#                                -> postgres, redis, chroma, reranker,
+#                                   llm-gateway -> Ollama on the GPU host
 
 name: premarket-ai
 
@@ -29,6 +34,25 @@ x-hardened: &hardened
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   pids_limit: 256
+
+# LLM, RAG and tracing settings of ai-api and ai-api-init (increment 3).
+x-ai-env: &ai-env
+  LLM_GATEWAY_URL: http://llm-gateway:4000/v1
+  LLM_GATEWAY_KEY: sk-${LLM_GATEWAY_KEY:?run make -C python env}
+  HW_PROFILE: ${HW_PROFILE:-gpu4gb}
+  LLM_CONCURRENCY: ${LLM_CONCURRENCY:-2}
+  VECTOR_STORE: ${VECTOR_STORE:-chroma}
+  CHROMA_HOST: chroma
+  CHROMA_PORT: "8000"
+  RERANKER_URL: http://reranker:8080
+  RAG_TOP_K: ${RAG_TOP_K:-20}
+  RAG_TOP_N: ${RAG_TOP_N:-5}
+  DEDUP_COSINE_MIN: ${DEDUP_COSINE_MIN:-0.90}
+  DEDUP_PARAPHRASE_MIN_WORD_EDITS: ${DEDUP_PARAPHRASE_MIN_WORD_EDITS:-10}
+  LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+  LANGFUSE_HOST: http://langfuse-web:3000
+  LANGFUSE_PUBLIC_KEY: pk-lf-${LANGFUSE_KEY_ID:-}
+  LANGFUSE_SECRET_KEY: sk-lf-${LANGFUSE_SECRET:-}
 
 # Settings shared by the two UI replicas.
 x-web: &web
@@ -202,7 +226,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      <<: *pg-env
+      <<: [*pg-env, *ai-env]
       AI_DB_USER: premarket_ai
       AI_DB_PASSWORD: ${AI_DB_PASSWORD:?run make -C python env}
       DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?copy it from .env.example}
@@ -216,6 +240,9 @@ services:
       DEDUP_SIMHASH_NGRAM: ${DEDUP_SIMHASH_NGRAM:-2}
       DEDUP_SIMHASH_MAX_HAMMING: ${DEDUP_SIMHASH_MAX_HAMMING:-10}
       DEDUP_NEAR_MAX_WORD_EDITS: ${DEDUP_NEAR_MAX_WORD_EDITS:-3}
+      CORPUS_MONTHS: ${CORPUS_MONTHS:-12}
+      CORPUS_MAX_FILINGS: ${CORPUS_MAX_FILINGS:-8}
+      CORPUS_MAX_RELEASES: ${CORPUS_MAX_RELEASES:-40}
     <<: *hardened
     tmpfs:
       - /tmp:size=16m
@@ -260,16 +287,107 @@ services:
       # Browser origins allowed to call /auth/* (CSRF check): the edge, and
       # the Vite dev server of `make -C ui dev VITE_API_MODE=live`.
       ALLOWED_ORIGINS: http://localhost:${WEB_PORT:-8080},http://127.0.0.1:${WEB_PORT:-8080},http://localhost:5173
+      <<: *ai-env
     <<: *hardened
     tmpfs:
       - /tmp:size=16m
-    mem_limit: 512m
+    mem_limit: 768m
     healthcheck:
       test: ["CMD", "ai-api", "health"]
       interval: 5s
       timeout: 3s
       retries: 20
     restart: unless-stopped
+
+  # --- increment 3: first AI --------------------------------------------------
+  # The LLM gateway: one OpenAI-compatible endpoint for Ollama on the GPU host
+  # and the cloud providers. ai-api asks for task aliases (`main-gpu4gb`...)
+  # pinned in podman/config/litellm/config.yaml.
+  llm-gateway:
+    profiles: [ai, full]
+    image: docker.io/litellm/litellm:v1.102.1
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?set it in .env (scripts/wsl/03_check-ollama.sh)}
+      LITELLM_MASTER_KEY: sk-${LLM_GATEWAY_KEY:?run make -C python env}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LITELLM_LOG: ERROR
+    volumes:
+      - ./podman/config/litellm/config.yaml:/app/config.yaml:ro
+    <<: *hardened
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 1g
+    healthcheck:
+      # No spaces inside arguments: Podman re-splits healthcheck commands.
+      test: ["CMD", "python3", "-c", "__import__('urllib.request').request.urlopen('http://127.0.0.1:4000/health/liveliness')"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # The RAG vector store in increments 3 to 5 (pgvector replaces it in 6). An
+  # index only: `make -C python reindex` rebuilds it from ai.chunk.
+  chroma:
+    profiles: [ai, full]
+    image: docker.io/chromadb/chroma:1.5.9
+    volumes:
+      - chromadata:/data
+    environment:
+      ANONYMIZED_TELEMETRY: "False"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # The cross-encoder reranker on CPU, served by Hugging Face
+  # text-embeddings-inference. Default bge-reranker-base: 20 passages in about
+  # 10 s on 4 threads (bge-reranker-v2-m3 took 47 s, too slow for a chat
+  # answer; set RERANKER_MODEL to use it on a bigger CPU). The model is
+  # downloaded into the hf-models volume on the first start.
+  reranker:
+    profiles: [ai, full]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4
+    # A small batch budget keeps the warm-up (and every batch) within the
+    # memory limit; each request is split into batches of it.
+    command: ["--model-id", "${RERANKER_MODEL:-BAAI/bge-reranker-base}", "--max-client-batch-size", "32", "--max-batch-tokens", "2048", "--auto-truncate", "--hostname", "0.0.0.0", "--port", "8080"]
+    environment:
+      RAYON_NUM_THREADS: ${RERANKER_THREADS:-4}
+    volumes:
+      - hf-models:/data
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    # The fp32 model plus its warm-up batch (bge-reranker-v2-m3 needs 6g).
+    mem_limit: ${RERANKER_MEM:-4g}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 60
+      start_period: 60s
+    restart: unless-stopped
+
+  # The GPU evals (make -C python eval-ai / bench-models / eval-rag): run on
+  # this network against the gateway, chroma and the reranker, and write
+  # their reports to docs/benchmarks.
+  ai-eval:
+    profiles: [eval]
+    image: localhost/premarket-ai/ai-api:ai-eval
+    environment:
+      <<: *ai-env
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+    volumes:
+      - ./docs/benchmarks:/out
+    restart: "no"
 
   # Two replicas of the static UI, load balanced by the edge.
   web-1:
@@ -314,7 +432,147 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # --- observability profile (increment 3): Langfuse traces of every LLM call
+  # Heavy (its own Postgres, ClickHouse, Redis and MinIO): off by default.
+  #   make -C python obs-up   (then LANGFUSE_TRACING=true for ai-api)
+  # UI: http://localhost:${LANGFUSE_PORT:-3000} (LANGFUSE_INIT_USER_EMAIL /
+  # LANGFUSE_INIT_USER_PASSWORD from .env). The project and its API keys are
+  # created from .env on the first start (headless init).
+  langfuse-db:
+    profiles: [observability, full]
+    image: docker.io/library/postgres:17.6
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:?run make -C python env}
+      TZ: UTC
+    volumes:
+      - langfuse-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  langfuse-clickhouse:
+    profiles: [observability, full]
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:?run make -C python env}
+    volumes:
+      - langfuse-clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  langfuse-minio:
+    profiles: [observability, full]
+    image: cgr.dev/chainguard/minio:latest
+    entrypoint: sh
+    # Creates the 'langfuse' bucket before starting the server.
+    command: ["-c", "mkdir -p /data/langfuse && minio server --address :9000 --console-address :9001 /data"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_PASSWORD:?run make -C python env}
+    volumes:
+      - langfuse-minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  langfuse-redis:
+    profiles: [observability, full]
+    image: docker.io/library/redis:8.10.2-alpine
+    user: redis
+    # Langfuse's queue (BullMQ) needs noeviction.
+    command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_PASSWORD:?run make -C python env}", "--maxmemory-policy", "noeviction", "--save", "", "--appendonly", "no"]
+    tmpfs:
+      - /data:size=64m,mode=1777
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LANGFUSE_REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  langfuse-worker:
+    profiles: [observability, full]
+    image: docker.io/langfuse/langfuse-worker:4.46.0
+    depends_on: &langfuse-deps
+      langfuse-db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+    environment: &langfuse-env
+      NEXTAUTH_URL: http://localhost:${LANGFUSE_PORT:-3000}
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
+      SALT: ${LANGFUSE_SALT:?run make -C python env}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?run make -C python env}
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_PASSWORD}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
+    restart: unless-stopped
+
+  langfuse-web:
+    profiles: [observability, full]
+    image: docker.io/langfuse/langfuse:4.46.0
+    depends_on: *langfuse-deps
+    ports:
+      - ${WEB_BIND:-127.0.0.1}:${LANGFUSE_PORT:-3000}:3000
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?run make -C python env}
+      LANGFUSE_INIT_ORG_ID: premarket
+      LANGFUSE_INIT_ORG_NAME: premarket-ai
+      LANGFUSE_INIT_PROJECT_ID: premarket-ai
+      LANGFUSE_INIT_PROJECT_NAME: premarket-ai
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-${LANGFUSE_KEY_ID}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-${LANGFUSE_SECRET}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@premarket.local}
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:?run make -C python env}
+    restart: unless-stopped
+
 volumes:
   pgdata:
   vendor-data:
   nfs-reports:
+  chromadata:
+  hf-models:
+  langfuse-db:
+  langfuse-clickhouse:
+  langfuse-minio:

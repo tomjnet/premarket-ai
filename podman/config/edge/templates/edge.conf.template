@@ -4,6 +4,7 @@
 # Snippets are mounted at /etc/nginx/snippets/.
 #
 #   /api/*  -> ai-api (prefix stripped), rate limited per client IP
+#              (/api/chat streams server-sent events, unbuffered)
 #   /*      -> web-1 / web-2 (static UI), least-connections load balancing
 #
 # Every browser-facing response gets the site's security headers here, in
@@ -23,6 +24,8 @@ limit_req_zone $binary_remote_addr zone=pm_login:10m rate=10r/m;
 limit_req_zone $binary_remote_addr zone=pm_auth:10m rate=30r/m;
 limit_req_zone $binary_remote_addr zone=pm_api:10m rate=20r/s;
 limit_req_zone $binary_remote_addr zone=pm_site:10m rate=30r/s;
+# "Ask the News" runs the model on the GPU host: 6 questions per minute.
+limit_req_zone $binary_remote_addr zone=pm_chat:10m rate=6r/m;
 limit_conn_zone $binary_remote_addr zone=pm_conn:10m;
 limit_req_status 429;
 limit_conn_status 429;
@@ -103,6 +106,31 @@ server {
     # API docs are never public, even if EXPOSE_DOCS were switched on.
     location ~ ^/api/(docs|redoc|openapi\.json)(/|$) {
         return 404;
+    }
+
+    # Server-sent events: tokens are passed on as the model writes them
+    # (no buffering), and a cold model on the GPU host can take a minute
+    # to load, so reads wait up to 5 minutes. The settings of
+    # snippets/proxy.conf are repeated here (nginx refuses a second
+    # proxy_read_timeout in one location); a POST is never retried.
+    location = /api/chat {
+        limit_req zone=pm_chat burst=3 nodelay;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 1s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 300s;
+        proxy_next_upstream off;
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header Server;
+        proxy_cookie_flags ~ secure httponly samesite=strict;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_pass http://pm_api/chat;
     }
 
     location /api/ {

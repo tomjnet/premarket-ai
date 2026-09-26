@@ -46,6 +46,31 @@ describe('ruleBadges', () => {
     ]);
   });
 
+  it('places the AI run codes among the known ones', () => {
+    const badges = ruleBadges({
+      ...checked,
+      // Rule codes sorted, then the AI run's, as the backend sends them.
+      reasonCodes: [
+        'FAKE_TICKER',
+        'STALE',
+        'UNSUPPORTED_LANGUAGE',
+        'INJECTION_ATTEMPT',
+        'NEW_CODE',
+      ],
+      isDup: true,
+      dupType: 'paraphrase',
+    });
+    expect(badges.map(badge => [badge.text, badge.tone])).toEqual([
+      ['FAKE TICKER', 'danger'],
+      ['INJECTION ATTEMPT', 'danger'],
+      ['STALE', 'warning'],
+      ['UNSUPPORTED LANGUAGE', 'neutral'],
+      ['NEW CODE', 'neutral'],
+      ['DUPLICATE · paraphrase', 'neutral'],
+    ]);
+    expect(badges.at(-1)?.spokenText).toBe('Duplicate (paraphrase)');
+  });
+
   it('shows no badge before the rules have checked the item', () => {
     expect(
       ruleBadges({
@@ -118,6 +143,16 @@ describe('rule helpers', () => {
       key: 'dedup',
       text: 'DUPLICATE',
       tone: 'neutral',
+    });
+    expect(evidenceBadge({check: 'language', code: null, message: ''})).toEqual(
+      {key: 'language', text: 'LANGUAGE CHECK', tone: 'neutral'},
+    );
+    expect(
+      evidenceBadge({check: 'guard', code: 'INJECTION_ATTEMPT', message: ''}),
+    ).toEqual({
+      key: 'INJECTION_ATTEMPT',
+      text: 'INJECTION ATTEMPT',
+      tone: 'danger',
     });
   });
 });

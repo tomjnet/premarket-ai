@@ -8,10 +8,13 @@ security headers.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import contextlib
+import datetime
 import logging
 import os
+import pathlib
+from typing import Any
 
 import fastapi
 from psycopg_pool import AsyncConnectionPool
@@ -23,7 +26,14 @@ from ai_api import deps
 from ai_api import news
 from ai_api import sessions
 from ai_api import users
+from ai_api.llm import factory
+from ai_api.llm import tracing
+from ai_api.rag import ask
+from ai_api.rag import rerank
+from ai_api.rag import store
+from ai_api.rag import universe
 from ai_api.routes import auth
+from ai_api.routes import chat
 from ai_api.routes import health
 from ai_api.routes import news as news_routes
 
@@ -39,6 +49,52 @@ _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     "Cross-Origin-Resource-Policy": "same-origin",
 }
+
+
+def _vendor_lookup(
+    news_store: news.NewsStore,
+) -> Callable[[datetime.date, Sequence[str]], Awaitable[list[dict[str, Any]]]]:
+    """The day's unique, summarized items for some tickers (chat)."""
+
+    async def lookup(
+        day: datetime.date, tickers: Sequence[str]
+    ) -> list[dict[str, Any]]:
+        found: dict[int, dict[str, Any]] = {}
+        for ticker in tickers[:3]:
+            rows = await news_store.items(news.NewsQuery(day, ticker=ticker))
+            for row in rows[:2]:
+                found.setdefault(row["id"], row)
+        return list(found.values())
+
+    return lookup
+
+
+def build_ask(
+    settings: config.Settings, news_store: news.NewsStore
+) -> tuple[ask.AskService | None, rerank.Reranker | None]:
+    """The "Ask the News" service when the LLM and RAG are configured."""
+    llm = settings.llm
+    if llm is None or settings.rag is None:
+        _log.warning("LLM_GATEWAY_KEY isn't set: Ask the News is off")
+        return None, None
+    embeddings = store.PrefixedEmbeddings(
+        factory.embeddings(llm), llm.query_prefix, llm.document_prefix
+    )
+    reranker = rerank.Reranker(settings.rag.reranker_url)
+    config_dir = pathlib.Path(
+        os.environ.get("PREMARKET_CONFIG_DIR", "/app/config")
+    )
+    service = ask.AskService(
+        store=store.CorpusStore(settings.rag, embeddings, llm.embed_model),
+        reranker=reranker,
+        model=factory.chat_model(llm, max_tokens=600),
+        tracer=tracing.Tracer(settings.tracing),
+        cfg=settings.rag,
+        members=universe.load(config_dir),
+        vendor_lookup=_vendor_lookup(news_store),
+        model_name=llm.main_model,
+    )
+    return service, reranker
 
 
 @contextlib.asynccontextmanager
@@ -79,11 +135,13 @@ async def open_services(
             await conn.execute("SELECT 1")
         await redis.ping()
 
+    news_store = news.PostgresNewsStore(pool)
+    ask_service, reranker = build_ask(settings, news_store)
     try:
         yield deps.Services(
             settings=settings,
             users=users.PostgresUserStore(pool),
-            news=news.PostgresNewsStore(pool),
+            news=news_store,
             sessions=sessions.SessionStore(
                 redis,
                 ttl_s=settings.refresh_token_ttl_s,
@@ -92,10 +150,14 @@ async def open_services(
                 lockout_s=settings.login_lockout_s,
             ),
             ping=ping,
+            ask=ask_service,
+            chat_gate=chat.ChatGate(redis),
         )
     finally:
         await pool.close()
         await redis.aclose()
+        if reranker is not None:
+            await reranker.aclose()
 
 
 def create_app(
@@ -153,4 +215,5 @@ def create_app(
     app.include_router(health.router)
     app.include_router(auth.router)
     app.include_router(news_routes.router)
+    app.include_router(chat.router)
     return app

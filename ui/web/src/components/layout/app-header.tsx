@@ -1,12 +1,22 @@
 import {useState} from 'react';
-import {Link} from 'react-router';
+import {Link, NavLink} from 'react-router';
 
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
 import {useSession} from '@/features/auth/session-context';
 import {formatLongDate, todayInNewYork} from '@/lib/time';
 
-/** Product name, today in New York (the feed's default date) and the user. */
+/** The current page's link is marked by weight and underline, not colour. */
+function navLinkClass({isActive}: {isActive: boolean}): string {
+  return isActive
+    ? 'font-semibold underline underline-offset-4'
+    : 'underline-offset-4 hover:underline';
+}
+
+/**
+ * Product name, today in New York (the feed's default date), the main
+ * navigation and the user.
+ */
 export function AppHeader() {
   const {status, logout} = useSession();
   const [loggingOut, setLoggingOut] = useState(false);
@@ -31,6 +41,22 @@ export function AppHeader() {
           Today in New York:{' '}
           <time dateTime={today}>{formatLongDate(today)}</time>
         </p>
+        {user !== undefined && (
+          <nav aria-label="Main">
+            <ul className="flex gap-3 text-sm">
+              <li>
+                <NavLink to="/news" className={navLinkClass}>
+                  News feed
+                </NavLink>
+              </li>
+              <li>
+                <NavLink to="/chat" className={navLinkClass}>
+                  Ask the News
+                </NavLink>
+              </li>
+            </ul>
+          </nav>
+        )}
       </div>
       {user !== undefined && (
         <section

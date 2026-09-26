@@ -1,5 +1,6 @@
 import {EXCERPT_MAX_CHARS} from '@/api/schemas/news';
 import type {
+  AiRunWire,
   IngestRunWire,
   NewsDetailWire,
   RuleRunWire,
@@ -13,6 +14,8 @@ import {
   previousTradingDate,
 } from '@/lib/time';
 
+import {AI_START_DATE, applyAiRun} from './ai';
+import type {PlantedCase} from './ai';
 import {
   FAKE_COMPANIES,
   LOW_QUALITY_DOMAINS,
@@ -45,6 +48,8 @@ export const ITEMS_PER_DAY = 100;
 export const DUPLICATES_PER_DAY = 9;
 /** Near copies (one word changed): only the rule engine finds them. */
 export const NEAR_COPIES_PER_DAY = 5;
+/** Paraphrases (other words, same facts): only the AI run's L3 finds them. */
+export const PARAPHRASES_PER_DAY = 2;
 /**
  * The first feed date the rule engine checked. Earlier dates have no rule
  * run, and their items keep the legacy duplicate flags.
@@ -57,6 +62,12 @@ const ORIGINALS_PER_DAY = ITEMS_PER_DAY - DUPLICATES_PER_DAY;
 const DUPLICATES_OF_EACH_KIND = 3;
 // Item numbers that are near copies of an earlier item of the same day.
 const NEAR_COPY_NUMBERS: readonly number[] = [58, 64, 70, 76, 82];
+// Item numbers of the cases the AI run finds (after the near copies, so
+// those keep their sources): paraphrases, a conflicting version, and a
+// story that isn't in English.
+const PARAPHRASE_NUMBERS: readonly number[] = [85, 91];
+const CONFLICT_NUMBER = 89;
+const FOREIGN_NUMBER = 87;
 // The rule run ends this long after the ingest run.
 const RULE_RUN_SECONDS = 40;
 const SOURCE_NAME = 'Acme Market Wire';
@@ -76,9 +87,14 @@ export interface GeneratedDay {
   run: IngestRunWire | null;
   /** Null before RULES_START_DATE (and on weekends). */
   ruleRun: RuleRunWire | null;
+  /** Null before AI_START_DATE (and on weekends). */
+  aiRun: AiRunWire | null;
   /** Newest first, duplicates included, as the default scenario serves it. */
   items: NewsDetailWire[];
-  /** Every item as the rules see it (newest first), even before they run. */
+  /**
+   * Every item as the rules see it (newest first), even before they run;
+   * without the AI run's results.
+   */
   ruleResults: NewsDetailWire[];
   /** The legacy exact-hash flags of every item, by id. */
   legacy: ReadonlyMap<number, LegacyDup>;
@@ -100,26 +116,48 @@ export function generateDay(date: string, seed = MOCK_SEED): GeneratedDay {
   if (isWeekend(date)) {
     return emptyDay(date);
   }
-  const originals = generateOriginals(date, seed);
-  const ruleResults = [
-    ...originals,
-    ...generateDuplicates(date, seed, originals),
-  ];
+  const day = generateOriginals(date, seed);
+  const planted = day.planted;
+  const ruleResults = [...day.items, ...generateDuplicates(date, seed, day)];
   ruleResults.sort(newestFirst);
   const legacy = new Map(
     ruleResults.map(item => [item.id, legacyFlags(item)] as const),
   );
   const rulesRun = date >= RULES_START_DATE;
   const run = doneRun(date);
-  const items = withRuleProgress(ruleResults, legacy, () => rulesRun);
-  const ruleRun = rulesRun
-    ? ruleRunOf(
-        items,
-        'DONE',
-        addSeconds(run.finished_at ?? run.started_at, RULE_RUN_SECONDS),
-      )
-    : null;
-  return {date, run, ruleRun, items, ruleResults, legacy, rulesRun};
+  const checked = withRuleProgress(ruleResults, legacy, () => rulesRun);
+  if (!rulesRun) {
+    return {
+      date,
+      run,
+      ruleRun: null,
+      aiRun: null,
+      items: checked,
+      ruleResults,
+      legacy,
+      rulesRun,
+    };
+  }
+  // The rule run's counts are its own; the AI run comes after it.
+  const ruleRun = ruleRunOf(
+    checked,
+    'DONE',
+    addSeconds(run.finished_at ?? run.started_at, RULE_RUN_SECONDS),
+  );
+  if (date < AI_START_DATE || ruleRun.finished_at === null) {
+    return {
+      date,
+      run,
+      ruleRun,
+      aiRun: null,
+      items: checked,
+      ruleResults,
+      legacy,
+      rulesRun,
+    };
+  }
+  const {items, aiRun} = applyAiRun(checked, planted, ruleRun.finished_at);
+  return {date, run, ruleRun, aiRun, items, ruleResults, legacy, rulesRun};
 }
 
 /**
@@ -139,6 +177,7 @@ export function emptyDay(date: string): GeneratedDay {
     date,
     run: null,
     ruleRun: null,
+    aiRun: null,
     items: [],
     ruleResults: [],
     legacy: new Map(),
@@ -184,7 +223,13 @@ function newestFirst(a: NewsDetailWire, b: NewsDetailWire): number {
   return b.id - a.id;
 }
 
-function generateOriginals(date: string, seed: number): NewsDetailWire[] {
+interface Originals {
+  items: NewsDetailWire[];
+  /** The cases planted for the AI run, by item id. */
+  planted: Map<number, PlantedCase>;
+}
+
+function generateOriginals(date: string, seed: number): Originals {
   const random = createRandom(hashSeed(seed, date));
   const items: NewsDetailWire[] = [];
   for (let number = 1; number <= ORIGINALS_PER_DAY; number++) {
@@ -195,7 +240,127 @@ function generateOriginals(date: string, seed: number): NewsDetailWire[] {
     const publishedAt = newYorkTimeToUtc(addDays(date, -1), 16, minutes);
     items.push(makeItem(date, number, story, publishedAt));
   }
-  return withNearCopies(date, seed, items);
+  return withAiCases(date, seed, withNearCopies(date, seed, items));
+}
+
+/** The text of a story: its body without the dateline and the footer. */
+function storyOf(item: NewsDetailWire): string {
+  const text = item.body.slice(0, item.body.length - FOOTER.length).trimEnd();
+  return text.slice(text.indexOf(' -- ') + 4);
+}
+
+const REAL_TICKERS = new Set(REAL_COMPANIES.map(company => company.ticker));
+const AMOUNT = /\$(\d+(?:\.\d+)?)|(\d+)%/;
+
+/** `$12B` → `$19B`, `12%` → `17%`: the same story with other facts. */
+function otherFacts(text: string): string {
+  return text.replace(
+    new RegExp(AMOUNT.source, 'g'),
+    (_, dollars: string | undefined, pct: string | undefined) =>
+      dollars === undefined
+        ? `${Number(pct) + 5}%`
+        : `$${(Number(dollars) + 7).toString()}`,
+  );
+}
+
+/**
+ * Replaces the items at PARAPHRASE_NUMBERS, CONFLICT_NUMBER and
+ * FOREIGN_NUMBER with the cases the AI run finds: paraphrases (same facts,
+ * other words) and a conflicting version (same story, other amounts) of
+ * earlier items, and a story in Spanish. The rules see them as unique.
+ */
+function withAiCases(
+  date: string,
+  seed: number,
+  items: NewsDetailWire[],
+): Originals {
+  const random = createRandom(hashSeed(seed, date, 'ai'));
+  const planted = new Map<number, PlantedCase>();
+  const taken = new Set([...PARAPHRASE_NUMBERS, CONFLICT_NUMBER]);
+  const sourcesFor = (number: number) =>
+    items
+      .slice(0, number - 1)
+      .filter(
+        (item, index) =>
+          item.dup_type === null &&
+          !AWKWARD_STORIES.has(index + 1) &&
+          !taken.has(index + 1) &&
+          index + 1 !== FOREIGN_NUMBER &&
+          item.tickers.length > 0 &&
+          item.tickers.every(ticker => REAL_TICKERS.has(ticker)),
+      );
+  const replace = (number: number, story: Story, planned: PlantedCase) => {
+    const slot = items[number - 1];
+    if (slot === undefined) {
+      return;
+    }
+    // A paraphrase or a second version comes after the story it follows.
+    let publishedAt = slot.published_at;
+    if (planned.kind !== 'foreign') {
+      const earliest = planned.original.published_at;
+      if (publishedAt <= earliest) {
+        publishedAt = addSeconds(earliest, random.int(10, 90) * 60);
+      }
+    }
+    const item = makeItem(date, number, story, publishedAt);
+    items[number - 1] = item;
+    planted.set(item.id, planned);
+  };
+  for (const number of PARAPHRASE_NUMBERS) {
+    const sources = sourcesFor(number);
+    if (sources.length === 0) {
+      continue;
+    }
+    const original = random.pick(sources);
+    const story = storyOf(original);
+    replace(
+      number,
+      {
+        headline: `${original.headline.slice(HEADLINE_PREFIX.length)}, company statement says`,
+        text: `In a statement released overnight, the company said: ${story} People briefed on the matter confirmed the details.`,
+        tickers: original.tickers,
+        domain: random.pick(TRUSTED_DOMAINS),
+      },
+      {kind: 'paraphrase', original, cosine: random.int(91, 97) / 100},
+    );
+  }
+  const withAmounts = sourcesFor(CONFLICT_NUMBER).filter(item =>
+    AMOUNT.test(item.headline),
+  );
+  if (withAmounts.length > 0) {
+    const original = random.pick(withAmounts);
+    const headline = original.headline.slice(HEADLINE_PREFIX.length);
+    const changed = otherFacts(headline);
+    const before = AMOUNT.exec(headline)?.[0] ?? '';
+    const after = AMOUNT.exec(changed)?.[0] ?? '';
+    replace(
+      CONFLICT_NUMBER,
+      {
+        headline: changed,
+        text: otherFacts(storyOf(original)),
+        tickers: original.tickers,
+        domain: random.pick(LOW_QUALITY_DOMAINS),
+      },
+      {
+        kind: 'conflict',
+        original,
+        detail: `key facts differ (${before} vs ${after})`,
+      },
+    );
+  }
+  const company = random.pick(REAL_COMPANIES);
+  const amount = random.int(2, 40);
+  replace(
+    FOREIGN_NUMBER,
+    {
+      headline: `${company.short} anuncia un programa de recompra de acciones de ${amount} mil millones de dólares`,
+      text: `${company.name} (${company.ticker}) dijo que su consejo autorizó la recompra de hasta ${amount} mil millones de dólares en acciones ordinarias, sin fecha de finalización.`,
+      tickers: [company.ticker],
+      domain: random.pick(TRUSTED_DOMAINS),
+    },
+    {kind: 'foreign'},
+  );
+  return {items, planted};
 }
 
 /**
@@ -278,17 +443,22 @@ function copyUrl(domain: string, date: string, number: number): string {
 /**
  * Three of each kind: exact copies (at another outlet's URL), copies of the
  * same URL with a reworded headline, and stale copies of the previous
- * trading date's items. Near copies are never copied again.
+ * trading date's items. Near copies and the AI run's planted cases are
+ * never copied again.
  */
 function generateDuplicates(
   date: string,
   seed: number,
-  originals: readonly NewsDetailWire[],
+  {items: originals, planted}: Originals,
 ): NewsDetailWire[] {
   const random = createRandom(hashSeed(seed, date, 'duplicates'));
-  const sources = originals.filter(item => item.dup_type === null);
-  const previousDay = generateOriginals(previousTradingDate(date), seed).filter(
-    item => item.dup_type === null,
+  const copyable = (day: Originals) =>
+    day.items.filter(
+      item => item.dup_type === null && !day.planted.has(item.id),
+    );
+  const sources = copyable({items: originals, planted});
+  const previousDay = copyable(
+    generateOriginals(previousTradingDate(date), seed),
   );
   const duplicates: NewsDetailWire[] = [];
   let number = ORIGINALS_PER_DAY + 1;
@@ -379,6 +549,9 @@ function makeItem(
     tickers: story.tickers,
     synthetic: true,
     body,
+    summary: null,
+    sentiment: null,
+    ai: null,
   };
   const evidence = [
     ...entityEvidence(item),

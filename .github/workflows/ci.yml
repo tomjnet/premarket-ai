@@ -81,6 +81,8 @@ jobs:
           - test
           - lint
           - eval
+          # Increment 3: the GPU evals' image (run by gpu-evals.yml).
+          - ai-eval
           - runtime
     steps:
       - uses: actions/checkout@v4

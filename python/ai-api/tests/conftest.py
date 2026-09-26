@@ -72,6 +72,14 @@ def make_row(number: int, **overrides: Any) -> dict[str, Any]:
         "dup_type": None,
         "copies": 0,
         "rules_checked": True,
+        "summary": f"Apple said item {number} happened.",
+        "sentiment": "neutral",
+        "ai_status": "DONE",
+        "summary_source": "llm",
+        "ai_evidence": [],
+        "ai_model": "main-gpu4gb",
+        "prompt_version": "enrich-v1",
+        "enriched_at": datetime.datetime(2026, 9, 24, 10, 5, tzinfo=UTC),
         "evidence": [
             {
                 "check": "entity",
@@ -110,6 +118,33 @@ class FakeNews:
             "duplicates": 1,
             "flagged": 1,
         }
+        self.ai_run: dict[str, Any] | None = {
+            "status": "DONE",
+            "finished_at": datetime.datetime(2026, 9, 24, 10, 9, tzinfo=UTC),
+            "items": 2,
+            "paraphrases": 0,
+            "conflicts": 0,
+            "summarized": 2,
+            "fallbacks": 0,
+            "failed": 0,
+            "model": "main-gpu4gb",
+        }
+        self.extractions: dict[int, list[dict[str, Any]]] = {
+            2001: [
+                {
+                    "kind": "entity",
+                    "seq": 0,
+                    "text": "Apple Inc.",
+                    "ticker": "AAPL",
+                },
+                {
+                    "kind": "claim",
+                    "seq": 0,
+                    "text": "Apple said X.",
+                    "ticker": None,
+                },
+            ]
+        }
         self.queries: list[news.NewsQuery] = []
         self.run: dict[str, Any] | None = {
             "run_id": 42,
@@ -131,6 +166,14 @@ class FakeNews:
     ) -> dict[str, Any] | None:
         """Returns the rule run for DAY only."""
         return self.rule_run if day == DAY else None
+
+    async def latest_ai_run(self, day: datetime.date) -> dict[str, Any] | None:
+        """Returns the AI run for DAY only."""
+        return self.ai_run if day == DAY else None
+
+    async def extraction(self, item_id: int) -> list[dict[str, Any]]:
+        """Returns the extraction rows of one item."""
+        return self.extractions.get(item_id, [])
 
     async def items(self, query: news.NewsQuery) -> list[dict[str, Any]]:
         """Applies the date, duplicate and ticker filters."""

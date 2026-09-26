@@ -133,11 +133,86 @@ test.describe('accessibility of error states (red text contrast)', () => {
   }
 });
 
+test.describe('Ask the News (streamed over the service worker)', () => {
+  for (const colorScheme of ['light', 'dark'] as const) {
+    test(`answer, citations and sources in ${colorScheme} mode`, async ({
+      page,
+    }) => {
+      test.slow();
+      await page.emulateMedia({colorScheme});
+      await logIn(page);
+      await page
+        .getByRole('navigation', {name: 'Main'})
+        .getByRole('link', {name: 'Ask the News'})
+        .click();
+      await expect(
+        page.getByRole('heading', {level: 1, name: 'Ask the News'}),
+      ).toBeVisible();
+      await expectNoA11yViolations(page);
+
+      await page.getByLabel('Your question').fill('What did Apple file?');
+      await page.getByRole('button', {name: 'Ask'}).click();
+      await expect(
+        page.getByRole('button', {name: 'Answering…'}),
+      ).toBeDisabled();
+      await expect(page.getByRole('button', {name: 'Source 1'})).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(page.getByRole('button', {name: 'Ask'})).toBeEnabled();
+      const sources = page.getByRole('list', {name: 'Sources'});
+      await expect(sources.getByText('SEC filing 8-K')).toBeVisible();
+      await expect(
+        sources.getByText('Vendor item (unverified)').first(),
+      ).toBeVisible();
+      await expectNoA11yViolations(page);
+
+      await page.getByRole('button', {name: 'Source 1'}).click();
+      await expect(sources.getByRole('listitem').first()).toBeFocused();
+    });
+  }
+});
+
 test.describe('every mock scenario', () => {
   test('default: the day with its summary', async ({page}) => {
     await logIn(page);
     await expect(
-      page.getByText('86 items · 14 duplicates hidden · updated 05:30 ET'),
+      page.getByText('84 items · 16 duplicates hidden · updated 05:30 ET'),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/^AI: \d+ summarized · 2 paraphrases/),
+    ).toBeVisible();
+    await expect(page.getByText(/^AI summary: /).first()).toBeVisible();
+  });
+
+  test('chat-error: the answer fails after it started', async ({page}) => {
+    await logIn(page, 'chat-error');
+    await page.goto('/chat');
+    await page.getByLabel('Your question').fill('What did Apple file?');
+    await page.getByRole('button', {name: 'Ask'}).click();
+    await expect(
+      page.getByText('The answer failed. Try again in a moment.'),
+    ).toBeVisible();
+  });
+
+  test('chat-busy: one question at a time (429)', async ({page}) => {
+    await logIn(page, 'chat-busy');
+    await page.goto('/chat');
+    await page.getByLabel('Your question').fill('What is new today?');
+    await page.getByRole('button', {name: 'Ask'}).click();
+    await expect(
+      page.getByText(/^Another question of yours is still being answered/),
+    ).toBeVisible();
+  });
+
+  test('chat-unavailable: Ask the News is not configured (503)', async ({
+    page,
+  }) => {
+    await logIn(page, 'chat-unavailable');
+    await page.goto('/chat');
+    await page.getByLabel('Your question').fill('What is new today?');
+    await page.getByRole('button', {name: 'Ask'}).click();
+    await expect(
+      page.getByText("Ask the News isn't available on this server right now."),
     ).toBeVisible();
   });
 

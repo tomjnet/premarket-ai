@@ -1,4 +1,5 @@
 import type {
+  AiEvidence,
   DupType,
   NewsItem,
   RuleEvidence,
@@ -6,8 +7,9 @@ import type {
 } from '@/api/schemas/news';
 
 /**
- * Rule-check badges (increment 2): data-quality flags from the backend's
- * deterministic rules. They describe the vendor item, never the security.
+ * Check badges: data-quality flags from the backend's deterministic rules
+ * (increment 2) and from the AI run's guard, language check and dedup L3
+ * (increment 3). They describe the vendor item, never the security.
  */
 
 /** How a badge looks. The text is the signal; the colour only helps. */
@@ -27,7 +29,9 @@ const KNOWN_CODES: ReadonlyArray<[string, BadgeTone]> = [
   ['FAKE_COMPANY', 'danger'],
   ['FAKE_TICKER', 'danger'],
   ['SPOOFED_SOURCE', 'danger'],
+  ['INJECTION_ATTEMPT', 'danger'],
   ['STALE', 'warning'],
+  ['UNSUPPORTED_LANGUAGE', 'neutral'],
 ];
 
 const KNOWN_CODE_SET = new Set(KNOWN_CODES.map(([code]) => code));
@@ -39,11 +43,16 @@ const DUP_TYPE_TEXT: Record<DupType, string> = {
   paraphrase: 'paraphrase',
 };
 
-const CHECK_TEXT: Record<RuleEvidence['check'], string> = {
+/** A rule check's or an AI-run step's explanation. */
+export type CheckEvidence = RuleEvidence | AiEvidence;
+
+const CHECK_TEXT: Record<CheckEvidence['check'], string> = {
   entity: 'ENTITY CHECK',
   source: 'SOURCE CHECK',
   dedup: 'DUPLICATE',
   stale: 'STALE CHECK',
+  guard: 'GUARD',
+  language: 'LANGUAGE CHECK',
 };
 
 /** `FAKE_TICKER` → `FAKE TICKER`. */
@@ -62,7 +71,7 @@ export function dupTypeText(dupType: DupType): string {
 }
 
 /** The badge of one piece of evidence: its code, else the check's name. */
-export function evidenceBadge(evidence: RuleEvidence): RuleBadge {
+export function evidenceBadge(evidence: CheckEvidence): RuleBadge {
   if (evidence.code === null) {
     return {
       key: evidence.check,
@@ -83,7 +92,8 @@ function copiesText(copies: number): string {
 
 /**
  * The badges of an item, in display order: FAKE COMPANY, FAKE TICKER,
- * SPOOFED SOURCE, STALE, unknown codes, then the duplicate badge. None
+ * SPOOFED SOURCE, INJECTION ATTEMPT, STALE, UNSUPPORTED LANGUAGE, unknown
+ * codes, then the duplicate badge. None
  * until the rules have checked the item.
  *
  * @param copiesState whether the feed shows or hides duplicates, for the

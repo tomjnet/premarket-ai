@@ -1,0 +1,45 @@
+# GPU evals on the protected self-hosted runner (the GPU host's Ollama).
+# Only on push to main, by hand, or nightly: never on pull requests, so
+# code from a fork never runs on the runner.
+#
+# Increment 3: the L3 paraphrase + guard eval (gated against
+# python/ai-api/evals/ai_baseline.json). The model benchmark and the RAG
+# baseline need the corpus and an hour of GPU time: they run by hand
+# (`make -C python bench-models` / `eval-rag`).
+name: gpu-evals
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "30 7 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-evals
+  cancel-in-progress: false
+
+jobs:
+  ai-eval:
+    runs-on: [self-hosted, gpu-ollama]
+    timeout-minutes: 60
+    env:
+      # Its own compose project, so the evals never touch the demo stack.
+      COMPOSE_PROJECT_NAME: premarket-ci
+      OLLAMA_BASE_URL: ${{ vars.OLLAMA_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Settings (.env with generated secrets)
+        run: |
+          make -C python env
+          sed -i "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=$OLLAMA_BASE_URL|" .env
+      - name: LLM gateway
+        run: podman compose --profile ai up -d --wait llm-gateway
+      - name: L3 paraphrase + guard eval (fails on regression)
+        run: make -C python eval-ai
+      - name: Stop the gateway
+        if: always()
+        run: podman compose --profile full down
