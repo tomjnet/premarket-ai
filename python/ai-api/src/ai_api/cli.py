@@ -15,6 +15,8 @@ Usage:
     ai-api llm-status                 the gateway's aliases, a test call
     ai-api verify --date YYYY-MM-DD   queue a verify run, follow it to the end
     ai-api expire --date YYYY-MM-DD   market open: pending reviews expire
+    ai-api brief --date YYYY-MM-DD [--edition morning|refresh]
+                                      write the pre-market brief, follow it
     ai-api ml-train                   fine-tune the DistilBERT baseline
     ai-api smoke --base-url URL --date YYYY-MM-DD
                                       the increment's "done when" check
@@ -242,6 +244,7 @@ def _smoke(base_url: str, day: datetime.date) -> int:
             )
     _smoke_ai(check, api, bearer, day, counts)
     _smoke_verify(check, api, bearer, day, counts, password)
+    _smoke_brief(check, api, bearer, day, counts)
     check(
         "news: unknown id is 404",
         _call("GET", f"{api}/news/999999999999", bearer).status == 404,
@@ -477,6 +480,124 @@ def _smoke_verify(
     )
 
 
+def _brief_events(
+    api: str, bearer: dict[str, str], day: datetime.date
+) -> tuple[int, dict[str, Any]]:
+    reply = _call(
+        "GET",
+        f"{api}/briefs/today?date={day.isoformat()}",
+        bearer,
+        timeout_s=120,
+    )
+    events = dict(_sse_events(reply.body)) if reply.status == 200 else {}
+    return reply.status, events
+
+
+def _smoke_brief(
+    check: Any,
+    api: str,
+    bearer: dict[str, str],
+    day: datetime.date,
+    counts: dict[str, Any],
+) -> None:
+    """Increment 5: the brief, the watchlist, the agents, the cache, PDF."""
+    check(
+        "brief: a brief is DONE for the date",
+        counts["brief"] == "DONE",
+        str(counts["brief"]),
+    )
+    status, events = _brief_events(api, bearer, day)
+    brief = events.get("done") or {}
+    items = brief.get("items", [])
+    check(
+        "brief: a trader reads it (GET /briefs/today streams it)",
+        status == 200 and "brief" in events and bool(brief),
+        f"HTTP {status}, events {sorted(events)}",
+    )
+    leaked = [
+        i["vendor_item_id"] for i in items if i["news_id"] in counts["kept_out"]
+    ]
+    check(
+        "brief: no FAKE, MISLEADING or pending item in it",
+        bool(items) and not leaked,
+        f"{len(items)} items" + (f", leaked {leaked}" if leaked else ""),
+    )
+    watch = [i for i in items if i["section"] == "watch"]
+    check(
+        'brief: "Unconfirmed - watch" holds only UNVERIFIED items',
+        all(i["verdict"] == "UNVERIFIED" for i in watch)
+        and all(i["verdict"] == "VERIFIED" for i in items if i not in watch),
+        f"{len(watch)} unconfirmed",
+    )
+    from ai_api.guard import output  # noqa: PLC0415
+
+    overview = str(brief.get("overview", ""))
+    check(
+        "brief: the overview cites its items and gives no advice",
+        bool(brief.get("citations")) and not output.investment_advice(overview),
+        f"{brief.get('overview_source')}: {overview[:70]}",
+    )
+    check(
+        "brief: the PDF is switched off (LEGACY_PDF_ENABLED=false)",
+        os.environ.get("LEGACY_PDF_ENABLED", "true").lower() == "false",
+        f"LEGACY_PDF_ENABLED={os.environ.get('LEGACY_PDF_ENABLED', '')}",
+    )
+    saved = _call("GET", f"{api}/me/watchlist", bearer)
+    ticker = next((t for i in items for t in i["tickers"]), None)
+    if saved.status == 200 and ticker is not None:
+        old = saved.json()
+        put = _call(
+            "PUT",
+            f"{api}/me/watchlist",
+            bearer,
+            body={"tickers": [ticker], "sectors": []},
+        )
+        _, events = _brief_events(api, bearer, day)
+        mine = (events.get("done") or {}).get("watchlist", {})
+        check(
+            "memory: the watchlist is saved and the brief shows its items",
+            put.status == 200 and bool(mine.get("items")),
+            f"PUT {put.status}, {ticker}: {len(mine.get('items', []))} items",
+        )
+        _call(
+            "PUT",
+            f"{api}/me/watchlist",
+            bearer,
+            body={"tickers": old["tickers"], "sectors": old["sectors"]},
+        )
+    else:
+        check("memory: GET /me/watchlist", False, f"HTTP {saved.status}")
+    question = (
+        "What did the Federal Reserve decide about interest rates at its"
+        " latest meeting?"
+    )
+    status, done = _chat_done(api, bearer, question, day)
+    check(
+        "cache: the same question again comes from the semantic cache",
+        bool(done.get("cached")),
+        f"HTTP {status}, {done.get('elapsed_ms')} ms",
+    )
+    subject = "NVDA" if ticker is None else ticker
+    reply = _call(
+        "POST",
+        f"{api}/chat",
+        bearer,
+        body={
+            "question": f"Why was {subject} news flagged or verified today?",
+            "date": day.isoformat(),
+        },
+        timeout_s=300,
+    )
+    names = [name for name, _ in _sse_events(reply.body)]
+    done = dict(_sse_events(reply.body)).get("done", {})
+    check(
+        "agents: the supervisor's team works on a question (step events)",
+        reply.status == 200 and "step" in names and "done" in names,
+        f"HTTP {reply.status}: {names.count('step')} steps,"
+        f" agents {done.get('agents')}",
+    )
+
+
 def _database_counts(day: datetime.date) -> dict[str, Any]:
     """What the smoke check compares the website with (as the owner)."""
     owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
@@ -552,6 +673,20 @@ def _database_counts(day: datetime.date) -> dict[str, Any]:
             counts["with_evidence"],
             counts["pending"],
         ) = row
+        row = conn.execute(
+            "SELECT status FROM ai.brief WHERE feed_date = %s"
+            " ORDER BY (status <> 'FAILED') DESC, requested_at DESC LIMIT 1",
+            (day,),
+        ).fetchone()
+        counts["brief"] = None if row is None else row[0]
+        row = conn.execute(
+            "SELECT coalesce(array_agg(v.news_id) FILTER (WHERE v.status"
+            " <> 'DONE' OR v.verdict IN ('FAKE', 'MISLEADING')), '{}')"
+            " FROM ai.verification v JOIN ai.news_item n ON n.id = v.news_id"
+            " WHERE n.feed_date = %s",
+            (day,),
+        ).fetchone()
+        counts["kept_out"] = set(row[0])
         try:
             row = conn.execute(
                 "SELECT status, differences, legacy_rows, modern_rows"
@@ -773,6 +908,96 @@ def _verify(day: datetime.date, timeout_s: float) -> int:
     return 1 if last["failed"] else 0
 
 
+async def _follow_brief(brief_id: int, timeout_s: float) -> dict[str, Any]:
+    """Prints a brief's progress until it ends; returns the last event."""
+    from redis import asyncio as aioredis  # noqa: PLC0415
+
+    from ai_api.verify import events  # noqa: PLC0415
+
+    redis = aioredis.Redis(
+        host=os.environ.get("REDIS_HOST", "redis"),
+        password=os.environ.get("REDIS_PASSWORD", ""),
+        decode_responses=True,
+        socket_timeout=30,
+    )
+    reader = events.RunEvents(redis, prefix="brief")
+    after = "0"
+    started = time.monotonic()
+    try:
+        while time.monotonic() - started < timeout_s:
+            for event_id, kind, data in await reader.read(brief_id, after):
+                after = event_id
+                if kind == "status":
+                    print(f"  {data['detail']}", flush=True)
+                elif kind == "sections":
+                    print(f"  items: {data['counts']}", flush=True)
+                elif kind in ("brief.done", "brief.failed"):
+                    return {"kind": kind, **data}
+    finally:
+        await redis.aclose()
+    return {"kind": "timeout"}
+
+
+def _brief(day: datetime.date, edition: str, timeout_s: float) -> int:
+    """Queues the brief of ``day`` (as the owner) and follows it."""
+    owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
+    with psycopg.connect(owner.dsn()) as conn:
+        row = conn.execute(
+            "SELECT (SELECT status FROM ai.verify_run WHERE feed_date = %(d)s"
+            "        ORDER BY requested_at DESC LIMIT 1),"
+            "       (SELECT brief_id FROM ai.brief WHERE feed_date = %(d)s"
+            "        AND status IN ('QUEUED', 'RUNNING') LIMIT 1)",
+            {"d": day},
+        ).fetchone()
+        if row[0] != "DONE":
+            print(
+                f"brief: {day}: verify run {row[0] or 'missing'}; run"
+                " `make -C python verify DATE=...` first",
+                file=sys.stderr,
+            )
+            return 1
+        if row[1] is not None:
+            print(f"brief: brief {row[1]} of {day} is being written")
+            brief_id = row[1]
+        else:
+            brief_id = conn.execute(
+                "INSERT INTO ai.brief (feed_date, edition, requested_by)"
+                " VALUES (%s, %s, 'cli') RETURNING brief_id",
+                (day, edition),
+            ).fetchone()[0]
+            conn.commit()
+
+    async def queue_and_follow() -> dict[str, Any]:
+        if row[1] is None:
+            jobs = _owner_queue()
+            await jobs.start()
+            try:
+                await jobs.write_brief(brief_id)
+            finally:
+                await jobs.stop()
+            print(f"brief {day} ({edition}): {brief_id} queued", flush=True)
+        return await _follow_brief(brief_id, timeout_s)
+
+    last = asyncio.run(queue_and_follow())
+    if last.get("kind") != "brief.done":
+        print(f"brief {day}: {brief_id} {last}", file=sys.stderr)
+        return 1
+    with psycopg.connect(owner.dsn()) as conn:
+        found = conn.execute(
+            "SELECT verified, unconfirmed, pending_review, excluded,"
+            " overview_source, model, total_ms, overview"
+            " FROM ai.brief WHERE brief_id = %s",
+            (brief_id,),
+        ).fetchone()
+    print(
+        f"brief {day} ({edition}): {found[0]} verified, {found[1]}"
+        f" unconfirmed, {found[2]} pending review, {found[3]} left out;"
+        f" overview {found[4]} ({found[5] or 'code'}, {found[6]} ms)\n"
+        f"  {found[7]}"
+    )
+    return 0
+
+
 def _expire(day: datetime.date) -> int:
     """Market open: the day's pending reviews expire (the graphs resume)."""
     from ai_api import verdicts  # noqa: PLC0415
@@ -846,9 +1071,13 @@ def main(argv: list[str] | None = None) -> int:
             "llm-status",
             "verify",
             "expire",
+            "brief",
             "ml-train",
             "smoke",
         ),
+    )
+    parser.add_argument(
+        "--edition", choices=("morning", "refresh"), default="morning"
     )
     parser.add_argument("--base-url", default="http://edge:8080")
     parser.add_argument(
@@ -893,6 +1122,8 @@ def main(argv: list[str] | None = None) -> int:
             return _verify(day, args.timeout)
         if args.command == "expire":
             return _expire(day)
+        if args.command == "brief":
+            return _brief(day, args.edition, min(args.timeout, 1800))
         return _smoke(args.base_url, day)
     except (config.ConfigError, fastpath.FastpathMissingError) as error:
         print(f"configuration error: {error}", file=sys.stderr)

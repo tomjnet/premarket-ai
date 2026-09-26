@@ -1,4 +1,5 @@
 import {authHandlers} from './auth';
+import {briefHandlers} from './brief';
 import {chatHandlers} from './chat';
 import {healthHandlers} from './health';
 import {newsHandlers} from './news';
@@ -10,5 +11,6 @@ export const handlers = [
   ...newsHandlers,
   ...chatHandlers,
   ...verifyHandlers,
+  ...briefHandlers,
   ...healthHandlers,
 ];

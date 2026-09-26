@@ -54,8 +54,8 @@ export const reviewTaskWireSchema = z.object({
   source_domain: z.string(),
   tickers: z.array(z.string()),
   status: reviewStatusSchema,
-  // low_confidence, judge_disagrees, guard_unsafe, unsupported_language;
-  // later ones are shown as their text.
+  // low_confidence, judge_disagrees, guard_unsafe, unsupported_language,
+  // watchlist (increment 5); later ones are shown as their text.
   reasons: z.array(z.string()),
   ai_verdict: verdictSchema,
   ai_confidence: z.number().min(0).max(1),

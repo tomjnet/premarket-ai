@@ -105,6 +105,8 @@ def test_review_reasons():
     assert policy.review_reasons(fake, 0.7, guard_unsafe=True) == [
         "guard_unsafe"
     ]
+    # Increment 5: a FAKE verdict for a watched ticker goes to an analyst.
+    assert policy.review_reasons(fake, 0.7, watched=True) == ["watchlist"]
 
 
 def test_impact_is_relevance_times_company_size():

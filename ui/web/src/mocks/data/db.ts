@@ -11,6 +11,18 @@ import {MOCK_PASSWORD, MOCK_USERS} from './users';
 const CHAT_TOKEN_DELAY_MS = 40;
 /** How long the mock verify run takes per item. */
 const RUN_ITEM_MS = 150;
+/** How long each step of a mock brief takes (increment 5). */
+const BRIEF_STEP_MS = 400;
+
+/** A brief written with `POST /briefs` (increment 5). */
+export interface StartedBrief {
+  briefId: number;
+  date: string;
+  edition: 'morning' | 'refresh';
+  requestedBy: string;
+  /** Epoch ms: its steps come every `briefStepMs` from here. */
+  startedAt: number;
+}
 
 /** An analyst's decision on a review task (`POST /review/{id}`). */
 export interface ReviewRecord {
@@ -71,6 +83,17 @@ export class MockDb {
   chatTokenDelayMs = CHAT_TOKEN_DELAY_MS;
   /** Users with a question being answered (one at a time each). */
   readonly chatsInFlight = new Set<string>();
+  /** Answered questions (`date|question`): the semantic cache stand-in. */
+  readonly chatCache = new Set<string>();
+  /** Watchlists by username (`PUT /me/watchlist`). */
+  readonly watchlists = new Map<
+    string,
+    {tickers: string[]; sectors: string[]}
+  >();
+  /** Briefs written with `POST /briefs` in this session, oldest first. */
+  readonly startedBriefs: StartedBrief[] = [];
+  /** Pause between two progress events of a brief being written. */
+  briefStepMs = BRIEF_STEP_MS;
   /** Pause between two items of a started verify run. */
   runItemMs = RUN_ITEM_MS;
   /** Review decisions by task id (the reviewed item's id). */
@@ -91,6 +114,10 @@ export class MockDb {
     this.sessionStore = memorySessionStore();
     this.chatTokenDelayMs = CHAT_TOKEN_DELAY_MS;
     this.chatsInFlight.clear();
+    this.chatCache.clear();
+    this.watchlists.clear();
+    this.startedBriefs.length = 0;
+    this.briefStepMs = BRIEF_STEP_MS;
     this.runItemMs = RUN_ITEM_MS;
     this.reviews.clear();
     this.startedRuns.length = 0;
@@ -184,6 +211,23 @@ export class MockDb {
     };
     this.startedRuns.push(run);
     return run;
+  }
+
+  /** Starts writing a brief of `date` (ids after the generated ones). */
+  startBrief(
+    date: string,
+    edition: 'morning' | 'refresh',
+    username: string,
+  ): StartedBrief {
+    const brief = {
+      briefId: 900_000 + this.startedBriefs.length + 1,
+      date,
+      edition,
+      requestedBy: username,
+      startedAt: this.now(),
+    };
+    this.startedBriefs.push(brief);
+    return brief;
   }
 
   /** The runs started for `date`, newest first. */

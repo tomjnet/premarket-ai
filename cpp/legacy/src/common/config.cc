@@ -40,6 +40,25 @@ Status GetEnvInt(const char* name, int fallback, int min_value, int max_value,
   return OkStatus();
 }
 
+// Parses true/false (also 1/0, yes/no); empty means `fallback`.
+Status GetEnvBool(const char* name, bool fallback, bool* out) {
+  const std::string text = GetEnv(name, "");
+  if (text.empty()) {
+    *out = fallback;
+    return OkStatus();
+  }
+  if (text == "true" || text == "1" || text == "yes") {
+    *out = true;
+    return OkStatus();
+  }
+  if (text == "false" || text == "0" || text == "no") {
+    *out = false;
+    return OkStatus();
+  }
+  return InvalidArgumentError(std::string(name) +
+                              " must be true or false, got '" + text + "'");
+}
+
 bool IsLeapYear(int year) {
   return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
 }
@@ -63,6 +82,8 @@ StatusOr<Config> LoadConfigFromEnv() {
                      &config.dedup_window_days);
   if (!status.ok()) return status;
   status = GetEnvInt("LEGACY_FETCH_RETRIES", 5, 1, 50, &config.fetch_retries);
+  if (!status.ok()) return status;
+  status = GetEnvBool("LEGACY_PDF_ENABLED", true, &config.pdf_enabled);
   if (!status.ok()) return status;
   return config;
 }

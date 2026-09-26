@@ -24,6 +24,10 @@ struct Config {
   std::size_t queue_capacity;  // LEGACY_QUEUE_CAPACITY
   int dedup_window_days;       // LEGACY_DEDUP_WINDOW_DAYS
   int fetch_retries;           // LEGACY_FETCH_RETRIES
+  // LEGACY_PDF_ENABLED: false once the web brief has replaced the PDF
+  // (increment 5); `report` then writes nothing and the container only
+  // ingests.
+  bool pdf_enabled;
 };
 
 // Reads the environment and validates the numeric values.

@@ -95,7 +95,8 @@ jobs:
           --target ${{ matrix.stage }}
           --build-context fastpath=cpp/fastpath
           --build-context config=python/config
-          --build-context vendorsim=python/vendor-sim python/ai-api
+          --build-context vendorsim=python/vendor-sim
+          --build-context skills=python/skills python/ai-api
 
   # Increment 4: the MCP server (read-only tools, SSRF guard, token).
   mcp-server:

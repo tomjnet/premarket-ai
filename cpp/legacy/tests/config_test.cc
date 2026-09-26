@@ -50,6 +50,27 @@ TEST(LoadConfigTest, DefaultsAndOverrides) {
   unsetenv("LEGACY_WORKERS");
 }
 
+TEST(LoadConfigTest, PdfSwitch) {
+  unsetenv("LEGACY_PDF_ENABLED");
+  StatusOr<Config> config = LoadConfigFromEnv();
+  ASSERT_TRUE(config.ok());
+  EXPECT_TRUE(config.value().pdf_enabled);
+
+  setenv("LEGACY_PDF_ENABLED", "false", 1);
+  config = LoadConfigFromEnv();
+  ASSERT_TRUE(config.ok());
+  EXPECT_FALSE(config.value().pdf_enabled);
+
+  setenv("LEGACY_PDF_ENABLED", "1", 1);
+  config = LoadConfigFromEnv();
+  ASSERT_TRUE(config.ok());
+  EXPECT_TRUE(config.value().pdf_enabled);
+
+  setenv("LEGACY_PDF_ENABLED", "maybe", 1);
+  EXPECT_FALSE(LoadConfigFromEnv().ok());
+  unsetenv("LEGACY_PDF_ENABLED");
+}
+
 }  // namespace
 }  // namespace legacy
 }  // namespace premarket

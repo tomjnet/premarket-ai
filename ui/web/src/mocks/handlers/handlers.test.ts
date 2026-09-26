@@ -426,7 +426,9 @@ describe('chat handler', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('text/event-stream');
     const text = await response.text();
-    expect(text.startsWith('event: sources\ndata: ')).toBe(true);
+    // Increment 5: the supervisor's plan comes before the sources.
+    expect(text.startsWith('event: step\ndata: ')).toBe(true);
+    expect(text).toContain('event: sources\ndata: ');
     expect(text).toContain('event: token\n');
     expect(text.trimEnd().split('\n\n').at(-1)).toMatch(/^event: done\n/);
   });

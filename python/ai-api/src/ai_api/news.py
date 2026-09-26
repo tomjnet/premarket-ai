@@ -15,6 +15,7 @@ re-served old news and so MISLEADING.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import dataclasses
 import datetime
 import re
@@ -115,6 +116,19 @@ ORDER BY published_at DESC, id DESC
 LIMIT {_MAX_ITEMS}
 """
 )
+
+# The watchlist's check (increment 5): SEC writes BRK.B as BRK-B. `loaded`
+# is false while the registry was never downloaded.
+_REGISTRY_SQL = """
+SELECT t.ticker, EXISTS (SELECT 1 FROM ai.ticker_registry) AS loaded
+FROM unnest(%(tickers)s::text[]) AS t(ticker)
+WHERE EXISTS (
+  SELECT 1 FROM ai.ticker_registry g
+  WHERE upper(g.ticker) = replace(t.ticker, '.', '-')
+)
+UNION ALL
+SELECT NULL, EXISTS (SELECT 1 FROM ai.ticker_registry)
+"""
 
 _AI_RUN_SQL = """
 SELECT status, finished_at, items, paraphrases, conflicts, summarized,
@@ -245,6 +259,13 @@ class NewsStore(Protocol):
         """
         ...
 
+    async def known_tickers(self, tickers: Sequence[str]) -> set[str] | None:
+        """Which of ``tickers`` (as written, ``BRK.B``) are SEC-registered.
+
+        None when the registry was never downloaded (nothing to check).
+        """
+        ...
+
 
 def like_pattern(text: str) -> str:
     r"""Turns user text into an ILIKE pattern that matches it literally.
@@ -351,3 +372,15 @@ class PostgresNewsStore:
             evidence = await cur.fetchall()
         review = await self._one(_REVIEW_SQL, params)
         return found, evidence, review
+
+    async def known_tickers(self, tickers: Sequence[str]) -> set[str] | None:
+        """See ``NewsStore.known_tickers``."""
+        if not tickers:
+            return set()
+        async with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=rows.dict_row)
+            await cur.execute(_REGISTRY_SQL, {"tickers": list(tickers)})
+            found = await cur.fetchall()
+        if not found or not found[0]["loaded"]:
+            return None
+        return {row["ticker"] for row in found if row["ticker"] is not None}

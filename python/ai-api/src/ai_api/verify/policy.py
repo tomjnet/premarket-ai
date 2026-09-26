@@ -70,6 +70,7 @@ LOW_CONFIDENCE = "low_confidence"
 JUDGE_DISAGREES = "judge_disagrees"
 GUARD_UNSAFE = "guard_unsafe"
 UNSUPPORTED_LANGUAGE = "unsupported_language"
+WATCHLIST = "watchlist"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -285,6 +286,7 @@ def review_reasons(
     *,
     guard_unsafe: bool = False,
     english: bool = True,
+    watched: bool = False,
 ) -> list[str]:
     """Why an item goes to the human review queue (empty: it doesn't).
 
@@ -293,6 +295,8 @@ def review_reasons(
         min_confidence: HITL_CONFIDENCE_MIN (0.70).
         guard_unsafe: Llama Guard flagged the item.
         english: False for an item in another language.
+        watched: The verdict is FAKE or MISLEADING and a trader watches
+            one of the item's tickers (increment 5).
 
     Returns:
         The reasons, in a fixed order.
@@ -306,6 +310,8 @@ def review_reasons(
         reasons.append(GUARD_UNSAFE)
     if not english:
         reasons.append(UNSUPPORTED_LANGUAGE)
+    if watched:
+        reasons.append(WATCHLIST)
     return reasons
 
 

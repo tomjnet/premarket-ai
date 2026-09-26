@@ -25,7 +25,26 @@ Each increment is developed on its own branch, merged to `main` through a PR onc
 | 6 | `inc-6-production` | A reliable brief **before 07:30 ET** every trading day, alerts, and the vendor scorecard |
 | 7 | `inc-7-enterprise-cloud-theory` | *(Theory only)* How a large enterprise would build the same platform on **Azure, AWS and GCP** |
 
-## This branch: increment 4, AI verification
+## This branch: increment 5, agents and skills (the PDF is retired)
+Traders now read **Today's brief** on the website instead of the PDF, and **"Ask the News" is answered by a team of agents**. Everything of increment 4 (verdicts, evidence, review queue) keeps running underneath: the brief is built only from what the verification decided.
+
+- **Today's brief** (`/brief`), written by the **briefing agent** in `ai-worker` (`make -C python brief`; the 09:00 refresh with `brief-refresh`):
+  - **What goes in is a hard rule, decided by code**: VERIFIED stories that aren't waiting for an analyst, highest market impact first (**Top stories**, then **by sector**), and high-impact UNVERIFIED stories under **"Unconfirmed – watch"**. MISLEADING, FAKE and pending stories never go in; the brief only counts them.
+  - The **Brief Writer** writes a short **overview** of the top stories, citing them `[1]`, with the `premarket-brief-format` skill. It uses the **cloud model** (`BRIEF_MODEL=cloud-openai`, within the monthly budget) and falls back to the local model. The overview must cite only the brief's verified items and give no advice; one rewrite, then a deterministic overview written by code.
+  - The page follows the brief as it is written (**server-sent events**: the chosen items, then the checked overview), shows **your watchlist's stories first**, links each story to its primary source (the 8-K) and its detail page, and ends with "Decision support only, not investment advice."
+  - The **09:00 refresh** adds the stories analysts approved since 07:15, marked NEW.
+- **Multi-agent chat** (LangGraph): a **Supervisor** picks up to two specialists for a question, each a ReAct agent with an allowlist of the MCP server's read-only tools:
+  - **Fact-Checker**: `list_news`, `get_verification`, `lookup_company`, `get_source_reputation`, `search_news`, `web_search`, `fetch_url`;
+  - **Market Analyst**: `get_price_history`, `search_news`, `lookup_company`;
+  - **Brief Writer**: `get_brief`.
+  What they found (tool results, never their own words) becomes numbered sources next to the SEC filings and Fed/SEC releases; the answer keeps increment 3's checks (citations, no advice, Llama Guard). The page shows **how the agents worked** on each question.
+- **Agent Skills** (`python/skills/*/SKILL.md`): `fact-check-methodology`, `source-credibility-rules`, `premarket-brief-format`, `vendor-scorecard`. Agents see each skill's one-line description and load the full text with the `load_skill` tool when they need it (progressive disclosure). The same folders work in Claude Code and Claude Desktop.
+- **Long-term memory** (LangGraph store in Postgres, schema `memory`): each user's **watchlist** of tickers and sectors (`/watchlist`). It orders the brief, tells the agents what "my watchlist" means, and completes the human-in-the-loop policy: a **FAKE or MISLEADING verdict for a watched ticker goes to an analyst**.
+- **Semantic answer cache** (RedisVL `SemanticCache`): the same question about the same date (cosine distance ≤ 0.05, and the same companies named) is answered from the cache for 15 minutes, without retrieval, agents or a model call.
+- **MCP server:** two more read-only tools, `list_news(date, ticker, verdict)` and `get_brief(date)`.
+- **The PDF is retired:** `LEGACY_PDF_ENABLED=false` (the default now). The legacy container only ingests; its `report` command writes nothing. Set it to `true` to bring the PDF back for a before/after comparison. Every view of the brief is audited (`make -C python brief-usage` shows who read it).
+
+## Increment 4, AI verification (still running)
 Every unique story now gets one of **four verdicts**, **VERIFIED**, **UNVERIFIED**, **MISLEADING** or **FAKE**, with the **evidence** behind it. Items the AI isn't sure about wait in a **review queue** for an analyst. Deterministic rules decide whatever they can (a ticker that doesn't exist, a spoofed source); an **LLM judge** decides only the uncertain middle, and must cite the evidence it used. Increment 3 (summaries, sentiment, "Ask the News") keeps running, and the rules still run first, so no model ever sees a duplicate.
 
 - **LangGraph `verify_news`**, one graph per unique item, run by the new **`ai-worker`**:
@@ -86,6 +105,17 @@ Increment 4 adds:
 | **Cloud budget** | Escalation is off by default. When on, the month's spend is tracked in Redis from the gateway's cost header; at the $20 cap (`LLM_MONTHLY_BUDGET_USD`) everything stays local. |
 | **New services** | ai-worker and mcp-server run with a read-only root filesystem, no Linux capabilities and no privilege escalation; SearXNG drops every capability and publishes no port. |
 
+Increment 5 adds:
+
+| Layer | Protection |
+|---|---|
+| **Agents with tools** | Each specialist gets only its allowlist of read-only MCP tools and at most 3 tool calls per question; there are no write tools anywhere. Tool results are sanitized (instruction-like sentences removed, emails and phones masked) and reach the writer only inside data tags. The answer cites tool results, never a specialist's own words. |
+| **The brief** | Which stories go in is decided by code, never by a model: no FAKE, MISLEADING or pending story can reach it. The overview must cite existing items and give no advice (one rewrite, then a deterministic overview); the page renders it as text only. |
+| **Memory** | A user can only read and replace their own watchlist; tickers must be in the SEC registry, sectors in the universe, 25 tickers at most. The edge allows `PUT` only on `/api/me/watchlist`. Every change is audited. |
+| **Cache** | The semantic cache never serves personal questions ("my watchlist", "should I…") or refusals, needs the same companies named, and never serves an answer older than 15 minutes. It lives in Redis only. |
+| **Least privilege** | The API's role gains the store's tables (`memory`), reading `ai.brief` and queuing a brief; the worker's role writes briefs and reads the watchlists; the MCP role reads `ai.brief`. |
+| **Cloud** | The brief is the only default cloud call (about one per edition), inside the $20 monthly cap; without an `OPENAI_API_KEY` or at the cap it stays local. |
+
 ### Project structure
 ```
 premarket-ai/
@@ -93,7 +123,7 @@ premarket-ai/
 ├── .env.example              # settings; `make -C python env` creates .env with random secrets
 ├── .github/workflows/        # ci.yml: hosted CI (every Containerfile stage, rule eval, UI); gpu-evals.yml: self-hosted GPU eval
 ├── cpp/
-│   ├── legacy/               # C++11 legacy app: ingest + PDF report (unchanged, still running)
+│   ├── legacy/               # C++11 legacy app: ingest (still running) + PDF report (retired: LEGACY_PDF_ENABLED)
 │   ├── ingest/               # C++20 low-latency ingester (shadow run + parity check against legacy)
 │   └── fastpath/             # C++20 nanobind module premarket_fastpath, built into the ai-api image
 ├── python/
@@ -101,8 +131,10 @@ premarket-ai/
 │   ├── config/               # lab universe (50 companies) and source reputation seed
 │   ├── vendor-sim/           # the synthetic news vendor (FastAPI) + pytest tests
 │   ├── mcp-server/           # the MCP server (FastMCP): read-only tools, SSRF-safe fetch, Redis cache + pytest tests
+│   ├── skills/               # Agent Skills (SKILL.md folders): fact-check, source credibility, brief format, vendor scorecard
 │   └── ai-api/               # the new backend (FastAPI) and the verification worker (same code)
-│       ├── src/ai_api/       #   routes/ (auth, news, chat, runs, review), migrations/ (Alembic), cli (init, rules, enrich, verify, expire, corpus, smoke)
+│       ├── src/ai_api/       #   routes/ (auth, news, chat, runs, review, briefs, me), migrations/ (Alembic), memory (watchlists), cli (init, rules, enrich, verify, brief, expire, corpus, smoke)
+│       │   ├── agents/       #   the chat supervisor and its specialists, the briefing agent, the skills loader
 │       │   ├── verify/       #   the LangGraph verify_news graph: checks, verdict policy, LLM judge, tools, coordinator
 │       │   ├── worker/       #   the job queue (taskiq on Redis Streams) and the ai-worker's tasks
 │       │   ├── ml/           #   classic ML baseline: FinBERT, the DistilBERT verdict classifier and its training
@@ -111,18 +143,18 @@ premarket-ai/
 │       │   ├── llm/          #   gateway settings, LangChain model factory, Langfuse tracing
 │       │   ├── guard/        #   sanitize, injection heuristics, language, spotlighting, output checks
 │       │   ├── enrich/       #   extract + summary + sentiment: prompts, chains, the AI run
-│       │   └── rag/          #   trusted corpus sources, chunking, ChromaDB store, reranker, Ask the News
-│       ├── tests/            #   pytest: auth, news contract, dedup, rules, guard, L3, enrich, RAG, chat, verify, runs/review, parity
+│       │   └── rag/          #   trusted corpus sources, chunking, ChromaDB store, reranker, Ask the News, semantic answer cache
+│       ├── tests/            #   pytest: auth, news contract, dedup, rules, guard, L3, enrich, RAG, chat, verify, runs/review, agents, brief, memory, parity
 │       └── evals/            #   rule eval, L3 + guard eval, verdict eval (v2), model benchmark, RAG eval, datasets, baselines
 ├── ui/
 │   ├── Makefile              # UI task runner: install, dev, test, lint, build, check, e2e
-│   └── web/                  # React + Vite + TypeScript website (feed, detail, Ask the News, Review queue), mock backend
+│   └── web/                  # React + Vite + TypeScript website (Today's brief, feed, detail, Ask the News, My watchlist, Review queue), mock backend
 ├── sql/                      # PostgreSQL init scripts: legacy schema + seed, the C++20 ingest schema
 ├── podman/
 │   ├── legacy/Containerfile      # stages: build, test, lint, asan, tsan, bench, runtime
 │   ├── ingest/Containerfile      # the same stages, for the C++20 ingester
 │   ├── vendor-sim/Containerfile  # stages: test, lint, runtime
-│   ├── ai-api/Containerfile      # stages: fastpath-*, test, lint, eval, ml-base, ai-eval, worker, runtime
+│   ├── ai-api/Containerfile      # stages: fastpath-*, test, lint, eval, ml-base, ai-eval, worker, runtime (with python/skills)
 │   ├── mcp-server/Containerfile  # stages: test, lint, runtime
 │   ├── web/Containerfile         # Node build of the UI -> unprivileged nginx with the static files
 │   └── config/
@@ -146,6 +178,7 @@ Increment 3 and later need **the GPU host** with Ollama and the models. Incremen
 5. `SEC_USER_AGENT` (a name and a contact email) is now needed for the trusted corpus too.
 6. Optional: `OPENAI_API_KEY` (and `ANTHROPIC_API_KEY` / `GEMINI_API_KEY`) for the cloud aliases. Increment 4 uses the cloud only if you also set `JUDGE_CLOUD_MODEL=cloud-openai` (escalation of uncertain verdicts, capped by `LLM_MONTHLY_BUDGET_USD`).
 7. Increment 4: run `make -C python env` again. It adds the new settings and generates `WORKER_DB_PASSWORD`, `MCP_DB_PASSWORD`, `MCP_SERVICE_TOKEN` and `SEARXNG_SECRET`.
+8. Increment 5: run `make -C python env` once more. It adds `LEGACY_PDF_ENABLED=false`, `BRIEF_MODEL`, and the chat agent and cache settings; nothing new to install. The brief is written by OpenAI when `OPENAI_API_KEY` is set (about a tenth of a cent per edition), else by the local model; `BRIEF_MODEL=` (empty) keeps it local.
 
 The first `up` downloads the gateway (about 2 GB), ChromaDB, text-embeddings-inference and the reranker model (about 1 GB, into the `hf-models` volume). Increment 4 adds SearXNG (about 200 MB) and builds the worker image with CPU-only PyTorch (about 1.5 GB); the worker downloads FinBERT (about 440 MB) into the `ml-models` volume the first time it runs, and `ml-train` downloads DistilBERT (about 260 MB). The first `corpus` downloads about 600 documents from SEC and the Fed (about 20 minutes, most of it embedding 5,000 chunks on the GPU host).
 
@@ -159,8 +192,8 @@ This runs:
 podman build -f podman/vendor-sim/Containerfile --target runtime --build-context config=python/config -t localhost/premarket-ai/vendor-sim:dev python/vendor-sim
 podman build -f podman/legacy/Containerfile     --target runtime -t localhost/premarket-ai/legacy:dev cpp/legacy
 podman build -f podman/ingest/Containerfile     --target runtime -t localhost/premarket-ai/ingest:dev cpp/ingest
-podman build -f podman/ai-api/Containerfile     --target runtime --build-context fastpath=cpp/fastpath --build-context config=python/config --build-context vendorsim=python/vendor-sim -t localhost/premarket-ai/ai-api:dev python/ai-api
-podman build -f podman/ai-api/Containerfile     --target worker --build-context fastpath=cpp/fastpath --build-context config=python/config --build-context vendorsim=python/vendor-sim -t localhost/premarket-ai/ai-api:worker python/ai-api
+podman build -f podman/ai-api/Containerfile     --target runtime --build-context fastpath=cpp/fastpath --build-context config=python/config --build-context vendorsim=python/vendor-sim --build-context skills=python/skills -t localhost/premarket-ai/ai-api:dev python/ai-api
+podman build -f podman/ai-api/Containerfile     --target worker --build-context fastpath=cpp/fastpath --build-context config=python/config --build-context vendorsim=python/vendor-sim --build-context skills=python/skills -t localhost/premarket-ai/ai-api:worker python/ai-api
 podman build -f podman/mcp-server/Containerfile --target runtime --build-context config=python/config -t localhost/premarket-ai/mcp-server:dev python/mcp-server
 podman build -f podman/web/Containerfile        --target runtime -t localhost/premarket-ai/web:dev ui/web
 ```
@@ -171,14 +204,17 @@ The gateway, ChromaDB, the reranker, SearXNG and Langfuse are upstream images, p
 make -C python up                         # everything: ingesters, website, gateway, chroma, reranker, worker, MCP, SearXNG
 make -C python demo DATE=2026-09-25       # a whole day (see below), then the website check
 ```
-`demo` runs, for each of the 5 days before `DATE`: both ingesters, the parity check and the rules. Then `corpus` (only new documents are fetched), and for `DATE`: ingesters, parity, rules, **enrich**, **verify**, the PDF, and `smoke`. `verify` queues the run and prints each verdict as the worker decides it. On the GTX 1650, `enrich` takes about 14 minutes for 88 unique items, and `verify` takes about 25 seconds per item while it shares the GPU (roughly 35 minutes for the day).
+`demo` runs, for each of the 5 days before `DATE`: both ingesters, the parity check and the rules. Then `corpus` (only new documents are fetched), and for `DATE`: ingesters, parity, rules, **enrich**, **verify**, **brief**, and `smoke` (the PDF steps `report` and `pdf` run only with `LEGACY_PDF_ENABLED=true`). `verify` queues the run and prints each verdict as the worker decides it; `brief` prints the brief's counts and overview. On the GTX 1650, `enrich` takes about 14 minutes for 88 unique items, and `verify` takes about 25 seconds per item while it shares the GPU (roughly 35 minutes for the day); the brief takes seconds with the cloud model, about a minute locally.
 
-Open **http://localhost:8080**, log in as `trader1`, `analyst1` or `admin1` with the `DEMO_USER_PASSWORD` from `.env`, and pick the demo date. Each story shows its **verdict**, AI summary and sentiment; filter by verdict or "Pending review"; the detail page shows how the verdict was reached, with the numbered evidence; **Ask the News** answers questions with links to the sources. As `analyst1`, open **Review queue**: approve or change the verdicts the AI wasn't sure about, or press **Verify this date** and watch the run.
+Open **http://localhost:8080**, log in as `trader1`, `analyst1` or `admin1` with the `DEMO_USER_PASSWORD` from `.env`, and pick the demo date. **Today's brief** is the page that replaces the PDF: the overview, the top stories, every verified story by sector, "Unconfirmed – watch", and what was left out. Set up **My watchlist** (tickers and sectors) and its stories come first. The **News feed** shows every story with its **verdict**, AI summary and sentiment; the detail page shows how the verdict was reached. **Ask the News** shows how the agents worked on each question ("Why is NVDA flagged today?" asks the Fact-Checker; "Did NVDA shares move?" the Market Analyst), then the answer with its numbered sources; ask the same question again and it comes from the cache. As `analyst1`, open **Review queue** to approve or change verdicts, then **Refresh with reviewed items** on Today's brief (the 09:00 edition).
 
 More tasks (the date defaults to today in New York; `up` must have run first):
 ```bash
 make -C python enrich DATE=2026-09-25     # first AI for a date: L3, summaries, sentiment (re-running replaces them)
 make -C python verify DATE=2026-09-25     # AI verification of a date (after enrich); re-running replaces the verdicts
+make -C python brief DATE=2026-09-25      # the pre-market brief of a date (after verify); EDITION=refresh for 09:00
+make -C python brief-refresh DATE=2026-09-25 # the 09:00 refresh: adds the stories approved since
+make -C python briefs | brief-usage       # the last briefs; who opened the brief, per day (the PDF retirement check)
 make -C python demo-open DATE=2026-09-25  # market open: pending reviews expire
 make -C python verify-runs | review-queue # the last verify runs; the pending reviews by impact
 make -C python mcp-tools                  # the MCP server's tools (TOOL=… ARGS='{…}' make -C python mcp-call)
@@ -199,25 +235,25 @@ make -C ui dev VITE_API_MODE=live         # UI dev server against the running st
 |---|---|---|
 | edge | `http://edge:8080`: `/` → web-1/web-2, `/api/*` → ai-api | **`127.0.0.1:8080`** (`WEB_BIND`, `WEB_PORT`) |
 | web-1, web-2 | `http://web-1:8080`, `http://web-2:8080` (static UI) | none |
-| ai-api | `http://ai-api:8000` (`/auth/*`, `/news`, `/news/{id}`, `/chat`, `/runs`, `/runs/{id}/events`, `/review`, `/health`) | none |
-| ai-api-init | one-shot: migrations, roles, demo users; also runs `rules`, `enrich`, `verify`, `expire`, `corpus`, `registry`, `smoke` | none |
-| ai-worker | taskiq worker on the Redis Stream `premarket:verify`: the LangGraph verify graph | none |
+| ai-api | `http://ai-api:8000` (`/auth/*`, `/news`, `/news/{id}`, `/chat`, `/runs`, `/runs/{id}/events`, `/review`, `/briefs/today`, `/briefs`, `/me/watchlist`, `/health`) | none |
+| ai-api-init | one-shot: migrations, roles, demo users; also runs `rules`, `enrich`, `verify`, `brief`, `expire`, `corpus`, `registry`, `smoke` | none |
+| ai-worker | taskiq worker on the Redis Stream `premarket:verify`: the LangGraph verify graph and the briefing agent | none |
 | mcp-server | `http://mcp-server:8000/mcp` (streamable HTTP, `Authorization: Bearer <MCP_SERVICE_TOKEN>`) | **`127.0.0.1:8765`** (`MCP_BIND`, `MCP_PORT`) |
 | searxng | `http://searxng:8080` (web search, JSON; only mcp-server calls it) | none |
 | llm-gateway | `http://llm-gateway:4000/v1` (LiteLLM, key `sk-<LLM_GATEWAY_KEY>`) → Ollama on the GPU host | none |
 | chroma | `http://chroma:8000`: collection `trusted_corpus` | none |
 | reranker | `http://reranker:8080/rerank` (bge-reranker-base, CPU) | none |
-| redis | `redis:6379` (password): sessions, dedup index L0-L3, rate limits, chat lock, job queue, run events, tool cache, cloud budget | none |
+| redis | `redis:6379` (password): sessions, dedup index L0-L3, rate limits, chat lock, job queue, run and brief events, tool cache, semantic answer cache, cloud budget | none |
 | postgres | `postgres:5432`, database `premarket` | none |
 | vendor-sim | `http://vendor-sim:8080/feed?date=YYYY-MM-DD` | none |
-| legacy | supercronic (05:30 ET, Mon–Fri): C++11 ingest + PDF | none |
+| legacy | supercronic (05:30 ET, Mon–Fri): C++11 ingest (+ the PDF only with `LEGACY_PDF_ENABLED=true`) | none |
 | ingest | supercronic (05:30 ET ingest, 05:35 ET parity, Mon–Fri): C++20 ingester | none |
 | langfuse-web (+ worker, db, clickhouse, minio, redis) | profile `observability` | `127.0.0.1:3000` (`LANGFUSE_PORT`) |
 
 | Demo login | Role |
 |---|---|
 | `trader1` | TRADER |
-| `analyst1` | ANALYST: the trader's pages plus the **Review queue** |
+| `analyst1` | ANALYST: the trader's pages plus the **Review queue** and writing the brief again |
 | `admin1` | ADMIN: the same as ANALYST for now |
 
 **Password of the demo logins.** All three users share one password, the value of `DEMO_USER_PASSWORD` in `.env` (default `premarket-demo-2026`, copied from `.env.example`). It must have at least 12 characters, so a short word like `demo` never works. To see yours:
@@ -228,7 +264,7 @@ To change it, edit `DEMO_USER_PASSWORD` in `.env` and run `make -C python up`: e
 
 ### Test
 ```bash
-make -C python test         # pytest (vendor-sim, ai-api incl. verify graph, runs, review, mcp-server) + GoogleTest
+make -C python test         # pytest (vendor-sim, ai-api incl. verify graph, agents, brief, memory, mcp-server) + GoogleTest
 make -C python lint         # ruff + clang-format, cpplint, clang-tidy (all 3 C++ projects)
 make -C python sanitizers   # GoogleTest under ASan + UBSan (legacy, ingest, fastpath) and TSan (legacy, ingest)
 make -C python eval         # rule eval + rules-only verdict eval on the seed-42 golden set (no GPU)
@@ -242,6 +278,16 @@ make -C ui e2e              # UI in Chromium (Playwright): every mock scenario, 
 `eval-ai` embeds the golden set's unique items (seed 42, 2026-09-17 to 25) and gates on 2026-09-24/25: paraphrase recall ≥ 0.85, L3 precision and link accuracy ≥ 0.95, INJECTION_ATTEMPT recall 1.0 and precision ≥ 0.95, no English item flagged as another language, and no metric more than 2 points below `python/ai-api/evals/ai_baseline.json`. First result: every gated metric 1.0. The GPU evals also run on the protected self-hosted runner (push to `main`, by hand, nightly).
 
 `eval` also runs the verdict eval without any model (rules only, on hosted CI) and `eval-ai` runs it with L3, the judge and the DistilBERT baseline. The verdict gates: FAKE recall ≥ 0.85 and precision ≥ 0.90, macro-F1 ≥ 0.75, every injection item flagged, no tool called with injected text, and nothing more than 2 points below `python/ai-api/evals/verify_baseline.json`. First result (rules only, 200 items): every verdict right; the report lists the rules-only, hybrid and DistilBERT scores side by side.
+
+**Done when** (increment 5): traders use the brief instead of the PDF, and the PDF is switched off.
+1. `make -C python demo DATE=2026-09-25` writes the brief and ends with **`47/47 checks passed`** from `smoke`, which adds to the increment 4 checks:
+   - a brief is DONE for the date, and a trader reads it through `GET /briefs/today`
+   - **no FAKE, MISLEADING or pending story is in it**; "Unconfirmed – watch" holds only UNVERIFIED stories; the overview cites its items and gives no advice
+   - **the PDF is switched off** (`LEGACY_PDF_ENABLED=false`)
+   - a saved watchlist shows its stories in the brief (long-term memory)
+   - the same chat question again comes **from the semantic cache**, and a question about a flagged ticker streams the **agents' steps**
+2. The brief is used: `make -C python brief-usage` lists the traders who opened it for each demo day. The plan is 10 demo days (2 weeks) of brief next to the PDF (`LEGACY_PDF_ENABLED=true`), then the switch.
+3. `make -C python test lint sanitizers eval` and `make -C ui check` pass with zero warnings.
 
 **Done when** (increment 4):
 1. `make -C python demo DATE=2026-09-25` ends with **`38/38 checks passed`** from `smoke`, which adds to the increment 3 checks:
@@ -426,7 +472,7 @@ flowchart LR
 ```
 
 ### Increment 5: Agents and Skills (PDF retired)
-Agents write the pre-market brief from verified news. After a 2-week parallel run, the PDF is switched off.
+The briefing agent writes Today's brief from verified news only; a supervisor and three specialists answer the chat with MCP tools and skills. After a 2-week parallel run, the PDF is switched off.
 
 ```mermaid
 flowchart LR
@@ -434,29 +480,35 @@ flowchart LR
   classDef old fill:#f3f4f6,stroke:#9ca3af,color:#374151
   classDef retired fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,stroke-dasharray: 5 5
 
-  PG[("PostgreSQL<br/>verified news")]:::old
-  SUP["Supervisor agent"]:::new
-  FC["Fact-Checker"]:::new
-  MA["Market-Analyst"]:::new
-  BW["Brief-Writer"]:::new
-  SK["Agent Skills"]:::new
-  MEM[("Memory<br/>watchlists · preferences")]:::new
+  PG[("PostgreSQL<br/>verdicts · ai.brief")]:::old
+  BRIEF["ai-worker: briefing agent<br/>code picks VERIFIED + watch items<br/>→ Brief Writer overview → checks"]:::new
+  CHAT["ai-api /chat"]:::old
   SEMC[("Redis<br/>semantic cache")]:::new
-  MCP["mcp-server"]:::old
-  WEB["web: Today's Brief (SSE)<br/>+ multi-agent chat"]:::new
+  SUP["Supervisor<br/>(LangGraph)"]:::new
+  FC["Fact-Checker"]:::new
+  MA["Market Analyst"]:::new
+  BW["Brief Writer"]:::new
+  SK["Agent Skills<br/>SKILL.md · load_skill"]:::new
+  MEM[("Memory: LangGraph store<br/>watchlists")]:::new
+  MCP["mcp-server<br/>+ list_news · get_brief"]:::old
+  WEB["web: Today's brief (SSE) ·<br/>My watchlist · agent steps"]:::new
   REP["legacy report → PDF"]:::retired
   T(["Trader"])
 
-  PG --> SUP
+  PG --> BRIEF --> PG
+  CHAT <--> SEMC
+  CHAT --> SUP
   SUP --> FC
   SUP --> MA
   SUP --> BW
   FC <--> MCP
   MA <--> MCP
-  SK -. guides .-> SUP
-  SUP <--> MEM
-  SUP <--> SEMC
-  BW --> WEB --> T
+  BW <--> MCP
+  SK -. guides .-> FC
+  SK -. guides .-> BRIEF
+  MEM --> SUP
+  MEM --> WEB
+  PG --> WEB --> T
   PG -.-x REP
 ```
 

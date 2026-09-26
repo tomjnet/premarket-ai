@@ -8,7 +8,9 @@ from typing import Annotated, Protocol
 
 import fastapi
 
+from ai_api import briefs as briefs_lib
 from ai_api import config
+from ai_api import memory as memory_lib
 from ai_api import news
 from ai_api import sessions
 from ai_api import tokens
@@ -34,6 +36,10 @@ class Jobs(Protocol):
         self, run_id: int, news_id: int, thread_id: str, decision: dict
     ) -> None:
         """Queues the resume of a graph waiting for review."""
+        ...
+
+    async def write_brief(self, brief_id: int) -> None:
+        """Queues a brief (increment 5)."""
         ...
 
 
@@ -64,6 +70,10 @@ class Services:
         verdicts: Verify runs and the review queue (increment 4).
         queue: The job queue of the verification worker.
         run_events: Run progress (Redis Streams).
+        briefs: The pre-market briefs (increment 5).
+        brief_events: A brief's progress (Redis Streams, ``brief:*``).
+        memory: Users' watchlists (the LangGraph store).
+        sectors: The lab universe's GICS sectors (the watchlist's choices).
     """
 
     settings: config.Settings
@@ -76,6 +86,10 @@ class Services:
     verdicts: verdicts_lib.VerdictStore | None = None
     queue: Jobs | None = None
     run_events: events_lib.RunEvents | None = None
+    briefs: briefs_lib.BriefStore | None = None
+    brief_events: events_lib.RunEvents | None = None
+    memory: memory_lib.Memory | None = None
+    sectors: tuple[str, ...] = ()
 
 
 def get_services(request: fastapi.Request) -> Services:

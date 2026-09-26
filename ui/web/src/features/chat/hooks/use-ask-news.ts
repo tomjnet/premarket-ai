@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useState} from 'react';
 
 import {askNews} from '@/api/chat';
-import type {ChatDone, ChatSources} from '@/api/schemas/chat';
+import type {ChatDone, ChatSources, ChatStep} from '@/api/schemas/chat';
 import {useSession} from '@/features/auth/session-context';
 
 import {chatErrorMessage} from '../chat';
@@ -13,6 +13,8 @@ export interface ChatTurn {
   /** The feed date whose vendor items the answer may cite. */
   date: string;
   status: 'answering' | 'done' | 'failed' | 'cancelled';
+  /** What the multi-agent team did (increment 5), in order. */
+  steps: ChatStep[];
   /** The numbered sources, once the `sources` event arrived. */
   sources?: ChatSources;
   /** The text streamed so far (replaced by `done.answer` at the end). */
@@ -60,7 +62,7 @@ export function useAskNews() {
         );
       setTurns(all => [
         ...all,
-        {id, question, date, status: 'answering', streamed: ''},
+        {id, question, date, status: 'answering', steps: [], streamed: ''},
       ]);
       let finished = false;
       try {
@@ -69,7 +71,9 @@ export function useAskNews() {
           {client, signal: controller.signal},
         );
         for await (const event of events) {
-          if (event.type === 'sources') {
+          if (event.type === 'step') {
+            update(turn => ({...turn, steps: [...turn.steps, event.data]}));
+          } else if (event.type === 'sources') {
             update(turn => ({...turn, sources: event.data}));
           } else if (event.type === 'token') {
             update(turn => ({...turn, streamed: turn.streamed + event.text}));

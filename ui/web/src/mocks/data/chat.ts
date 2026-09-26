@@ -2,6 +2,7 @@ import type {
   ChatDoneWire,
   ChatSourceWire,
   ChatSourcesWire,
+  ChatStep,
 } from '@/api/schemas/chat';
 import type {NewsDetailWire} from '@/api/schemas/news';
 import {addDays, previousTradingDate} from '@/lib/time';
@@ -23,6 +24,11 @@ const SNIPPET_CHARS = 200;
 
 const ADVICE = /\b(?:buy|sell|hold|price target|should i|invest in)\b/i;
 const INJECTION = /ignore (?:all |any )?(?:previous|prior) instructions/i;
+/** The supervisor's keyword routing (increment 5), as the backend's. */
+const FACT_CHECK =
+  /\b(?:fake|flag\w*|verif\w*|verdict|real|mislead\w*|spoof\w*|why)\b/i;
+const MARKET = /\b(?:price|prices|shares?|stocks?|jump\w*|fell|move\w*)\b/i;
+export const AGENTS_PROMPT_VERSION = 'ask-v1+agents-v1';
 
 /** The backend's answer when a question asks for investment advice. */
 export const REFUSAL =
@@ -30,6 +36,8 @@ export const REFUSAL =
 
 /** Everything the mock streams for one question. */
 export interface MockAnswer {
+  /** The team's progress (increment 5), sent before the sources. */
+  steps: ChatStep[];
   sources: ChatSourcesWire;
   /** The model's raw text, streamed as `token` events. */
   tokens: string[];
@@ -144,6 +152,105 @@ function vendorSources(
     }));
 }
 
+interface Team {
+  steps: ChatStep[];
+  agents: string[];
+  sources: Array<Omit<ChatSourceWire, 'n'>>;
+}
+
+/**
+ * The supervisor's team (increment 5): the Fact-Checker for a question
+ * about flags or verdicts, the Market Analyst for one about prices, each
+ * only when the question names a company. Their tool results are sources.
+ */
+function teamWork(
+  question: string,
+  company: Company | undefined,
+  items: readonly NewsDetailWire[],
+  date: string,
+): Team {
+  const team: Team = {steps: [], agents: [], sources: []};
+  const factCheck = company !== undefined && FACT_CHECK.test(question);
+  const market = company !== undefined && MARKET.test(question);
+  const titles = [
+    ...(factCheck ? ['Fact-Checker'] : []),
+    ...(market ? ['Market Analyst'] : []),
+  ];
+  team.steps.push({
+    agent: 'supervisor',
+    title: 'Supervisor',
+    action: 'plan',
+    detail: `Asking ${titles.join(', ') || 'no specialist'}`,
+  });
+  if (company === undefined) {
+    return team;
+  }
+  if (factCheck) {
+    const about = items.filter(
+      item =>
+        !item.is_dup &&
+        item.verdict !== null &&
+        item.tickers.includes(company.ticker),
+    );
+    const verdicts = about
+      .map(item => `${item.vendor_item_id} ${item.verdict ?? ''}`)
+      .join(', ');
+    team.steps.push(
+      {
+        agent: 'fact_checker',
+        title: 'Fact-Checker',
+        action: 'tool',
+        detail: `list_news(date=${date}, ticker=${company.ticker})`,
+      },
+      {
+        agent: 'fact_checker',
+        title: 'Fact-Checker',
+        action: 'done',
+        detail: '1 tool results',
+      },
+    );
+    team.agents.push('fact_checker');
+    team.sources.push({
+      kind: 'verification',
+      trusted: true,
+      title: `premarket-ai verdicts: ${company.ticker}`,
+      url: '',
+      published_at: null,
+      ticker: company.ticker,
+      snippet: snippet(
+        `${about.length} items about ${company.ticker} on ${date}: ${verdicts || 'none verified'}.`,
+      ),
+    });
+  }
+  if (market) {
+    team.steps.push(
+      {
+        agent: 'market_analyst',
+        title: 'Market Analyst',
+        action: 'tool',
+        detail: `get_price_history(ticker=${company.ticker}, days=10)`,
+      },
+      {
+        agent: 'market_analyst',
+        title: 'Market Analyst',
+        action: 'done',
+        detail: '1 tool results',
+      },
+    );
+    team.agents.push('market_analyst');
+    team.sources.push({
+      kind: 'prices',
+      trusted: true,
+      title: `Price history (Yahoo Finance): ${company.ticker}`,
+      url: '',
+      published_at: null,
+      ticker: company.ticker,
+      snippet: `Daily closes of ${company.ticker} for the last 10 trading days; the largest daily move was 1.8%. (Synthetic text for the mock.)`,
+    });
+  }
+  return team;
+}
+
 /** Text split into small pieces, as a model streams it. */
 function toTokens(text: string): string[] {
   return text.match(/\S+\s*/g) ?? [];
@@ -159,12 +266,16 @@ export function mockAnswer(
   date: string,
 ): MockAnswer {
   const companies = companiesIn(question).slice(0, 1);
+  const [company] = companies;
+  const team = teamWork(question, company, items, date);
   const numbered = [
     ...trustedSources(companies, date),
     ...vendorSources(companies, items),
+    ...team.sources,
   ].map((source, index) => ({...source, n: index + 1}));
-  const [company] = companies;
-  const vendor = numbered.find(source => !source.trusted);
+  const vendor = numbered.find(source => source.kind === 'vendor');
+  const verdicts = numbered.find(source => source.kind === 'verification');
+  const prices = numbered.find(source => source.kind === 'prices');
   let text: string;
   if (company === undefined) {
     text =
@@ -179,6 +290,12 @@ export function mockAnswer(
       text += `The vendor reports a newer story about ${company.short} [${vendor.n}], which no filing confirms yet.`;
     } else {
       text += `No vendor item for ${date} mentions ${company.short}.`;
+    }
+    if (verdicts !== undefined) {
+      text += ` premarket-ai's verdicts on the day's ${company.short} items are listed in [${verdicts.n}].`;
+    }
+    if (prices !== undefined) {
+      text += ` Its shares moved less than 2% a day over the last two weeks [${prices.n}].`;
     }
   }
   // The model's text may cite a source that doesn't exist ([7], [9]):
@@ -205,6 +322,7 @@ export function mockAnswer(
   );
   const citations = refused ? [] : cited;
   return {
+    steps: team.steps,
     sources: {sources: numbered, reranked: true},
     tokens: toTokens(text),
     done: {
@@ -214,8 +332,11 @@ export function mockAnswer(
       refused,
       injection_flagged: INJECTION.test(question),
       model: CHAT_MODEL,
-      prompt_version: CHAT_PROMPT_VERSION,
+      prompt_version:
+        team.agents.length > 0 ? AGENTS_PROMPT_VERSION : CHAT_PROMPT_VERSION,
       elapsed_ms: 1800 + [...question].length * 7,
+      agents: team.agents,
+      cached: false,
     },
   };
 }

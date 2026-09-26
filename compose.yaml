@@ -10,6 +10,11 @@
 # Increment 4 (AI verification): the verification worker (ai-worker, a
 # taskiq queue on Redis Streams running the LangGraph verify_news graph),
 # the MCP server with its read-only tools, and SearXNG for web search.
+# Increment 5 (agents and skills): no new service. ai-api's chat gets a
+# supervisor with three specialists (MCP tools, Agent Skills from
+# python/skills), a semantic answer cache in Redis and long-term memory
+# (watchlists, LangGraph store in Postgres); ai-worker writes the pre-market
+# brief; the legacy PDF is switched off (LEGACY_PDF_ENABLED=false).
 # Profiles: legacy (inc 0+), ai (inc 1+), observability (inc 3+), full.
 #   podman compose --profile legacy --profile ai up -d
 # Ollama is not a service: it runs on the GPU host (OLLAMA_BASE_URL).
@@ -19,11 +24,12 @@
 #   browser -> edge (rate limits, security headers, load balancing)
 #                ├── /      -> web-1 | web-2   (static UI)
 #                └── /api/  -> ai-api          (auth, news, chat, runs,
-#                                                review)
+#                                                review, briefs, me)
 #                                -> postgres, redis, chroma, reranker,
 #                                   llm-gateway -> Ollama on the GPU host
 #   ai-api --(jobs: Redis Stream)--> ai-worker --> mcp-server --> searxng,
 #                                                  postgres, chroma, Yahoo
+#   ai-api (chat agents) --------------------------> mcp-server
 
 name: premarket-ai
 
@@ -145,6 +151,9 @@ services:
       LEGACY_WORKERS: ${LEGACY_WORKERS:-4}
       LEGACY_QUEUE_CAPACITY: ${LEGACY_QUEUE_CAPACITY:-64}
       LEGACY_DEDUP_WINDOW_DAYS: ${LEGACY_DEDUP_WINDOW_DAYS:-7}
+      # Increment 5: the web brief replaced the PDF; `report` writes nothing
+      # (true brings the PDF back, for a before/after comparison).
+      LEGACY_PDF_ENABLED: ${LEGACY_PDF_ENABLED:-false}
     volumes:
       # Simulates the NFS share traders open the PDF from.
       - nfs-reports:/nfs/reports
@@ -257,16 +266,20 @@ services:
       CORPUS_MONTHS: ${CORPUS_MONTHS:-12}
       CORPUS_MAX_FILINGS: ${CORPUS_MAX_FILINGS:-8}
       CORPUS_MAX_RELEASES: ${CORPUS_MAX_RELEASES:-40}
+      # Increment 5: the smoke check reports whether the PDF is off.
+      LEGACY_PDF_ENABLED: ${LEGACY_PDF_ENABLED:-false}
     <<: *hardened
     tmpfs:
       - /tmp:size=16m
     restart: "no"
 
-  # FastAPI: /auth/*, /news, /news/{id}, /chat, /runs, /review, /health.
+  # FastAPI: /auth/*, /news, /news/{id}, /chat, /runs, /review, /briefs,
+  # /me/watchlist, /health.
   # Not published: only the edge proxy reaches it. Connects as
   # premarket_ai, which can read raw news only through the ai.v_* views,
   # plus the rule, AI and verification results and the users, append audit
-  # rows, start verify runs and record review decisions, nothing else.
+  # rows, start verify runs and briefs, record review decisions and keep the
+  # users' watchlists (schema memory), nothing else.
   ai-api:
     profiles: [ai, full]
     build:
@@ -277,6 +290,7 @@ services:
         fastpath: ./cpp/fastpath
         config: ./python/config
         vendorsim: ./python/vendor-sim
+        skills: ./python/skills
     image: localhost/premarket-ai/ai-api:dev
     depends_on:
       postgres:
@@ -302,6 +316,15 @@ services:
       # Browser origins allowed to call /auth/* (CSRF check): the edge, and
       # the Vite dev server of `make -C ui dev VITE_API_MODE=live`.
       ALLOWED_ORIGINS: http://localhost:${WEB_PORT:-8080},http://127.0.0.1:${WEB_PORT:-8080},http://localhost:5173
+      # Increment 5: the chat's specialists use the MCP server's tools; the
+      # semantic answer cache lives in Redis.
+      MCP_URL: http://mcp-server:8000/mcp
+      MCP_SERVICE_TOKEN: ${MCP_SERVICE_TOKEN:?run make -C python env}
+      CHAT_AGENTS: ${CHAT_AGENTS:-true}
+      AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-3}
+      CHAT_CACHE: ${CHAT_CACHE:-true}
+      CHAT_CACHE_TTL_S: ${CHAT_CACHE_TTL_S:-900}
+      CHAT_CACHE_DISTANCE: ${CHAT_CACHE_DISTANCE:-0.05}
       <<: *ai-env
     <<: *hardened
     tmpfs:
@@ -487,7 +510,8 @@ services:
   # (consumer group ai-worker). It runs the coordinator of each verify run
   # (Llama Guard over every unique item, then one job per item), the
   # LangGraph verify_news graph per item (checkpoints in Postgres, schema
-  # `graph`), and the resume of reviewed items. Scale it with
+  # `graph`), the resume of reviewed items, and (increment 5) the pre-market
+  # brief. Scale it with
   #   podman compose up -d --scale ai-worker=3
   # (one GPU still serves the model calls; more workers mostly overlap the
   # tool calls). Same code as ai-api, plus CPU torch for the classic ML
@@ -502,6 +526,7 @@ services:
         fastpath: ./cpp/fastpath
         config: ./python/config
         vendorsim: ./python/vendor-sim
+        skills: ./python/skills
     image: localhost/premarket-ai/ai-api:worker
     command: ["taskiq", "worker", "ai_api.worker.app:build_broker", "--workers", "1", "--max-async-tasks", "${WORKER_CONCURRENCY:-2}", "--ack-type", "when_executed", "--shutdown-timeout", "30"]
     depends_on:
@@ -532,6 +557,10 @@ services:
       GUARD_NEWS_REVIEW: ${GUARD_NEWS_REVIEW:-false}
       ML_BASELINE: ${ML_BASELINE:-true}
       ML_MODEL_DIR: /models
+      # Increment 5: the brief's model (OpenAI by default, local when the
+      # budget is used up or the call fails). An empty BRIEF_MODEL keeps it
+      # local: `-`, not `:-`, so an empty value isn't replaced.
+      BRIEF_MODEL: ${BRIEF_MODEL-cloud-openai}
       <<: *ai-env
     volumes:
       # FinBERT's download cache and the trained DistilBERT (ml-train).

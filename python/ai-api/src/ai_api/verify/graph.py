@@ -158,6 +158,9 @@ class Deps:
         guard_routes: An unsafe Llama Guard verdict sends the item to
             review and skips the judge (GUARD_NEWS_REVIEW); else it is
             evidence only.
+        watched: Every ticker on a trader's watchlist (increment 5): a FAKE
+            or MISLEADING verdict for one goes to review. None: no
+            watchlists (the eval).
     """
 
     repo: Repository
@@ -170,6 +173,18 @@ class Deps:
     universe_size: int = 50
     min_confidence: float = 0.70
     guard_routes: bool = False
+    watched: Callable[[], Awaitable[frozenset[str]]] | None = None
+
+
+async def _on_watchlist(deps: Deps, tickers: list[str]) -> bool:
+    """True when a trader watches one of ``tickers`` (never raises)."""
+    if deps.watched is None or not tickers:
+        return False
+    try:
+        return bool(await deps.watched() & set(tickers))
+    except Exception as e:  # noqa: BLE001 - the rule is skipped, not fatal.
+        _log.warning("watchlists unavailable: %r", e)
+        return False
 
 
 def thread_id(run_id: int, news_id: int) -> str:
@@ -559,11 +574,16 @@ async def _aggregate(deps: Deps, state: State) -> dict[str, Any]:
                 "model",
             )
         )
+    watched = combined.decision.verdict in (
+        "FAKE",
+        "MISLEADING",
+    ) and await _on_watchlist(deps, item["tickers"])
     reasons = policy.review_reasons(
         combined,
         deps.min_confidence,
         guard_unsafe=guard_unsafe,
         english=english,
+        watched=watched,
     )
     final = combined.decision
     return {

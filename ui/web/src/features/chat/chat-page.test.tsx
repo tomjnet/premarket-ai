@@ -58,6 +58,35 @@ async function settledTurn(): Promise<HTMLElement> {
   return last;
 }
 
+describe('ChatPage: agents and cache (increment 5)', {timeout: 30_000}, () => {
+  it("shows the agents' steps and their tool sources", async () => {
+    const view = await openChat('/chat?date=2026-09-24');
+    await askQuestion(view, 'Why is Apple news flagged today?');
+    const turn = await settledTurn();
+    expect(
+      within(turn).getByText(/How the agents worked on it/),
+    ).toBeInTheDocument();
+    expect(
+      within(turn).getByText(
+        /called list_news\(date=2026-09-24, ticker=AAPL\)/,
+      ),
+    ).toBeInTheDocument();
+    expect(within(turn).getByText('premarket-ai verdicts')).toBeInTheDocument();
+  });
+
+  it('says when an answer came from the cache', async () => {
+    const view = await openChat('/chat?date=2026-09-24');
+    await askQuestion(view, 'What did the Fed decide?');
+    const first = await settledTurn();
+    expect(within(first).queryByText(/Answered from the cache/)).toBeNull();
+    await askQuestion(view, 'What did the Fed decide?');
+    const second = await settledTurn();
+    expect(
+      within(second).getByText(/Answered from the cache/),
+    ).toBeInTheDocument();
+  });
+});
+
 describe('ChatPage', {timeout: 30_000}, () => {
   it('is in the main navigation and says it is not advice', async () => {
     const {container} = await openChat();

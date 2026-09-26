@@ -25,6 +25,8 @@ GROUP = "ai-worker"
 RUN_DAY = "verify.run_day"
 VERIFY_ITEM = "verify.item"
 RESUME = "verify.resume"
+# Increment 5: the pre-market brief, on the same queue.
+WRITE_BRIEF = "brief.write"
 # A job unacknowledged this long (its worker died) is run again elsewhere.
 # Longer than the slowest job: a judge call waits up to LLM_TIMEOUT_S.
 IDLE_TIMEOUT_MS = 30 * 60 * 1000
@@ -98,3 +100,7 @@ class Queue:
             thread_id=thread_id,
             decision=decision,
         )
+
+    async def write_brief(self, brief_id: int) -> None:
+        """Queues a brief (``agents.brief.Job``)."""
+        await self._kick(WRITE_BRIEF, brief_id=brief_id)

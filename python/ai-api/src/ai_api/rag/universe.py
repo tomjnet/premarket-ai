@@ -19,20 +19,32 @@ class Member:
         ticker: As the vendor writes it (BRK.B).
         name: The legal name.
         short: The name in headlines.
+        sector: The GICS sector (the brief groups items by it).
     """
 
     ticker: str
     name: str
     short: str
+    sector: str = ""
 
 
 def load(config_dir: pathlib.Path) -> list[Member]:
     """The companies of ``universe.yaml``, in rank order."""
     data = yaml.safe_load((config_dir / "universe.yaml").read_text("utf-8"))
     return [
-        Member(str(c["ticker"]), str(c["name"]), str(c["short"]))
+        Member(
+            str(c["ticker"]),
+            str(c["name"]),
+            str(c["short"]),
+            str(c.get("sector", "")),
+        )
         for c in data["companies"]
     ]
+
+
+def sectors(members: list[Member]) -> list[str]:
+    """The universe's sectors, sorted (the watchlist's choices)."""
+    return sorted({m.sector for m in members if m.sector})
 
 
 def tickers_in(text: str, members: list[Member]) -> list[str]:

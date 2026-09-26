@@ -83,7 +83,10 @@ describe('askNews', () => {
       question: 'What did Apple file?',
       date: '2026-09-25',
     });
-    expect(events[0]?.type).toBe('sources');
+    // Increment 5: the team's steps come first, then the sources.
+    const first = events[0];
+    expect(first?.type === 'step' && first.data.agent).toBe('supervisor');
+    expect(events.find(event => event.type !== 'step')?.type).toBe('sources');
     const tokens = events.filter(event => event.type === 'token');
     expect(tokens.length).toBeGreaterThan(5);
     const streamed = tokens.map(event => event.text).join('');

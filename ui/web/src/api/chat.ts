@@ -7,6 +7,7 @@ import {
   chatDoneSchema,
   chatErrorWireSchema,
   chatSourcesSchema,
+  chatStepWireSchema,
   chatTokenWireSchema,
 } from './schemas/chat';
 import type {ChatEvent} from './schemas/chat';
@@ -73,6 +74,9 @@ async function* chatEvents(
     }
     const {event, data} = next.value;
     switch (event) {
+      case 'step':
+        yield {type: 'step', data: parseEvent(event, data, chatStepWireSchema)};
+        break;
       case 'sources':
         yield {
           type: 'sources',

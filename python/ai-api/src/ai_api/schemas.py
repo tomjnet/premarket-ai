@@ -442,6 +442,187 @@ class ChatIn(pydantic.BaseModel):
     date: datetime.date | None = None
 
 
+BriefEdition = Literal["morning", "refresh"]
+BriefStatus = Literal["QUEUED", "RUNNING", "DONE", "FAILED"]
+BriefSection = Literal["top", "sector", "watch"]
+
+
+def _utc_or_none(value: datetime.datetime | None) -> str | None:
+    return None if value is None else utc_z(value)
+
+
+class BriefMetaOut(pydantic.BaseModel):
+    """A brief's identity and state (``POST /briefs``, the ``brief`` event).
+
+    ``edition``: ``morning`` (07:15 ET) or ``refresh`` (09:00 ET, with the
+    items analysts reviewed since the morning edition).
+    """
+
+    brief_id: int
+    feed_date: str
+    edition: BriefEdition
+    status: BriefStatus
+    requested_by: str | None
+    requested_at: str
+    started_at: str | None
+    finished_at: str | None
+    error: str | None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> BriefMetaOut:
+        """Builds the model from an ``ai.brief`` row."""
+        return cls(
+            brief_id=row["brief_id"],
+            feed_date=row["feed_date"].isoformat(),
+            edition=row["edition"],
+            status=row["status"],
+            requested_by=row["requested_by"],
+            requested_at=utc_z(row["requested_at"]),
+            started_at=_utc_or_none(row["started_at"]),
+            finished_at=_utc_or_none(row["finished_at"]),
+            # A failure's details stay in the database and the log.
+            error=None if row["error"] is None else "The brief failed.",
+        )
+
+
+class BriefItemOut(pydantic.BaseModel):
+    """One numbered item of the brief (the overview cites ``[n]``).
+
+    ``section``: ``top`` (top stories), ``sector`` (the rest of the
+    VERIFIED items) or ``watch`` ("Unconfirmed - watch": high-impact
+    UNVERIFIED items). ``new``: not in the morning edition (refresh only).
+    ``filing_url``: the primary source (8-K / EX-99.1) when one was found.
+    """
+
+    n: int
+    news_id: int
+    vendor_item_id: str
+    headline: str
+    summary: str | None
+    sentiment: Sentiment | None
+    tickers: list[str]
+    sector: str
+    source_domain: str
+    published_at: str
+    verdict: Literal["VERIFIED", "UNVERIFIED"]
+    confidence: float | None
+    review_status: ReviewStatus | None
+    impact: Impact | None
+    impact_score: float
+    filing_url: str | None
+    filing_title: str | None
+    section: BriefSection
+    new: bool
+
+
+class BriefSectorOut(pydantic.BaseModel):
+    """The VERIFIED items of one GICS sector (item numbers)."""
+
+    name: str
+    items: list[int]
+
+
+class BriefCountsOut(pydantic.BaseModel):
+    """What the brief left out is only counted."""
+
+    verified: int
+    unconfirmed: int
+    unverified: int
+    pending_review: int
+    misleading: int
+    fake: int
+    failed: int
+    new: int
+
+
+class BriefWatchlistOut(pydantic.BaseModel):
+    """The caller's watchlist and the brief's items on it."""
+
+    tickers: list[str]
+    sectors: list[str]
+    items: list[int]
+
+
+class BriefOut(BriefMetaOut):
+    """The whole brief (the ``done`` event of ``GET /briefs/today``).
+
+    Every text is plain text (the UI never renders Markdown or HTML).
+    ``overview_source``: ``llm`` (a model wrote it and it passed the
+    checks) or ``fallback`` (written by code from the top items).
+    """
+
+    overview: str
+    overview_source: Literal["llm", "fallback"] | None
+    citations: list[int]
+    model: str | None
+    cloud: bool
+    prompt_version: str | None
+    counts: BriefCountsOut
+    items: list[BriefItemOut]
+    top: list[int]
+    sectors: list[BriefSectorOut]
+    watch: list[int]
+    watchlist: BriefWatchlistOut
+
+    @classmethod
+    def from_brief(
+        cls, row: dict[str, Any], watchlist: BriefWatchlistOut
+    ) -> BriefOut:
+        """Builds the model from a DONE ``ai.brief`` row."""
+        content = row["content"] or {}
+        empty = dict.fromkeys(BriefCountsOut.model_fields, 0)
+        return cls(
+            **BriefMetaOut.from_row(row).model_dump(),
+            overview=row["overview"],
+            overview_source=row["overview_source"],
+            citations=list(row["citations"] or []),
+            model=row["model"],
+            cloud=row["cloud"],
+            prompt_version=row["prompt_version"],
+            counts=BriefCountsOut(**{**empty, **content.get("counts", {})}),
+            items=[
+                BriefItemOut(
+                    **{
+                        k: v
+                        for k, v in item.items()
+                        if k in BriefItemOut.model_fields
+                    }
+                )
+                for item in content.get("items", [])
+            ],
+            top=content.get("top", []),
+            sectors=content.get("sectors", []),
+            watch=content.get("watch", []),
+            watchlist=watchlist,
+        )
+
+
+class BriefIn(pydantic.BaseModel):
+    """``POST /briefs``: write (or refresh) a date's brief now."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    date: datetime.date | None = None
+    edition: BriefEdition = "morning"
+
+
+class WatchlistIn(pydantic.BaseModel):
+    """``PUT /me/watchlist``: tickers and GICS sectors to follow."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    tickers: list[str] = pydantic.Field(default_factory=list, max_length=25)
+    sectors: list[str] = pydantic.Field(default_factory=list, max_length=20)
+
+
+class WatchlistOut(pydantic.BaseModel):
+    """``GET /me/watchlist``: the saved watchlist and the choices."""
+
+    tickers: list[str]
+    sectors: list[str]
+    available_sectors: list[str]
+
+
 class HealthOut(pydantic.BaseModel):
     """``GET /health``."""
 

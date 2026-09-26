@@ -160,6 +160,19 @@ class Settings:
         tracing: Langfuse settings.
         llama_guard: Check chat questions and answers with Llama Guard
             (LLAMA_GUARD, default true).
+        mcp_url: The MCP server (MCP_URL): the chat agents' tools.
+        mcp_token: Its service token (MCP_SERVICE_TOKEN); empty turns the
+            agents off (the chat answers from the corpus alone).
+        chat_agents: Ask the multi-agent team (CHAT_AGENTS, default true).
+        agent_max_tool_calls: Tool calls per specialist
+            (AGENT_MAX_TOOL_CALLS, 3).
+        chat_cache: The semantic answer cache (CHAT_CACHE, default true).
+        chat_cache_ttl_s: How long a cached answer is used
+            (CHAT_CACHE_TTL_S, 900).
+        chat_cache_distance: Largest cosine distance of a cache hit
+            (CHAT_CACHE_DISTANCE, 0.05).
+        skills_dir: The Agent Skills folder (SKILLS_DIR).
+        config_dir: Folder with ``universe.yaml`` (PREMARKET_CONFIG_DIR).
     """
 
     database: Database
@@ -177,6 +190,15 @@ class Settings:
     rag: rag_config.RagConfig | None = None
     tracing: tracing.TracingConfig = tracing.TracingConfig()
     llama_guard: bool = True
+    mcp_url: str = "http://mcp-server:8000/mcp"
+    mcp_token: str = dataclasses.field(default="", repr=False)
+    chat_agents: bool = True
+    agent_max_tool_calls: int = 3
+    chat_cache: bool = True
+    chat_cache_ttl_s: int = 900
+    chat_cache_distance: float = 0.05
+    skills_dir: pathlib.Path = pathlib.Path("/app/skills")
+    config_dir: pathlib.Path = pathlib.Path("/app/config")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -213,12 +235,28 @@ class Settings:
             llm=_optional_llm(env),
             rag=_rag(env),
             tracing=tracing.TracingConfig.from_env(env),
-            llama_guard=(
-                True
-                if not env.get("LLAMA_GUARD", "").strip()
-                else _bool(env, "LLAMA_GUARD")
+            llama_guard=_default_true(env, "LLAMA_GUARD"),
+            mcp_url=env.get("MCP_URL", "http://mcp-server:8000/mcp").strip(),
+            mcp_token=(
+                _secret(env, "MCP_SERVICE_TOKEN")
+                if env.get("MCP_SERVICE_TOKEN", "").strip()
+                else ""
+            ),
+            chat_agents=_default_true(env, "CHAT_AGENTS"),
+            agent_max_tool_calls=_positive_int(env, "AGENT_MAX_TOOL_CALLS", 3),
+            chat_cache=_default_true(env, "CHAT_CACHE"),
+            chat_cache_ttl_s=_positive_int(env, "CHAT_CACHE_TTL_S", 900),
+            chat_cache_distance=_fraction(env, "CHAT_CACHE_DISTANCE", 0.05),
+            skills_dir=pathlib.Path(env.get("SKILLS_DIR", "/app/skills")),
+            config_dir=pathlib.Path(
+                env.get("PREMARKET_CONFIG_DIR", "/app/config")
             ),
         )
+
+
+def _default_true(env: Mapping[str, str], name: str) -> bool:
+    """A switch that is on unless set to false."""
+    return True if not env.get(name, "").strip() else _bool(env, name)
 
 
 def _optional_llm(env: Mapping[str, str]) -> llm_config.LlmConfig | None:
@@ -463,6 +501,10 @@ class VerifySettings:
         ml_enabled: Run the classic ML baseline (ML_BASELINE, default
             true; it is skipped when torch isn't installed).
         config_dir: Folder with ``universe.yaml`` (PREMARKET_CONFIG_DIR).
+        brief_model: The brief's model (BRIEF_MODEL, default
+            ``cloud-openai``; empty keeps it local). Local while the cloud
+            budget is used up or the call fails.
+        skills_dir: The Agent Skills folder (SKILLS_DIR).
     """
 
     database: Database
@@ -480,6 +522,8 @@ class VerifySettings:
     ml_model_dir: pathlib.Path = pathlib.Path("/models")
     ml_enabled: bool = True
     config_dir: pathlib.Path = pathlib.Path("/app/config")
+    brief_model: str = "cloud-openai"
+    skills_dir: pathlib.Path = pathlib.Path("/app/skills")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> VerifySettings:
@@ -516,4 +560,6 @@ class VerifySettings:
             config_dir=pathlib.Path(
                 env.get("PREMARKET_CONFIG_DIR", "/app/config")
             ),
+            brief_model=env.get("BRIEF_MODEL", "cloud-openai").strip(),
+            skills_dir=pathlib.Path(env.get("SKILLS_DIR", "/app/skills")),
         )

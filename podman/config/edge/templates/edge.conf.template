@@ -4,8 +4,8 @@
 # Snippets are mounted at /etc/nginx/snippets/.
 #
 #   /api/*  -> ai-api (prefix stripped), rate limited per client IP
-#              (/api/chat and /api/runs/<id>/events stream server-sent
-#              events, unbuffered)
+#              (/api/chat, /api/runs/<id>/events and /api/briefs/today
+#              stream server-sent events, unbuffered)
 #   /*      -> web-1 / web-2 (static UI), least-connections load balancing
 #
 # Every browser-facing response gets the site's security headers here, in
@@ -31,11 +31,13 @@ limit_conn_zone $binary_remote_addr zone=pm_conn:10m;
 limit_req_status 429;
 limit_conn_status 429;
 
-# Only what the site uses; everything else (PUT, DELETE, TRACE...) is 405.
-map $request_method $pm_bad_method {
-    GET 0;
-    HEAD 0;
-    POST 0;
+# Only what the site uses; everything else (DELETE, TRACE...) is 405. PUT
+# only replaces the caller's watchlist (increment 5).
+map "$request_method:$uri" $pm_bad_method {
+    ~^GET: 0;
+    ~^HEAD: 0;
+    ~^POST: 0;
+    "PUT:/api/me/watchlist" 0;
     default 1;
 }
 
@@ -154,6 +156,27 @@ server {
         proxy_cache off;
         rewrite ^/api/(.*)$ /$1 break;
         proxy_pass http://pm_api;
+    }
+
+    # Today's brief (increment 5): server-sent events while a brief is being
+    # written (ai-api ends the stream after 15 minutes at most).
+    location = /api/briefs/today {
+        limit_req zone=pm_api burst=40 nodelay;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 1s;
+        proxy_send_timeout 15s;
+        proxy_read_timeout 960s;
+        proxy_next_upstream off;
+        proxy_hide_header X-Powered-By;
+        proxy_hide_header Server;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_pass http://pm_api/briefs/today$is_args$args;
     }
 
     location /api/ {

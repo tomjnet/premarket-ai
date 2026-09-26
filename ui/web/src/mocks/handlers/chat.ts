@@ -45,9 +45,17 @@ export const chatHandlers = [
     }
     const date = parsed.date ?? db.today();
     const answer = mockAnswer(parsed.question, db.day(date).items, date);
-    const events: Array<[string, unknown]> = [['sources', answer.sources]];
-    const tokens =
-      scenario === 'chat-error'
+    // The semantic cache (increment 5): the same question of the same date
+    // again comes at once, without the team, as one piece of text.
+    const cacheKey = `${date}|${parsed.question.trim().toLowerCase()}`;
+    const cached = scenario !== 'chat-error' && db.chatCache.has(cacheKey);
+    const events: Array<[string, unknown]> = cached
+      ? []
+      : answer.steps.map(step => ['step', step]);
+    events.push(['sources', answer.sources]);
+    const tokens = cached
+      ? [answer.done.answer]
+      : scenario === 'chat-error'
         ? answer.tokens.slice(0, CHAT_ERROR_AFTER_TOKENS)
         : answer.tokens;
     for (const text of tokens) {
@@ -56,8 +64,18 @@ export const chatHandlers = [
     events.push(
       scenario === 'chat-error'
         ? ['error', {detail: CHAT_FAILED}]
-        : ['done', answer.done],
+        : [
+            'done',
+            {
+              ...answer.done,
+              cached,
+              elapsed_ms: cached ? 40 : answer.done.elapsed_ms,
+            },
+          ],
     );
+    if (scenario !== 'chat-error' && !answer.done.refused) {
+      db.chatCache.add(cacheKey);
+    }
     db.chatsInFlight.add(username);
     return new HttpResponse(eventStream(events, username), {
       headers: {

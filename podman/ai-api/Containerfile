@@ -3,10 +3,12 @@
 #   fastpath  = cpp/fastpath        (C++20 nanobind module, built as a wheel)
 #   config    = python/config       (lab universe, source reputation seed)
 #   vendorsim = python/vendor-sim   (eval stage only: the labeled golden set)
+#   skills    = python/skills       (Agent Skills, SKILL.md folders; inc 5)
 #   podman build -f podman/ai-api/Containerfile --target runtime \
 #     --build-context fastpath=cpp/fastpath \
 #     --build-context config=python/config \
-#     --build-context vendorsim=python/vendor-sim python/ai-api
+#     --build-context vendorsim=python/vendor-sim \
+#     --build-context skills=python/skills python/ai-api
 # Stages:
 #   fastpath-toolchain  gcc 14, CMake, Ninja, OpenSSL, LLVM 18 (Ubuntu 24.04)
 #   fastpath-test       C++ core: debug build + ctest (GoogleTest)
@@ -89,9 +91,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PREMARKET_CONFIG_DIR=/app/config \
-    PREMARKET_FASTPATH=required
+    PREMARKET_FASTPATH=required \
+    SKILLS_DIR=/app/skills
 WORKDIR /app
 COPY --from=config universe.yaml sources.yaml /app/config/
+# Agent Skills (increment 5): loaded by the chat agents and the brief.
+COPY --from=skills . /app/skills/
 COPY --from=fastpath-wheel /wheels /wheels
 RUN pip install /wheels/*.whl && rm -rf /wheels
 # langchain-chroma without its declared full chromadb: pyproject.toml

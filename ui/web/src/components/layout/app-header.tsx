@@ -44,7 +44,12 @@ export function AppHeader() {
         </p>
         {user !== undefined && (
           <nav aria-label="Main">
-            <ul className="flex gap-3 text-sm">
+            <ul className="flex flex-wrap gap-3 text-sm">
+              <li>
+                <NavLink to="/brief" className={navLinkClass}>
+                  Today's brief
+                </NavLink>
+              </li>
               <li>
                 <NavLink to="/news" className={navLinkClass}>
                   News feed
@@ -53,6 +58,11 @@ export function AppHeader() {
               <li>
                 <NavLink to="/chat" className={navLinkClass}>
                   Ask the News
+                </NavLink>
+              </li>
+              <li>
+                <NavLink to="/watchlist" className={navLinkClass}>
+                  My watchlist
                 </NavLink>
               </li>
               {canReview(user.role) && (

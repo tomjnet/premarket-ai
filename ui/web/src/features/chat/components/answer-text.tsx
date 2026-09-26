@@ -6,13 +6,20 @@ interface AnswerTextProps {
   sourceNumbers: ReadonlySet<number>;
   /** Moves focus to source `n` in the list below the answer. */
   onCite(n: number): void;
+  /** What a citation points to, for its name: `Source 2` (default). */
+  citeLabel?: string;
 }
 
 /**
  * An answer with its citation markers as buttons to the numbered sources.
  * The text is model output: rendered as text nodes, never as HTML.
  */
-export function AnswerText({text, sourceNumbers, onCite}: AnswerTextProps) {
+export function AnswerText({
+  text,
+  sourceNumbers,
+  onCite,
+  citeLabel = 'Source',
+}: AnswerTextProps) {
   return (
     <p className="leading-relaxed break-words whitespace-pre-line">
       {answerSegments(text, sourceNumbers).map((segment, index) =>
@@ -24,7 +31,7 @@ export function AnswerText({text, sourceNumbers, onCite}: AnswerTextProps) {
             type="button"
             onClick={() => onCite(segment.n)}
             // "[2]" reads badly; the name keeps the visible number.
-            aria-label={`Source ${segment.n}`}
+            aria-label={`${citeLabel} ${segment.n}`}
             className="mx-0.5 rounded-sm px-0.5 align-baseline text-sm font-medium text-primary underline underline-offset-2 hover:bg-muted"
           >
             [{segment.n}]

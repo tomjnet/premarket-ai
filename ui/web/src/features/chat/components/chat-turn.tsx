@@ -33,6 +33,7 @@ export function ChatTurnView({turn}: ChatTurnViewProps) {
       <p className="text-xs text-muted-foreground">
         News of {formatLongDate(turn.date)}
       </p>
+      {turn.steps.length > 0 && <TeamSteps steps={turn.steps} />}
       {/* Polite and busy while streaming: screen readers read the answer
           once it is complete instead of every token. */}
       <div
@@ -104,6 +105,33 @@ export function ChatTurnView({turn}: ChatTurnViewProps) {
   );
 }
 
+interface TeamStepsProps {
+  steps: ChatTurn['steps'];
+}
+
+/**
+ * What the supervisor and its specialists did, as a plain list. A tool's
+ * arguments are server text: shown as text only.
+ */
+function TeamSteps({steps}: TeamStepsProps) {
+  return (
+    <details className="text-sm" open>
+      <summary className="cursor-pointer font-medium">
+        How the agents worked on it ({steps.length} steps)
+      </summary>
+      <ol className="mt-1 flex list-decimal flex-col gap-0.5 pl-6 text-muted-foreground">
+        {steps.map((step, index) => (
+          <li key={index} className="break-words">
+            <span className="font-medium text-foreground">{step.title}</span>
+            {': '}
+            {step.action === 'tool' ? `called ${step.detail}` : step.detail}
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
 interface AnswerNotesProps {
   done: NonNullable<ChatTurn['done']>;
 }
@@ -121,6 +149,11 @@ function AnswerNotes({done}: AnswerNotesProps) {
   } else if (!done.refused && !done.citesTrusted) {
     notes.push(
       'This answer cites only vendor items, which are unverified. No filing or official release backs it.',
+    );
+  }
+  if (done.cached) {
+    notes.push(
+      'Answered from the cache: the same question about this date was answered a few minutes ago.',
     );
   }
   return (

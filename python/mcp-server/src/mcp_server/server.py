@@ -7,12 +7,15 @@ Tools (every one read-only; there are no write tools anywhere):
 ``get_source_reputation``   the source reputation table
 ``search_news``             the trusted corpus (vector store)
 ``get_verification``        an item's verdict and evidence
+``list_news``               a day's verified items (increment 5)
+``get_brief``               a day's pre-market brief (increment 5)
 ``web_search``              SearXNG (counted and linked, never stored)
 ``fetch_url``               one page as text (SSRF-protected, discarded)
 ``get_price_history``       daily closes (yfinance, lab only)
 ==========================  ==============================================
 
-(``get_brief`` arrives with the brief in increment 5.)
+The chat agents of increment 5 use them through langchain-mcp-adapters,
+each specialist with its own allowlist.
 
 Every client sends the service token (``Authorization: Bearer ...``,
 MCP_SERVICE_TOKEN), not a user's JWT. The server is stateless (each HTTP
@@ -98,7 +101,8 @@ def build_server(settings: config.Settings, holder: _Holder) -> fastmcp.FastMCP:
         instructions=(
             "Read-only tools over premarket-ai's data: the SEC ticker "
             "registry, source reputations, the trusted corpus of SEC filings "
-            "and Fed/SEC releases, verdicts of vendor news, live web search, "
+            "and Fed/SEC releases, verdicts of vendor news, the pre-market "
+            "brief, live web search, "
             "page fetches and price history. Vendor news is synthetic lab "
             "data. Nothing here gives investment advice."
         ),
@@ -164,6 +168,28 @@ def build_server(settings: config.Settings, holder: _Holder) -> fastmcp.FastMCP:
             vendor_item_id: The vendor's id, like VND-20260924-012.
         """
         return await holder.get().lookups.verification(vendor_item_id)
+
+    @server.tool(annotations=_READ_ONLY)
+    async def list_news(
+        date: str, ticker: str | None = None, verdict: str | None = None
+    ) -> dict[str, Any]:
+        """The day's verified vendor news items with their verdicts.
+
+        Args:
+            date: The feed date, YYYY-MM-DD.
+            ticker: Only items about this ticker (AAPL, BRK.B).
+            verdict: Only VERIFIED, UNVERIFIED, MISLEADING or FAKE.
+        """
+        return await holder.get().lookups.news(date, ticker, verdict)
+
+    @server.tool(annotations=_READ_ONLY)
+    async def get_brief(date: str) -> dict[str, Any]:
+        """The pre-market brief of a day: overview, counts, numbered items.
+
+        Args:
+            date: The feed date, YYYY-MM-DD.
+        """
+        return await holder.get().lookups.brief(date)
 
     @server.tool(annotations=_OPEN_WORLD)
     async def web_search(query: str, max_results: int = 8) -> dict[str, Any]:

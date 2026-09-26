@@ -34,6 +34,7 @@ const char kUsage[] =
     "usage: premarket-legacy <ingest|report|cron> [--date=YYYY-MM-DD]\n"
     "  ingest  fetch the vendor feed and load legacy.vendor_news_raw\n"
     "  report  render <LEGACY_REPORTS_DIR>/<date>.pdf from today's rows\n"
+    "          (nothing when LEGACY_PDF_ENABLED=false: the PDF is retired)\n"
     "  cron    run the schedule in LEGACY_CRONTAB with supercronic\n";
 
 // Parses "--date=X" or "--date X". Returns false on unknown arguments.
@@ -98,6 +99,13 @@ int Main(int argc, char** argv) {
     status = RunIngest(config.value(), date);
     curl_global_cleanup();
   } else if (command == "report") {
+    if (!config.value().pdf_enabled) {
+      // Increment 5: the web brief replaced the PDF.
+      LogInfo("report " + date +
+              ": the PDF is retired (LEGACY_PDF_ENABLED=false), nothing "
+              "written");
+      return 0;
+    }
     status = RunReport(config.value(), date);
   } else if (command == "cron") {
     return RunCron(config.value());

@@ -4,11 +4,14 @@
   (``universe.yaml``, for a company's size rank).
 - Source reputations (``ai.source_reputation``).
 - Verdicts and their evidence (``ai.verification``, ``ai.evidence``).
+- A day's verified items and its pre-market brief (``ai.brief``,
+  increment 5).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import pathlib
 import re
 from typing import Any, Protocol
@@ -34,6 +37,26 @@ JOIN ai.v_raw_news r USING (feed_date, vendor_item_id)
 LEFT JOIN ai.verification v ON v.news_id = n.id
 WHERE n.vendor_item_id = %s
 """
+
+
+# The day's verified unique items, highest market impact first (no bodies:
+# get_verification has the evidence of one).
+_NEWS_SQL = """
+SELECT n.vendor_item_id, r.headline, r.source_domain, r.tickers,
+       v.status, v.verdict::text AS verdict, v.confidence, v.reason_codes,
+       v.review_status, v.impact
+FROM ai.verification v
+JOIN ai.news_item n ON n.id = v.news_id
+JOIN ai.v_raw_news r USING (feed_date, vendor_item_id)
+WHERE n.feed_date = %(day)s
+  AND (%(ticker)s::text IS NULL OR %(ticker)s::text = ANY (r.tickers))
+  AND (%(verdict)s::text IS NULL OR v.verdict::text = %(verdict)s)
+ORDER BY v.impact_score DESC NULLS LAST, n.vendor_item_id
+LIMIT %(limit)s
+"""
+_MAX_NEWS = 25
+_VERDICTS = frozenset({"VERIFIED", "UNVERIFIED", "MISLEADING", "FAKE"})
+_BRIEF_ITEMS = 40
 
 
 def sec_ticker(ticker: str) -> str:
@@ -89,6 +112,16 @@ class Store(Protocol):
 
     async def evidence(self, news_id: int) -> list[dict[str, Any]]:
         """The verdict's evidence, in order."""
+        ...
+
+    async def news(
+        self, day: datetime.date, ticker: str | None, verdict: str | None
+    ) -> list[dict[str, Any]]:
+        """The day's verified unique items (increment 5)."""
+        ...
+
+    async def brief(self, day: datetime.date) -> dict[str, Any] | None:
+        """The day's newest DONE brief (increment 5), or None."""
         ...
 
 
@@ -153,6 +186,30 @@ class PostgresStore:
             " FROM ai.evidence WHERE news_id = %s ORDER BY seq LIMIT %s",
             (news_id, _MAX_EVIDENCE),
         )
+
+    async def news(
+        self, day: datetime.date, ticker: str | None, verdict: str | None
+    ) -> list[dict[str, Any]]:
+        """See ``Store``."""
+        return await self._all(
+            _NEWS_SQL,
+            {
+                "day": day,
+                "ticker": ticker,
+                "verdict": verdict,
+                "limit": _MAX_NEWS,
+            },
+        )
+
+    async def brief(self, day: datetime.date) -> dict[str, Any] | None:
+        """See ``Store``."""
+        found = await self._all(
+            "SELECT feed_date, edition, finished_at, overview, content"
+            " FROM ai.brief WHERE feed_date = %s AND status = 'DONE'"
+            " ORDER BY finished_at DESC LIMIT 1",
+            (day,),
+        )
+        return found[0] if found else None
 
 
 class Lookups:
@@ -278,3 +335,97 @@ class Lookups:
             ],
         )
         return answer
+
+    async def news(
+        self, date: str, ticker: str | None, verdict: str | None
+    ) -> dict[str, Any]:
+        """The day's verified items, highest market impact first.
+
+        Args:
+            date: YYYY-MM-DD.
+            ticker: Only items about this ticker.
+            verdict: Only this verdict.
+
+        Returns:
+            ``date``, ``count`` and ``items`` (vendor id, headline, source,
+            tickers, verdict, confidence, reason codes, review status,
+            impact), at most 25; or ``error``.
+        """
+        try:
+            day = datetime.date.fromisoformat(date.strip())
+        except ValueError:
+            return {"error": "expected a date YYYY-MM-DD"}
+        if ticker is not None:
+            ticker = ticker.strip().upper()
+            if not _TICKER.match(ticker):
+                return {"error": "not a ticker"}
+        if verdict is not None:
+            verdict = verdict.strip().upper()
+            if verdict not in _VERDICTS:
+                return {"error": f"verdict is one of {sorted(_VERDICTS)}"}
+        found = await self._store.news(day, ticker, verdict)
+        return {
+            "date": day.isoformat(),
+            "count": len(found),
+            "items": [
+                {
+                    "vendor_item_id": row["vendor_item_id"],
+                    "headline": row["headline"],
+                    "source_domain": row["source_domain"],
+                    "tickers": list(row["tickers"]),
+                    "verdict": row["verdict"],
+                    "confidence": row["confidence"],
+                    "reason_codes": list(row["reason_codes"]),
+                    "pending_review": row["status"] == "PENDING_REVIEW",
+                    "review_status": row["review_status"],
+                    "impact": row["impact"],
+                }
+                for row in found
+            ],
+        }
+
+    async def brief(self, date: str) -> dict[str, Any]:
+        """The day's pre-market brief (its newest finished edition).
+
+        Args:
+            date: YYYY-MM-DD.
+
+        Returns:
+            ``found``; the edition, the overview, the counts and the items
+            (number, section, vendor id, headline, summary, tickers,
+            sector, verdict, impact) when there is one.
+        """
+        try:
+            day = datetime.date.fromisoformat(date.strip())
+        except ValueError:
+            return {"found": False, "error": "expected a date YYYY-MM-DD"}
+        found = await self._store.brief(day)
+        if found is None:
+            return {"found": False, "date": day.isoformat()}
+        content = found["content"] or {}
+        items = content.get("items", [])
+        return {
+            "found": True,
+            "date": day.isoformat(),
+            "edition": found["edition"],
+            "finished_at": found["finished_at"].isoformat(),
+            "overview": found["overview"],
+            "counts": content.get("counts", {}),
+            "items": [
+                {
+                    k: item.get(k)
+                    for k in (
+                        "n",
+                        "section",
+                        "vendor_item_id",
+                        "headline",
+                        "summary",
+                        "tickers",
+                        "sector",
+                        "verdict",
+                        "impact",
+                    )
+                }
+                for item in items[:_BRIEF_ITEMS]
+            ],
+        }

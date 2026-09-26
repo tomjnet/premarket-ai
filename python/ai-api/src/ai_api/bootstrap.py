@@ -13,6 +13,9 @@ checkpointer's tables (schema ``graph``):
   checkpoints;
 - ``premarket_mcp`` (``mcp-server``): read-only, the tables its tools
   answer from.
+
+Increment 5 adds the LangGraph store's tables (schema ``memory``: users'
+watchlists) and the grants on ``ai.brief``.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import pathlib
 from alembic import command
 from alembic import config as alembic_config
 from langgraph.checkpoint import postgres as pg_checkpoint
+from langgraph.store import postgres as pg_store
 import psycopg
 from psycopg import rows
 from psycopg import sql
@@ -143,6 +147,14 @@ def grant_api_role(
         " ON ai.review_task TO {role}",
         "GRANT UPDATE (reputation, updated_at) ON ai.source_reputation"
         " TO {role}",
+        # Increment 5: briefs (read, queue), the watchlist's registry check,
+        # and long-term memory (the LangGraph store in `memory`).
+        "GRANT SELECT, INSERT ON ai.brief TO {role}",
+        "GRANT USAGE ON SEQUENCE ai.brief_brief_id_seq TO {role}",
+        "GRANT SELECT ON ai.ticker_registry TO {role}",
+        "GRANT USAGE ON SCHEMA memory TO {role}",
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA memory"
+        " TO {role}",
     )
     _grant(conn, role, database, statements)
 
@@ -174,6 +186,11 @@ def grant_worker_role(
         # The LangGraph checkpointer's tables (created by setup_checkpoints).
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA graph"
         " TO {role}",
+        # Increment 5: writing briefs, and reading every watchlist (a FAKE
+        # or MISLEADING verdict for a watched ticker goes to review).
+        "GRANT SELECT, UPDATE ON ai.brief TO {role}",
+        "GRANT USAGE ON SCHEMA memory TO {role}",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA memory TO {role}",
     )
     _grant(conn, role, database, statements)
 
@@ -198,6 +215,8 @@ def grant_mcp_role(
         "GRANT SELECT ON ai.ticker_registry, ai.source_reputation,"
         " ai.news_item, ai.v_raw_news, ai.verification, ai.evidence"
         " TO {role}",
+        # Increment 5: get_brief.
+        "GRANT SELECT ON ai.brief TO {role}",
     )
     _grant(conn, role, database, statements)
 
@@ -215,6 +234,21 @@ def setup_checkpoints(owner: config.Database) -> None:
         row_factory=rows.dict_row,
     ) as conn:
         pg_checkpoint.PostgresSaver(conn).setup()
+
+
+def setup_memory(owner: config.Database) -> None:
+    """Creates or migrates the LangGraph store's tables (``memory``).
+
+    Args:
+        owner: The database owner's connection parameters.
+    """
+    with psycopg.connect(
+        owner.dsn(search_path="memory"),
+        autocommit=True,
+        prepare_threshold=0,
+        row_factory=rows.dict_row,
+    ) as conn:
+        pg_store.PostgresStore(conn).setup()
 
 
 def seed_demo_users(conn: psycopg.Connection, password: str) -> None:
@@ -267,7 +301,8 @@ def run(env: Mapping[str, str]) -> None:
 
     migrate(owner)
     setup_checkpoints(owner)
-    _log.info("migrations applied (ai, graph)")
+    setup_memory(owner)
+    _log.info("migrations applied (ai, graph, memory)")
     with psycopg.connect(owner.dsn()) as conn:
         for grant, role, password in roles:
             grant(conn, role, password, owner.name)

@@ -5,11 +5,13 @@ import {ErrorPage} from '@/components/pages/error-page';
 import {NotFoundPage} from '@/components/pages/status-page';
 import {LoginPage} from '@/features/auth/login-page';
 import {RequireAuth, RequireRole} from '@/features/auth/require-auth';
+import {BriefPage} from '@/features/brief/brief-page';
 import {ChatPage} from '@/features/chat/chat-page';
 import {FeedPage} from '@/features/news/feed-page';
 import {NewsDetailPage} from '@/features/news/news-detail-page';
 import {REVIEW_ROLES} from '@/features/review/review';
 import {ReviewPage} from '@/features/review/review-page';
+import {WatchlistPage} from '@/features/watchlist/watchlist-page';
 
 /**
  * The route tree. Everything but `/login` needs a session; a page that needs
@@ -32,6 +34,8 @@ export const routes: RouteObject[] = [
               {path: 'news', element: <FeedPage />},
               {path: 'news/:id', element: <NewsDetailPage />},
               {path: 'chat', element: <ChatPage />},
+              {path: 'brief', element: <BriefPage />},
+              {path: 'watchlist', element: <WatchlistPage />},
               {
                 element: <RequireRole roles={REVIEW_ROLES} />,
                 children: [{path: 'review', element: <ReviewPage />}],

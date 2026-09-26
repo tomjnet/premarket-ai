@@ -28,23 +28,28 @@ _MAX_LEN = 5000
 FINAL_KINDS = frozenset({"run.done", "run.failed"})
 
 
-def stream_key(run_id: int) -> str:
-    """The Redis key of a run's stream."""
-    return f"run:{run_id}:events"
+def stream_key(run_id: int, prefix: str = "run") -> str:
+    """The Redis key of a run's stream (``brief`` for a brief's)."""
+    return f"{prefix}:{run_id}:events"
 
 
 class RunEvents:
-    """Appends and reads run events (a decoded Redis client)."""
+    """Appends and reads run events (a decoded Redis client).
 
-    def __init__(self, redis: aioredis.Redis) -> None:
-        """Uses ``redis`` (decode_responses=True)."""
+    The brief (increment 5) uses the same streams with the prefix
+    ``brief``: ``brief:{id}:events``.
+    """
+
+    def __init__(self, redis: aioredis.Redis, prefix: str = "run") -> None:
+        """Uses ``redis`` (decode_responses=True) and the key prefix."""
         self._redis = redis
+        self._prefix = prefix
 
     async def publish(
         self, run_id: int, kind: str, data: dict[str, Any]
     ) -> str:
         """Appends one event; returns its stream id."""
-        key = stream_key(run_id)
+        key = stream_key(run_id, self._prefix)
         event_id = await self._redis.xadd(
             key,
             {"kind": kind, "data": json.dumps(data)},
@@ -68,7 +73,7 @@ class RunEvents:
             (id, kind, data) triples, oldest first; empty on a timeout.
         """
         found = await self._redis.xread(
-            {stream_key(run_id): after},
+            {stream_key(run_id, self._prefix): after},
             count=200,
             block=block_ms if block_ms > 0 else None,
         )

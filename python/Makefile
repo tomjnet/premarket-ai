@@ -18,7 +18,8 @@ VENDOR_BUILD = $(ENGINE) build -f podman/vendor-sim/Containerfile \
   --build-context config=python/config python/vendor-sim
 API_BUILD = $(ENGINE) build -f podman/ai-api/Containerfile \
   --build-context fastpath=cpp/fastpath --build-context config=python/config \
-  --build-context vendorsim=python/vendor-sim python/ai-api
+  --build-context vendorsim=python/vendor-sim \
+  --build-context skills=python/skills python/ai-api
 WEB_BUILD = $(ENGINE) build -f podman/web/Containerfile ui/web
 MCP_BUILD = $(ENGINE) build -f podman/mcp-server/Containerfile \
   --build-context config=python/config python/mcp-server
@@ -28,7 +29,8 @@ PSQL = $(COMPOSE) exec -T postgres psql -U premarket -d premarket
 # Increment 1 runs the legacy pipeline and the website side by side;
 # increment 2 adds the C++20 ingester (profile legacy) and the rule checks;
 # increment 3 adds the LLM gateway, chroma and the reranker (profile ai);
-# increment 4 adds ai-worker, mcp-server and searxng (profile ai).
+# increment 4 adds ai-worker, mcp-server and searxng (profile ai);
+# increment 5 adds the brief (ai-worker) and retires the PDF.
 # `run` always uses --no-deps: with Podman, compose recreates the running
 # postgres for every `run` with dependencies, and ai-api would lose its
 # connections for a few seconds. `up` (or `demo`) starts everything first.
@@ -53,8 +55,14 @@ NEW_SETTINGS = WEB_PORT WEB_BIND DEMO_USER_PASSWORD ACCESS_TOKEN_TTL_S \
   LANGFUSE_TRACING LANGFUSE_PORT LANGFUSE_INIT_USER_EMAIL \
   HITL_CONFIDENCE_MIN JUDGE_CLOUD_MODEL LLM_MONTHLY_BUDGET_USD LLAMA_GUARD   GUARD_NEWS_REVIEW \
   ML_BASELINE WORKER_CONCURRENCY WORKER_MEM MCP_BIND MCP_PORT \
-  WEB_SEARCH_PER_MIN PRICES_PER_MIN
+  WEB_SEARCH_PER_MIN PRICES_PER_MIN \
+  LEGACY_PDF_ENABLED BRIEF_MODEL CHAT_AGENTS AGENT_MAX_TOOL_CALLS \
+  CHAT_CACHE CHAT_CACHE_TTL_S CHAT_CACHE_DISTANCE
 WEB_PORT ?= $(shell grep -s '^WEB_PORT=' $(ROOT)/.env | cut -d= -f2)
+# Increment 5: the web brief replaced the PDF (true brings it back).
+LEGACY_PDF_ENABLED ?= $(or $(shell grep -s '^LEGACY_PDF_ENABLED=' \
+  $(ROOT)/.env | cut -d= -f2),false)
+EDITION ?= morning
 
 .DEFAULT_GOAL := help
 .PHONY: help env build up down logs ps test lint cpp-test cpp-lint \
@@ -63,7 +71,7 @@ WEB_PORT ?= $(shell grep -s '^WEB_PORT=' $(ROOT)/.env | cut -d= -f2)
         enrich corpus reindex llm-status ai-runs eval-image eval-ai \
         bench-models eval-rag obs-up obs-down verify demo-open \
         verify-runs review-queue mcp-test mcp-lint mcp-tools mcp-call \
-        ml-train worker-logs \
+        ml-train worker-logs brief brief-refresh briefs brief-usage \
         web openapi audit ingest-legacy ingest-modern parity rules registry \
         dedup-rebuild rule-runs eval bench ingest-test ingest-lint \
         ingest-asan ingest-tsan fastpath-test fastpath-lint fastpath-asan
@@ -117,6 +125,7 @@ web: ## Print the website URL and the demo logins
 	@echo "Website: http://localhost:$(or $(WEB_PORT),8080)"
 	@echo "Logins:  trader1, analyst1, admin1 (password: DEMO_USER_PASSWORD in .env)"
 	@echo "Review:  analyst1 or admin1 -> Review queue; MCP: make -C python mcp-tools"
+	@echo "Brief:   Today's brief (every role); My watchlist; Ask the News (agents)"
 
 obs-up: ## Start Langfuse (profile observability); set LANGFUSE_TRACING=true
 	cd $(ROOT) && $(COMPOSE) --profile observability up -d --wait
@@ -229,9 +238,11 @@ check: test lint sanitizers eval ## Everything CI runs
 # The increment's "done when", through the edge: C++20 parity PASS, the rule
 # run DONE, the feed hides exactly the rule duplicates and shows FAKE badges,
 # every unique item has a verdict with evidence, low-confidence items wait in
-# the review queue (an analyst approves one and the worker resumes it), plus
-# the security checks of increment 1.
-smoke: ## Website check for DATE: verdicts, review, rules, login, headers
+# the review queue (an analyst approves one and the worker resumes it), the
+# brief (only VERIFIED and "Unconfirmed - watch" items) with the watchlist,
+# the semantic cache and the chat agents, the PDF switched off, plus the
+# security checks of increment 1.
+smoke: ## Website check for DATE: brief, agents, verdicts, review, rules, login
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api smoke --base-url http://edge:8080 --date $(DATE)
 
@@ -246,15 +257,18 @@ audit: ## Last 20 auth events (logins, failures, lockouts, logouts)
 	  client_ip FROM ai.audit_log ORDER BY id DESC LIMIT 20"
 
 # --- the demo day -----------------------------------------------------------
-demo: up ## Whole day: history + DATE (ingest, rules, AI, verify), corpus, PDF, check
+# Increment 5: the brief replaces the PDF (report and pdf only run with
+# LEGACY_PDF_ENABLED=true).
+PDF_STEPS = $(if $(filter true,$(LEGACY_PDF_ENABLED)),report pdf,)
+demo: up ## Whole day: history + DATE (ingest, rules, AI, verify, brief), check
 	@for i in $$(seq $(HISTORY_DAYS) -1 1); do \
 	  d=$$(date -d "$(DATE) -$$i day" +%F); \
 	  echo "== history $$d"; \
 	  $(MAKE) --no-print-directory ingest parity rules DATE=$$d || exit 1; \
 	done
 	$(MAKE) --no-print-directory corpus
-	$(MAKE) --no-print-directory ingest parity rules enrich verify report \
-	  runs pdf smoke web DATE=$(DATE)
+	$(MAKE) --no-print-directory ingest parity rules enrich verify brief \
+	  $(PDF_STEPS) runs smoke web DATE=$(DATE)
 
 ingest: ingest-legacy ingest-modern ## Ingest DATE with both ingesters
 
@@ -301,6 +315,26 @@ verify: ## AI verification of DATE: queue the run, follow it (GPU host)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api verify --date $(DATE)
 
+brief: ## Pre-market brief of DATE (EDITION=morning|refresh), after verify
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api brief --date $(DATE) --edition $(EDITION)
+
+brief-refresh: ## The 09:00 refresh of DATE's brief (items reviewed since)
+	$(MAKE) --no-print-directory brief EDITION=refresh DATE=$(DATE)
+
+briefs: ## Last 10 briefs (edition, items, overview source, model, time)
+	@cd $(ROOT) && $(PSQL) -c "SELECT brief_id, feed_date, edition, status, \
+	  verified AS ver, unconfirmed AS watch, pending_review AS pending, \
+	  excluded AS left_out, overview_source AS overview, model, cloud, \
+	  round(cost_usd::numeric, 4) AS cost, total_ms FROM ai.brief \
+	  ORDER BY brief_id DESC LIMIT 10"
+
+brief-usage: ## Who opened the brief, per day (the PDF retirement check)
+	@cd $(ROOT) && $(PSQL) -c "SELECT detail->>'date' AS feed_date, \
+	  actor, count(*) AS views, to_char(max(at) AT TIME ZONE \
+	  'America/New_York', 'MM-DD HH24:MI') AS last_et FROM ai.audit_log \
+	  WHERE action = 'brief' GROUP BY 1, 2 ORDER BY 1 DESC, 2 LIMIT 30"
+
 demo-open: ## Market open for DATE: pending reviews expire (verdicts stand)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api expire --date $(DATE)
@@ -334,7 +368,7 @@ dedup-rebuild: ## Re-index the 7-day dedup window ending at DATE into Redis
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api dedup-rebuild --date $(DATE)
 
-report: ## Render /nfs/reports/DATE.pdf
+report: ## Render /nfs/reports/DATE.pdf (nothing when LEGACY_PDF_ENABLED=false)
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps legacy report --date $(DATE)
 
 rule-runs: ## Last 10 rule runs (duplicates by type, reason codes)

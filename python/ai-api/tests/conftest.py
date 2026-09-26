@@ -172,6 +172,7 @@ class FakeNews:
             )
         }
         self.queries: list[news.NewsQuery] = []
+        self.registry: set[str] | None = {"AAPL", "MSFT", "BRK.B"}
         self.run: dict[str, Any] | None = {
             "run_id": 42,
             "status": "DONE",
@@ -227,6 +228,12 @@ class FakeNews:
     async def item(self, item_id: int) -> dict[str, Any] | None:
         """Returns one row by id."""
         return next((r for r in self.rows if r["id"] == item_id), None)
+
+    async def known_tickers(self, tickers: list[str]) -> set[str] | None:
+        """A registry of AAPL, MSFT and BRK.B; None when it's empty."""
+        if self.registry is None:
+            return None
+        return {t for t in tickers if t in self.registry}
 
 
 def make_verify_run(**overrides: Any) -> dict[str, Any]:

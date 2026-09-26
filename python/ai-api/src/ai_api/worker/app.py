@@ -13,6 +13,11 @@ Tasks (enqueued by name, see ``worker.queue``):
   fails twice is recorded as FAILED and counted, so the run still ends.
 - ``verify.resume(run_id, news_id, thread_id, decision)``: resumes a graph
   waiting in ``review`` with the analyst's (or the expiry's) decision.
+- ``brief.write(brief_id)`` (increment 5): the pre-market brief
+  (``agents.brief``).
+
+The watchlist rule (increment 5) reads every trader's watchlist from the
+LangGraph store, at most once a minute per worker process.
 
 Everything the tasks share (pools, the MCP client, the models, the compiled
 graph) is built once per process at worker startup.
@@ -24,17 +29,23 @@ import contextlib
 import dataclasses
 import logging
 import os
+import time
 from typing import Any
 
 from langchain_mcp_adapters import client as mcp_client
 from langgraph import types as lg_types
 from langgraph.checkpoint.postgres import aio as pg_checkpoint
+from langgraph.store.postgres import aio as pg_store
 from psycopg import rows
 from psycopg_pool import AsyncConnectionPool
 from redis import asyncio as aioredis
 import taskiq
 
+from ai_api import briefs
 from ai_api import config
+from ai_api import memory as memory_lib
+from ai_api.agents import brief as brief_lib
+from ai_api.agents import skills
 from ai_api.guard import llama_guard
 from ai_api.llm import budget
 from ai_api.llm import factory
@@ -51,6 +62,29 @@ from ai_api.worker import queue
 _log = logging.getLogger(__name__)
 _ATTEMPTS = 2
 _GUARD_TOKENS = 20
+_WATCHED_TTL_S = 60.0
+_BRIEF_TOKENS = 500
+
+
+class WatchedTickers:
+    """Every watched ticker, re-read at most every ``ttl_s`` seconds."""
+
+    def __init__(
+        self, memory: memory_lib.Memory, ttl_s: float = _WATCHED_TTL_S
+    ) -> None:
+        """Reads from ``memory``."""
+        self._memory = memory
+        self._ttl_s = ttl_s
+        self._value: frozenset[str] = frozenset()
+        self._read_at = -ttl_s
+
+    async def __call__(self) -> frozenset[str]:
+        """The tickers (a store error propagates: the rule is skipped)."""
+        now = time.monotonic()
+        if now - self._read_at >= self._ttl_s:
+            self._value = await self._memory.watched_tickers()
+            self._read_at = now
+        return self._value
 
 
 def _baseline(settings: config.VerifySettings) -> Any:
@@ -85,6 +119,8 @@ class _Runtime:
     coordinator: coordinator.Coordinator
     queue: queue.Queue
     tracer: tracing.Tracer
+    memory_pool: AsyncConnectionPool
+    brief: brief_lib.Job
 
 
 class Worker:
@@ -152,6 +188,15 @@ class Worker:
             )
         tracer = tracing.Tracer(settings.tracing)
         repo = repository.VerifyRepository(pool)
+        memory_pool = memory_lib.store_pool(
+            settings.database, "ai-worker", max_size=2
+        )
+        await memory_pool.open(wait=True)
+        memory = memory_lib.StoreMemory(
+            pg_store.AsyncPostgresStore(memory_pool)
+        )
+        cloud_budget = budget.CloudBudget(redis, settings.monthly_budget_usd)
+        members = universe.load(settings.config_dir)
         deps = graph_lib.Deps(
             repo=repo,
             judge=judge_lib.Judge(
@@ -159,14 +204,15 @@ class Worker:
                 llm.main_model,
                 cloud=cloud,
                 cloud_name=settings.judge_cloud_model,
-                budget=budget.CloudBudget(redis, settings.monthly_budget_usd),
+                budget=cloud_budget,
             ),
             tracer=tracer,
             events=events.RunEvents(redis),
             ml=_baseline(settings),
-            universe_size=len(universe.load(settings.config_dir)),
+            universe_size=len(members),
             min_confidence=settings.hitl_confidence_min,
             guard_routes=settings.guard_news_review,
+            watched=WatchedTickers(memory),
         )
         guard = llama_guard.Guard(
             factory.chat_model(
@@ -174,6 +220,26 @@ class Worker:
             )
             if settings.llama_guard
             else None
+        )
+        writer = brief_lib.Writer(
+            factory.chat_model(llm, max_tokens=_BRIEF_TOKENS),
+            llm.main_model,
+            skills.Library.load(settings.skills_dir),
+            tracer,
+            cloud=(
+                factory.chat_model(
+                    llm,
+                    model=settings.brief_model,
+                    max_tokens=_BRIEF_TOKENS,
+                    response_headers=True,
+                )
+                if settings.brief_model
+                else None
+            ),
+            cloud_name=settings.brief_model,
+            budget=cloud_budget,
+            guard=guard,
+            guard_blocks=settings.guard_news_review,
         )
         jobs = queue.Queue(self._broker)
         self._runtime = _Runtime(
@@ -200,13 +266,22 @@ class Worker:
             ),
             queue=jobs,
             tracer=tracer,
+            memory_pool=memory_pool,
+            brief=brief_lib.Job(
+                briefs.PostgresBriefs(pool),
+                writer,
+                events.RunEvents(redis, prefix="brief"),
+                members,
+            ),
         )
         _log.info(
-            "ai-worker ready: judge %s, cloud %s, guard %s, classic ML %s",
+            "ai-worker ready: judge %s, cloud %s, guard %s, classic ML %s,"
+            " brief %s",
             llm.main_model,
             settings.judge_cloud_model or "off",
             llm.guard_model if settings.llama_guard else "off",
             "on" if deps.ml is not None else "off",
+            settings.brief_model or llm.main_model,
         )
 
     async def stop(self, state: taskiq.TaskiqState) -> None:
@@ -217,6 +292,7 @@ class Worker:
         self._runtime.tracer.flush()
         await self._runtime.pool.close()
         await self._runtime.checkpoint_pool.close()
+        await self._runtime.memory_pool.close()
         await self._runtime.redis.aclose()
 
     async def run_day(self, run_id: int) -> int:
@@ -313,6 +389,10 @@ class Worker:
         )
         return "resumed"
 
+    async def write_brief(self, brief_id: int) -> str:
+        """The brief job (``agents.brief.Job``)."""
+        return await self.runtime.brief.run(brief_id)
+
 
 def build_broker() -> Any:
     """The worker's broker with the tasks (the taskiq CLI's factory)."""
@@ -340,5 +420,10 @@ def build_broker() -> Any:
 
     broker.register_task(run_day, task_name=queue.RUN_DAY)
     broker.register_task(verify_item, task_name=queue.VERIFY_ITEM)
+
+    async def write_brief(brief_id: int) -> str:
+        return await worker.write_brief(brief_id)
+
     broker.register_task(resume, task_name=queue.RESUME)
+    broker.register_task(write_brief, task_name=queue.WRITE_BRIEF)
     return broker

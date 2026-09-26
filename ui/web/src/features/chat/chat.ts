@@ -52,6 +52,15 @@ const KIND_LABEL: Record<SourceKind, string> = {
   fed_press: 'Federal Reserve release',
   sec_press: 'SEC release',
   vendor: 'Vendor item (unverified)',
+  // Increment 5: what the specialists' tools returned.
+  verification: 'premarket-ai verdicts',
+  company: 'SEC ticker registry',
+  reputation: 'Source reputation list',
+  corpus_search: 'SEC filings search',
+  prices: 'Market data (daily closes)',
+  brief: 'Pre-market brief',
+  web: 'Web search (unverified)',
+  web_page: 'Web page (unverified)',
 };
 
 /** What a source is, in words: `SEC filing 8-K`. */

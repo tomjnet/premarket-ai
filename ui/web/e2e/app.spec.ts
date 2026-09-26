@@ -213,7 +213,67 @@ test.describe('Review queue (increment 4)', () => {
   });
 });
 
+test.describe("Today's brief and the watchlist (increment 5)", () => {
+  for (const colorScheme of ['light', 'dark'] as const) {
+    test(`brief, a watchlist and the agents' steps in ${colorScheme} mode`, async ({
+      page,
+    }) => {
+      test.slow();
+      await page.emulateMedia({colorScheme});
+      await logIn(page);
+      await page.getByRole('link', {name: 'My watchlist'}).click();
+      await page.getByLabel('Tickers').fill('aapl');
+      await page.getByLabel('Energy').check();
+      await page.getByRole('button', {name: 'Save watchlist'}).click();
+      await expect(page.getByText(/^Watchlist saved: 1 tickers/)).toBeVisible();
+      await expectNoA11yViolations(page);
+
+      await page.getByRole('link', {name: "Today's brief"}).click();
+      await expect(page.getByRole('heading', {name: 'Overview'})).toBeVisible();
+      await expect(
+        page.getByRole('list', {name: 'Your watchlist'}),
+      ).toBeVisible();
+      await expect(page.getByText('FAKE', {exact: true})).toHaveCount(0);
+      await expectNoA11yViolations(page);
+
+      await page.getByRole('link', {name: 'Ask the News'}).click();
+      await page
+        .getByLabel('Your question')
+        .fill('Why is Apple news flagged today?');
+      await page.getByRole('button', {name: 'Ask'}).click();
+      await expect(page.getByText(/called list_news/)).toBeVisible();
+      await expect(
+        page.getByText('premarket-ai verdicts', {exact: true}),
+      ).toBeVisible();
+      await expectNoA11yViolations(page);
+    });
+  }
+
+  test('360 px wide: the brief does not overflow', async ({page}) => {
+    await page.setViewportSize({width: 360, height: 800});
+    await logIn(page);
+    await page.goto('/brief');
+    await expect(page.getByRole('heading', {name: 'Overview'})).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+  });
+});
+
 test.describe('every mock scenario', () => {
+  test('brief-writing: the brief fills in as it is written', async ({page}) => {
+    await logIn(page, 'brief-writing');
+    await page.goto('/brief');
+    await expect(page.getByText(/is being written/)).toBeVisible();
+    await expect(page.getByRole('heading', {name: 'Overview'})).toBeVisible();
+  });
+
+  test('brief-failed: the brief says it failed', async ({page}) => {
+    await logIn(page, 'brief-failed');
+    await page.goto('/brief');
+    await expect(
+      page.getByText('The brief failed. An analyst can write it again.'),
+    ).toBeVisible();
+  });
+
   test('default: the day with its summary', async ({page}) => {
     await logIn(page);
     await expect(

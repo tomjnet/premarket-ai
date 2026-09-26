@@ -68,6 +68,7 @@ const REASON_TEXT: Record<string, string> = {
   judge_disagrees: 'The LLM judge disagrees with the rules',
   guard_unsafe: 'Llama Guard flagged the text',
   unsupported_language: 'Not in English',
+  watchlist: 'A ticker on a trader’s watchlist',
 };
 
 const IMPACT_TEXT: Record<Impact, string> = {

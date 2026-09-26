@@ -8,12 +8,12 @@ security headers.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import contextlib
 import datetime
 import logging
 import os
-import pathlib
 from typing import Any
 
 import fastapi
@@ -21,22 +21,29 @@ from psycopg_pool import AsyncConnectionPool
 from redis import asyncio as aioredis
 
 import ai_api
+from ai_api import briefs
 from ai_api import config
 from ai_api import deps
+from ai_api import memory as memory_lib
 from ai_api import news
 from ai_api import sessions
 from ai_api import users
 from ai_api import verdicts
+from ai_api.agents import skills
+from ai_api.agents import supervisor
 from ai_api.guard import llama_guard
 from ai_api.llm import factory
 from ai_api.llm import tracing
 from ai_api.rag import ask
+from ai_api.rag import cache
 from ai_api.rag import rerank
 from ai_api.rag import store
 from ai_api.rag import universe
 from ai_api.routes import auth
+from ai_api.routes import briefs as brief_routes
 from ai_api.routes import chat
 from ai_api.routes import health
+from ai_api.routes import me
 from ai_api.routes import news as news_routes
 from ai_api.routes import review
 from ai_api.routes import runs
@@ -75,8 +82,64 @@ def _vendor_lookup(
     return lookup
 
 
-def build_ask(
-    settings: config.Settings, news_store: news.NewsStore
+def _team(
+    settings: config.Settings, tracer: tracing.Tracer
+) -> supervisor.Supervisor | None:
+    """The chat's multi-agent team, when the MCP server is configured."""
+    llm = settings.llm
+    if llm is None or not settings.chat_agents:
+        return None
+    if not settings.mcp_token:
+        _log.warning("MCP_SERVICE_TOKEN isn't set: chat agents are off")
+        return None
+    from langchain_mcp_adapters import client as mcp_client  # noqa: PLC0415
+
+    mcp = mcp_client.MultiServerMCPClient(
+        {
+            supervisor.SERVER: {
+                "transport": "streamable_http",
+                "url": settings.mcp_url,
+                "headers": {"Authorization": f"Bearer {settings.mcp_token}"},
+                "timeout": 30,
+                "sse_read_timeout": 120,
+            }
+        }
+    )
+    return supervisor.Supervisor(
+        factory.chat_model(llm, max_tokens=400),
+        skills.Library.load(settings.skills_dir),
+        tracer,
+        mcp=mcp,
+        max_tool_calls=settings.agent_max_tool_calls,
+    )
+
+
+async def _cache(
+    settings: config.Settings, embeddings: store.PrefixedEmbeddings
+) -> cache.AnswerCache | None:
+    """The semantic answer cache (off when Redis can't create it)."""
+    llm = settings.llm
+    if llm is None or not settings.chat_cache:
+        return None
+    url = queue.redis_url(settings.redis_host, settings.redis_password)
+    try:
+        backend = await asyncio.to_thread(
+            cache.build_backend,
+            url,
+            llm.embed_dims,
+            settings.chat_cache_ttl_s,
+            settings.chat_cache_distance,
+        )
+    except Exception as e:  # noqa: BLE001 - chat works without a cache.
+        _log.warning("semantic cache off: %r", e)
+        return None
+    return cache.AnswerCache(backend, embeddings, settings.chat_cache_ttl_s)
+
+
+async def build_ask(
+    settings: config.Settings,
+    news_store: news.NewsStore,
+    memory: memory_lib.Memory | None = None,
 ) -> tuple[ask.AskService | None, rerank.Reranker | None]:
     """The "Ask the News" service when the LLM and RAG are configured."""
     llm = settings.llm
@@ -92,21 +155,30 @@ def build_ask(
         if settings.llama_guard
         else None
     )
-    config_dir = pathlib.Path(
-        os.environ.get("PREMARKET_CONFIG_DIR", "/app/config")
-    )
+    tracer = tracing.Tracer(settings.tracing)
     service = ask.AskService(
         store=store.CorpusStore(settings.rag, embeddings, llm.embed_model),
         reranker=reranker,
         model=factory.chat_model(llm, max_tokens=600),
-        tracer=tracing.Tracer(settings.tracing),
+        tracer=tracer,
         cfg=settings.rag,
-        members=universe.load(config_dir),
+        members=universe.load(settings.config_dir),
         vendor_lookup=_vendor_lookup(news_store),
         model_name=llm.main_model,
         guard=guard,
+        team=_team(settings, tracer),
+        cache=await _cache(settings, embeddings),
+        memory=memory,
     )
     return service, reranker
+
+
+def _sectors(settings: config.Settings) -> tuple[str, ...]:
+    try:
+        return tuple(universe.sectors(universe.load(settings.config_dir)))
+    except OSError as e:
+        _log.warning("universe.yaml unreadable: %r", e)
+        return ()
 
 
 @contextlib.asynccontextmanager
@@ -148,12 +220,21 @@ async def open_services(
         await redis.ping()
 
     news_store = news.PostgresNewsStore(pool)
-    ask_service, reranker = build_ask(settings, news_store)
     jobs = queue.Queue(
         queue.make_broker(settings.redis_host, settings.redis_password)
     )
     await jobs.start()
-    try:
+    async with contextlib.AsyncExitStack() as stack:
+        # Closed in reverse order: the queue, the pools, then Redis.
+        stack.push_async_callback(redis.aclose)
+        stack.push_async_callback(pool.close)
+        stack.push_async_callback(jobs.stop)
+        memory = await stack.enter_async_context(
+            memory_lib.open_memory(settings.database, "ai-api")
+        )
+        ask_service, reranker = await build_ask(settings, news_store, memory)
+        if reranker is not None:
+            stack.push_async_callback(reranker.aclose)
         yield deps.Services(
             settings=settings,
             users=users.PostgresUserStore(pool),
@@ -171,13 +252,11 @@ async def open_services(
             verdicts=verdicts.PostgresVerdictStore(pool),
             queue=jobs,
             run_events=events.RunEvents(redis),
+            briefs=briefs.PostgresBriefs(pool),
+            brief_events=events.RunEvents(redis, prefix="brief"),
+            memory=memory,
+            sectors=_sectors(settings),
         )
-    finally:
-        await jobs.stop()
-        await pool.close()
-        await redis.aclose()
-        if reranker is not None:
-            await reranker.aclose()
 
 
 def create_app(
@@ -238,4 +317,6 @@ def create_app(
     app.include_router(chat.router)
     app.include_router(runs.router)
     app.include_router(review.router)
+    app.include_router(brief_routes.router)
+    app.include_router(me.router)
     return app

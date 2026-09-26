@@ -33,7 +33,8 @@ type SessionListener = (
 
 /** What every call to the backend has, JSON or stream. */
 interface CallRequest {
-  method?: 'GET' | 'POST';
+  /** `PUT` only replaces the caller's watchlist (increment 5). */
+  method?: 'GET' | 'POST' | 'PUT';
   /** Contract path, for example `/news` or `/news/42`. */
   path: string;
   /** Query parameters; `undefined` values are left out. */

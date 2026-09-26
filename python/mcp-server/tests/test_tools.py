@@ -94,6 +94,56 @@ class FakeStore:
             }
         ]
 
+    async def news(self, day, ticker, verdict):
+        """One FAKE item of 2026-09-24 about QVXH."""
+        row = {
+            "vendor_item_id": "VND-20260924-002",
+            "headline": "[SYNTHETIC] Qvx Holdings to merge",
+            "source_domain": "pennyrocket.example",
+            "tickers": ["QVXH"],
+            "status": "DONE",
+            "verdict": "FAKE",
+            "confidence": 0.95,
+            "reason_codes": ["FAKE_TICKER"],
+            "review_status": None,
+            "impact": "low",
+        }
+        if day != datetime.date(2026, 9, 24):
+            return []
+        if ticker not in (None, "QVXH") or verdict not in (None, "FAKE"):
+            return []
+        return [row]
+
+    async def brief(self, day):
+        """A morning brief of 2026-09-24."""
+        if day != datetime.date(2026, 9, 24):
+            return None
+        return {
+            "feed_date": day,
+            "edition": "morning",
+            "finished_at": datetime.datetime(
+                2026, 9, 24, 11, 16, tzinfo=datetime.UTC
+            ),
+            "overview": "Apple raised its dividend [1].",
+            "content": {
+                "counts": {"verified": 1},
+                "items": [
+                    {
+                        "n": 1,
+                        "section": "top",
+                        "vendor_item_id": "VND-20260924-001",
+                        "headline": "[SYNTHETIC] Apple raises dividend",
+                        "summary": "Apple raised its dividend.",
+                        "tickers": ["AAPL"],
+                        "sector": "Information Technology",
+                        "verdict": "VERIFIED",
+                        "impact": "medium",
+                        "body": "not sent",
+                    }
+                ],
+            },
+        }
+
 
 def _lookups():
     return store.Lookups(FakeStore(), store.load_universe(_CONFIG))
@@ -130,6 +180,25 @@ def test_verification_with_evidence():
     assert found["verdict"] == "VERIFIED"
     assert found["evidence"] == [{"E1": "trusted", "check": "source"}]
     assert asyncio.run(_lookups().verification("DROP TABLE"))["found"] is False
+
+
+def test_list_news_filters_and_validates():
+    found = asyncio.run(_lookups().news("2026-09-24", "qvxh", "fake"))
+    assert found["count"] == 1
+    assert found["items"][0]["verdict"] == "FAKE"
+    assert found["items"][0]["pending_review"] is False
+    assert "error" in asyncio.run(_lookups().news("yesterday", None, None))
+    assert "error" in asyncio.run(_lookups().news("2026-09-24", "A;B", None))
+    assert "error" in asyncio.run(_lookups().news("2026-09-24", None, "BAD"))
+
+
+def test_get_brief():
+    found = asyncio.run(_lookups().brief("2026-09-24"))
+    assert found["found"] and found["edition"] == "morning"
+    assert found["items"][0]["vendor_item_id"] == "VND-20260924-001"
+    assert "body" not in found["items"][0]
+    assert asyncio.run(_lookups().brief("2026-09-23"))["found"] is False
+    assert asyncio.run(_lookups().brief("nope"))["found"] is False
 
 
 def test_cache_and_rate_limit():
@@ -258,6 +327,8 @@ def test_the_mcp_endpoint_needs_the_token_and_lists_read_only_tools():
             "get_source_reputation",
             "search_news",
             "get_verification",
+            "list_news",
+            "get_brief",
             "web_search",
             "fetch_url",
             "get_price_history",

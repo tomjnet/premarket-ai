@@ -13,7 +13,12 @@ export const QUESTION_MAX_CHARS = 500;
 
 const isoDateSchema = z.string().refine(isIsoDate, 'Expected YYYY-MM-DD');
 
-/** Where a source comes from. Everything but `vendor` is trusted. */
+/**
+ * Where a source comes from. The first six are the corpus and the day's
+ * vendor items (increment 3); the rest are results of the specialists'
+ * tools (increment 5). `trusted` says which ones are (vendor items and web
+ * results aren't).
+ */
 export const sourceKindSchema = z.enum([
   'edgar_8k',
   'edgar_ex99',
@@ -21,6 +26,14 @@ export const sourceKindSchema = z.enum([
   'fed_press',
   'sec_press',
   'vendor',
+  'verification',
+  'company',
+  'reputation',
+  'corpus_search',
+  'prices',
+  'brief',
+  'web',
+  'web_page',
 ]);
 
 /** Wire format of one numbered source of an answer. */
@@ -57,6 +70,22 @@ export const chatDoneWireSchema = z.object({
   model: z.string(),
   prompt_version: z.string(),
   elapsed_ms: z.number().int().nonnegative(),
+  // Increment 5: the specialists whose results are sources, and whether
+  // the answer came from the semantic cache.
+  agents: z.array(z.string()),
+  cached: z.boolean(),
+});
+
+/**
+ * `event: step` (increment 5): the multi-agent team's progress before the
+ * sources. `action`: `plan`, `tool`, `done` or `failed`; `detail` is plain
+ * text (a tool's arguments can hold anything: shown as text only).
+ */
+export const chatStepWireSchema = z.object({
+  agent: z.string(),
+  title: z.string(),
+  action: z.string(),
+  detail: z.string(),
 });
 
 /** `event: error`: the answer failed after the stream started. */
@@ -87,7 +116,11 @@ export const chatDoneSchema = chatDoneWireSchema.transform(wire => ({
   model: wire.model,
   promptVersion: wire.prompt_version,
   elapsedMs: wire.elapsed_ms,
+  agents: wire.agents,
+  cached: wire.cached,
 }));
+
+export type ChatStep = z.infer<typeof chatStepWireSchema>;
 
 export type SourceKind = z.infer<typeof sourceKindSchema>;
 export type ChatSources = z.output<typeof chatSourcesSchema>;
@@ -99,6 +132,7 @@ export type ChatDoneWire = z.infer<typeof chatDoneWireSchema>;
 
 /** One event of the answer stream, as the UI uses it. */
 export type ChatEvent =
+  | {type: 'step'; data: ChatStep}
   | {type: 'sources'; data: ChatSources}
   | {type: 'token'; text: string}
   | {type: 'done'; data: ChatDone}

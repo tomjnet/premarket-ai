@@ -526,6 +526,8 @@ describe('chat schemas', () => {
     model: 'main-gpu4gb',
     prompt_version: 'ask-v1',
     elapsed_ms: 2150,
+    agents: ['fact_checker'],
+    cached: false,
   };
 
   it('maps the sources event', () => {
@@ -594,8 +596,10 @@ describe('chat schemas', () => {
       model: 'main-gpu4gb',
       promptVersion: 'ask-v1',
       elapsedMs: 2150,
+      agents: ['fact_checker'],
+      cached: false,
     });
-    for (const field of ['answer', 'citations', 'refused']) {
+    for (const field of ['answer', 'citations', 'refused', 'cached']) {
       const partial: Record<string, unknown> = {...done};
       delete partial[field];
       expect(chatDoneSchema.safeParse(partial).success).toBe(false);
