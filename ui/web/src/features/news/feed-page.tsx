@@ -6,9 +6,14 @@ import {LoadError} from '@/components/load-error';
 import {formatLongDate, todayInNewYork} from '@/lib/time';
 
 import {FeedFiltersBar} from './components/feed-filters-bar';
-import {FeedSkeleton, NoFeed, RunStatus} from './components/feed-states';
+import {
+  FeedSkeleton,
+  NoFeed,
+  RuleRunStatus,
+  RunStatus,
+} from './components/feed-states';
 import {NewsRow} from './components/news-row';
-import {feedSearch, newestFirst, parseFeedFilters} from './feed';
+import {feedSearch, newestFirst, parseFeedFilters, visibleItems} from './feed';
 import type {FeedFilters} from './feed';
 import {
   useFeedKeyboard,
@@ -112,6 +117,7 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
     () => (list === undefined ? [] : newestFirst(list.items)),
     [list],
   );
+  const shown = useMemo(() => visibleItems(items, filters), [items, filters]);
   if (list === undefined) {
     if (feed.isError) {
       return (
@@ -152,7 +158,20 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
       ) : (
         <RunStatus list={list} filters={filters} today={today} />
       )}
-      {items.length === 0 ? (
+      <RuleRunStatus ruleRun={list.ruleRun} />
+      {items.length > 0 && shown.length === 0 && (
+        <div className="flex flex-col items-start gap-2 py-6">
+          <p>No item in this view was flagged by the rule checks.</p>
+          <button
+            type="button"
+            onClick={() => onChange({...filters, flagged: false})}
+            className="font-medium underline underline-offset-4"
+          >
+            Show all items
+          </button>
+        </div>
+      )}
+      {items.length === 0 && (
         <div className="flex flex-col items-start gap-2 py-6">
           <p>
             {filtered
@@ -171,15 +190,18 @@ function FeedBody({feed, filters, today, onChange}: FeedBodyProps) {
             </button>
           )}
         </div>
-      ) : (
+      )}
+      {shown.length > 0 && (
         <ul aria-label="News items" className="flex flex-col gap-3">
-          {items.map(item => (
+          {shown.map(item => (
             <NewsRow
               key={item.id}
               item={item}
               activeTicker={filters.ticker}
               onTickerClick={toggleTicker}
               feedSearch={search}
+              duplicatesShown={filters.dups}
+              markUnchecked={list.ruleRun !== null}
             />
           ))}
         </ul>

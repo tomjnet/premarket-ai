@@ -1,13 +1,24 @@
 """Companies and sources the synthetic vendor writes about.
 
-REAL_COMPANIES matches sql/02_legacy_seed.sql. FAKE_COMPANIES are invented;
-from increment 2 the entity check proves they are absent from the SEC ticker
-registry.
+The real companies are the lab universe in ``python/config/universe.yaml``
+(the 50 largest S&P 500 companies); ``LAB_UNIVERSE_SIZE`` keeps the first N.
+FAKE_COMPANIES are invented and absent from the SEC ticker registry, which the
+entity check (increment 2) uses to flag them.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import functools
+import os
+import pathlib
+
+import yaml
+
+# src/vendor_sim/companies.py in python/vendor-sim -> python/config.
+_REPO_CONFIG_DIR = pathlib.Path(__file__).resolve().parents[3] / "config"
+_UNIVERSE_FILE = "universe.yaml"
+_MIN_UNIVERSE = 2
 
 
 @dataclasses.dataclass(frozen=True)
@@ -27,39 +38,58 @@ class Company:
     sector: str
 
 
-REAL_COMPANIES: tuple[Company, ...] = (
-    Company("AAPL", "Apple Inc.", "Apple", "Information Technology"),
-    Company(
-        "MSFT", "Microsoft Corporation", "Microsoft", "Information Technology"
-    ),
-    Company("NVDA", "NVIDIA Corporation", "NVIDIA", "Information Technology"),
-    Company("AMZN", "Amazon.com, Inc.", "Amazon", "Consumer Discretionary"),
-    Company("GOOGL", "Alphabet Inc.", "Alphabet", "Communication Services"),
-    Company("META", "Meta Platforms, Inc.", "Meta", "Communication Services"),
-    Company("AVGO", "Broadcom Inc.", "Broadcom", "Information Technology"),
-    Company("TSLA", "Tesla, Inc.", "Tesla", "Consumer Discretionary"),
-    Company("JPM", "JPMorgan Chase & Co.", "JPMorgan", "Financials"),
-    Company("LLY", "Eli Lilly and Company", "Eli Lilly", "Health Care"),
-    Company("V", "Visa Inc.", "Visa", "Financials"),
-    Company("XOM", "Exxon Mobil Corporation", "Exxon Mobil", "Energy"),
-    Company("UNH", "UnitedHealth Group Inc.", "UnitedHealth", "Health Care"),
-    Company("MA", "Mastercard Incorporated", "Mastercard", "Financials"),
-    Company(
-        "COST", "Costco Wholesale Corporation", "Costco", "Consumer Staples"
-    ),
-    Company("WMT", "Walmart Inc.", "Walmart", "Consumer Staples"),
-    Company("JNJ", "Johnson & Johnson", "Johnson & Johnson", "Health Care"),
-    Company(
-        "PG",
-        "The Procter & Gamble Company",
-        "Procter & Gamble",
-        "Consumer Staples",
-    ),
-    Company(
-        "HD", "The Home Depot, Inc.", "Home Depot", "Consumer Discretionary"
-    ),
-    Company("ORCL", "Oracle Corporation", "Oracle", "Information Technology"),
-)
+def config_dir() -> pathlib.Path:
+    """The folder with ``universe.yaml``.
+
+    Returns:
+        PREMARKET_CONFIG_DIR when set (the container images), else the repo's
+        ``python/config``.
+    """
+    configured = os.environ.get("PREMARKET_CONFIG_DIR", "").strip()
+    if configured:
+        return pathlib.Path(configured)
+    return _REPO_CONFIG_DIR
+
+
+@functools.cache
+def _universe(path: pathlib.Path) -> tuple[Company, ...]:
+    with path.open(encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return tuple(
+        Company(
+            str(entry["ticker"]),
+            str(entry["name"]),
+            str(entry["short"]),
+            str(entry["sector"]),
+        )
+        for entry in data["companies"]
+    )
+
+
+def real_companies(size: int | None = None) -> tuple[Company, ...]:
+    """The lab universe, largest company first.
+
+    Args:
+        size: How many companies to keep. None reads LAB_UNIVERSE_SIZE, and
+            an empty LAB_UNIVERSE_SIZE keeps them all.
+
+    Returns:
+        The first ``size`` companies of ``universe.yaml``.
+
+    Raises:
+        ValueError: ``size`` is out of range.
+    """
+    universe = _universe(config_dir() / _UNIVERSE_FILE)
+    if size is None:
+        raw = os.environ.get("LAB_UNIVERSE_SIZE", "").strip()
+        size = int(raw) if raw else len(universe)
+    if not _MIN_UNIVERSE <= size <= len(universe):
+        raise ValueError(
+            f"LAB_UNIVERSE_SIZE must be in [{_MIN_UNIVERSE}, {len(universe)}],"
+            f" got {size}"
+        )
+    return universe[:size]
+
 
 FAKE_COMPANIES: tuple[Company, ...] = (
     Company(

@@ -4,6 +4,10 @@ import type {NewsItem} from '@/api/schemas/news';
 import {formatEtTime} from '@/lib/time';
 import {cn} from '@/lib/utils';
 
+import {ruleBadges} from '../rules';
+
+import {RuleBadges} from './rule-badges';
+
 interface NewsRowProps {
   item: NewsItem;
   /** The ticker the feed is filtered by, if any. */
@@ -11,6 +15,10 @@ interface NewsRowProps {
   onTickerClick(ticker: string): void;
   /** The feed's URL query, so the detail page can link back to it. */
   feedSearch: string;
+  /** Whether the feed shows duplicates (for `DUPLICATE ×N`). */
+  duplicatesShown: boolean;
+  /** Say "Not checked yet" on an unchecked item (the date has a rule run). */
+  markUnchecked: boolean;
 }
 
 /**
@@ -22,7 +30,10 @@ export function NewsRow({
   activeTicker,
   onTickerClick,
   feedSearch,
+  duplicatesShown,
+  markUnchecked,
 }: NewsRowProps) {
+  const badges = ruleBadges(item, duplicatesShown ? 'shown' : 'hidden');
   return (
     <li
       data-feed-row
@@ -67,8 +78,15 @@ export function NewsRow({
             </button>
           ))}
           <span className="text-muted-foreground">{item.sourceDomain}</span>
-          {/* Reserved for verdict and rule badges (later increments). */}
-          <span data-slot="row-badges" />
+          {/* Rule badges now; verdict badges join them in later increments. */}
+          <div data-slot="row-badges" className="contents">
+            <RuleBadges badges={badges} />
+            {markUnchecked && !item.rulesChecked && (
+              <span className="text-xs text-muted-foreground">
+                Not checked yet
+              </span>
+            )}
+          </div>
         </div>
         <p className="text-sm break-words text-muted-foreground">
           {item.excerpt}

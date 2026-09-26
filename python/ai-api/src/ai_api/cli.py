@@ -5,13 +5,21 @@ Usage:
     ai-api init                       migrations, DB role, demo users
     ai-api health                     exit 0 if the API answers /health
     ai-api openapi                    the OpenAPI document on stdout
+    ai-api rules --date YYYY-MM-DD    rule checks of a feed date (no LLM)
+    ai-api registry                   refresh the SEC ticker registry now
+    ai-api dedup-rebuild --date YYYY-MM-DD
+                                      re-index the 7-day dedup window
     ai-api smoke --base-url URL --date YYYY-MM-DD
                                       the increment's "done when" check
+
+``init``, ``rules``, ``registry``, ``dedup-rebuild`` and ``smoke`` run as
+the database owner, in the one-shot ``ai-api-init`` container.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 import datetime
 import json
@@ -22,12 +30,17 @@ from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+import zoneinfo
 
 import psycopg
 
 from ai_api import app
 from ai_api import bootstrap
 from ai_api import config
+from ai_api.dedup import fastpath
+from ai_api.rules import runner
+
+_NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
 
 
 def _health() -> int:
@@ -103,26 +116,35 @@ def _smoke(base_url: str, day: datetime.date) -> int:
 
     Args:
         base_url: The edge proxy, for example ``http://edge:8080``.
-        day: The feed date to compare with the PDF's rows.
+        day: The feed date: its parity run, rule run and rule results.
 
     Returns:
         The process exit code: 0 when every check passes.
     """
     env = os.environ
     password = config.demo_password(env)
-    owner = config.Database.from_env(env, "PGUSER", "PGPASSWORD")
-    with psycopg.connect(owner.dsn()) as conn:
-        row = conn.execute(
-            "SELECT count(*) FROM legacy.vendor_news_raw"
-            " WHERE feed_date = %s AND NOT is_dup",
-            (day,),
-        ).fetchone()
-    pdf_rows = 0 if row is None else int(row[0])
+    counts = _database_counts(day)
     api = f"{base_url.rstrip('/')}/api"
     results: list[tuple[str, bool, str]] = []
 
     def check(name: str, ok: bool, detail: str = "") -> None:
         results.append((name, ok, detail))
+
+    check(
+        "ingest: C++20 ingester matches legacy (parity PASS)",
+        counts["parity"] == "PASS",
+        counts["parity_detail"],
+    )
+    check(
+        "rules: rule run DONE for the date",
+        counts["rule_run"] == "DONE",
+        str(counts["rule_run"]),
+    )
+    check(
+        "rules: catch every legacy duplicate",
+        counts["rule_dups"] >= counts["legacy_dups"] > 0,
+        f"rules {counts['rule_dups']} vs legacy {counts['legacy_dups']}",
+    )
 
     page = _call("GET", f"{base_url}/")
     csp = page.headers.get("Content-Security-Policy", "")
@@ -176,17 +198,29 @@ def _smoke(base_url: str, day: datetime.date) -> int:
             run is not None and run["status"] == "DONE",
             "no run" if run is None else run["status"],
         )
+        unique = counts["items"] - counts["rule_dups"]
         check(
-            "news: same items as the PDF (duplicates hidden)",
-            body["count"] == pdf_rows and pdf_rows > 0,
-            f"web {body['count']} vs PDF {pdf_rows}",
+            "news: every unique story, rule duplicates hidden",
+            body["count"] == unique > 0,
+            f"web {body['count']} vs {unique} unique"
+            f" (PDF {counts['pdf_rows']})",
+        )
+        codes = {
+            code for item in body["items"] for code in item["reason_codes"]
+        }
+        check(
+            "news: FAKE COMPANY / FAKE TICKER badges without any LLM",
+            {"FAKE_COMPANY", "FAKE_TICKER"} <= codes,
+            ", ".join(sorted(codes)) or "no reason codes",
         )
         if body["items"]:
             first = body["items"][0]["id"]
             detail = _call("GET", f"{api}/news/{first}", bearer)
             check(
-                "news: detail has the body",
-                detail.status == 200 and bool(detail.json().get("body")),
+                "news: detail has the body and rule evidence",
+                detail.status == 200
+                and bool(detail.json().get("body"))
+                and bool(detail.json().get("rule_evidence")),
             )
     check(
         "news: unknown id is 404",
@@ -213,6 +247,74 @@ def _smoke(base_url: str, day: datetime.date) -> int:
     return _report(results)
 
 
+def _database_counts(day: datetime.date) -> dict[str, Any]:
+    """What the smoke check compares the website with (as the owner)."""
+    owner = config.Database.from_env(os.environ, "PGUSER", "PGPASSWORD")
+    counts: dict[str, Any] = {}
+    with psycopg.connect(owner.dsn()) as conn:
+        row = conn.execute(
+            "SELECT count(*), count(*) FILTER (WHERE is_dup),"
+            " count(*) FILTER (WHERE NOT is_dup)"
+            " FROM ai.v_raw_news WHERE feed_date = %s",
+            (day,),
+        ).fetchone()
+        counts["items"], counts["legacy_dups"], counts["pdf_rows"] = row
+        row = conn.execute(
+            "SELECT count(*) FROM ai.duplicate_link d"
+            " JOIN ai.news_item n ON n.id = d.news_id WHERE n.feed_date = %s",
+            (day,),
+        ).fetchone()
+        counts["rule_dups"] = row[0]
+        row = conn.execute(
+            "SELECT status FROM ai.rule_run WHERE feed_date = %s"
+            " ORDER BY started_at DESC LIMIT 1",
+            (day,),
+        ).fetchone()
+        counts["rule_run"] = None if row is None else row[0]
+        try:
+            row = conn.execute(
+                "SELECT status, differences, legacy_rows, modern_rows"
+                " FROM ingest.parity_run WHERE feed_date = %s"
+                " ORDER BY checked_at DESC LIMIT 1",
+                (day,),
+            ).fetchone()
+        except psycopg.errors.UndefinedTable:
+            row = None
+    if row is None:
+        counts["parity"] = None
+        counts["parity_detail"] = "no parity run: make -C python parity"
+    else:
+        counts["parity"] = row[0]
+        counts["parity_detail"] = (
+            f"{row[1]} differences, legacy {row[2]} vs modern {row[3]} rows"
+        )
+    return counts
+
+
+def _rules(day: datetime.date) -> int:
+    settings = config.RulesSettings.from_env(os.environ)
+    try:
+        asyncio.run(runner.run(settings, day))
+    except runner.NotReadyError as e:
+        print(f"rules: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _registry() -> int:
+    settings = config.RulesSettings.from_env(os.environ)
+    tickers = asyncio.run(runner.refresh_registry(settings))
+    print(f"SEC ticker registry: {tickers} tickers")
+    return 0 if tickers else 1
+
+
+def _dedup_rebuild(day: datetime.date) -> int:
+    settings = config.RulesSettings.from_env(os.environ)
+    indexed = asyncio.run(runner.rebuild_index(settings, day))
+    print(f"dedup index: {indexed} unique items re-indexed")
+    return 0
+
+
 def _report(results: list[tuple[str, bool, str]]) -> int:
     for name, ok, detail in results:
         suffix = f"  ({detail})" if detail else ""
@@ -234,7 +336,16 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(prog="ai-api")
     parser.add_argument(
-        "command", choices=("init", "health", "openapi", "smoke")
+        "command",
+        choices=(
+            "init",
+            "health",
+            "openapi",
+            "rules",
+            "registry",
+            "dedup-rebuild",
+            "smoke",
+        ),
     )
     parser.add_argument("--base-url", default="http://edge:8080")
     parser.add_argument(
@@ -251,11 +362,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             bootstrap.run(os.environ)
             return 0
+        if args.command == "registry":
+            return _registry()
         day = args.date
         if day is None:
-            day = datetime.date.today()
+            day = datetime.datetime.now(_NEW_YORK).date()
+        if args.command == "rules":
+            return _rules(day)
+        if args.command == "dedup-rebuild":
+            return _dedup_rebuild(day)
         return _smoke(args.base_url, day)
-    except config.ConfigError as error:
+    except (config.ConfigError, fastpath.FastpathMissingError) as error:
         print(f"configuration error: {error}", file=sys.stderr)
         return 2
 

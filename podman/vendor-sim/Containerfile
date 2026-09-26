@@ -1,14 +1,18 @@
 # premarket-ai vendor-sim (Python 3.13, FastAPI).
-# Build context: python/vendor-sim
-#   podman build -f podman/vendor-sim/Containerfile --target runtime python/vendor-sim
+# Build context: python/vendor-sim, plus the named context "config"
+# (python/config: the lab universe it writes news about):
+#   podman build -f podman/vendor-sim/Containerfile --target runtime \
+#     --build-context config=python/config python/vendor-sim
 # Stages: base -> test (pytest), lint (ruff), runtime (default).
 
 FROM docker.io/library/python:3.13-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PREMARKET_CONFIG_DIR=/app/config
 WORKDIR /app
+COPY --from=config universe.yaml /app/config/universe.yaml
 
 # ---------------------------------------------------------------------------
 FROM base AS dev

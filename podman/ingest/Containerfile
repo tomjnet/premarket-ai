@@ -1,0 +1,115 @@
+# premarket-ai ingest (C++20): the modern low-latency ingester, scheduled by
+# supercronic. Runs in parallel (shadow) with legacy on the same feed.
+# Build context: cpp/ingest
+#   podman build -f podman/ingest/Containerfile --target <stage> cpp/ingest
+# Stages:
+#   toolchain  gcc 14, CMake, Ninja and the C/C++ libraries
+#   build      release binary (no tests)
+#   test       debug build + ctest (GoogleTest 1.17.0)
+#   lint       clang-format --dry-run --Werror, cpplint, clang-tidy (LLVM 18)
+#   asan       ASan + UBSan build + ctest
+#   tsan       TSan build + ctest (see the stage for high-ASLR kernels)
+#   bench      Google Benchmark binary (run the image to benchmark)
+#   runtime    slim image: binary + runtime libraries + supercronic (default)
+# Abseil, simdjson, GoogleTest and Google Benchmark are pinned in
+# CMakeLists.txt (tag + SHA-256) and fetched at configure time.
+
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04
+
+# ---------------------------------------------------------------------------
+FROM ${UBUNTU_IMAGE} AS toolchain
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      g++-14 cmake ninja-build pkg-config ca-certificates \
+      libpq-dev libcurl4-openssl-dev libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+# cpplint derives header guards from the path under /src:
+# premarket-ai/cpp/ingest/... -> PREMARKET_AI_CPP_INGEST_..._H_
+WORKDIR /src/premarket-ai/cpp/ingest
+COPY . .
+
+# ---------------------------------------------------------------------------
+FROM toolchain AS build
+RUN cmake --preset release -DPREMARKET_BUILD_TESTS=OFF \
+ && cmake --build --preset release --target premarket-ingest \
+ && strip build/release/premarket-ingest
+
+FROM toolchain AS test
+RUN cmake --preset debug \
+ && cmake --build --preset debug \
+ && ctest --preset debug
+
+FROM toolchain AS asan
+RUN cmake --preset asan \
+ && cmake --build --preset asan \
+ && ctest --preset asan
+
+# TSan needs a fixed memory layout. On kernels with high ASLR entropy
+# (vm.mmap_rnd_bits > 28) it aborts with "unexpected memory mapping" unless
+# ASLR is off for the test process; setarch -R does that when the container
+# allows personality(2), e.g.
+#   podman build --security-opt seccomp=unconfined --target tsan ...
+# Only the tests are built: the binary adds Abseil flags, which GCC warns
+# about under TSan (-Wtsan on atomic_thread_fence).
+FROM toolchain AS tsan
+RUN cmake --preset tsan \
+ && cmake --build --preset tsan --target ingest_tests \
+ && if setarch "$(uname -m)" -R true 2>/dev/null; then \
+      setarch "$(uname -m)" -R ctest --preset tsan; \
+    else \
+      ctest --preset tsan; \
+    fi
+
+FROM toolchain AS lint
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      clang-format-18 clang-tidy-18 python3-pip \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --no-cache-dir --break-system-packages cpplint==2.0.2
+RUN clang-format-18 --dry-run --Werror \
+      $(find src tests bench -name '*.h' -o -name '*.cc') \
+ && cpplint --repository=/src --recursive --quiet src tests bench \
+ && cmake --preset debug -DPREMARKET_BUILD_TESTS=OFF \
+ && clang-tidy-18 -p build/debug --quiet $(find src -name '*.cc')
+
+FROM toolchain AS bench
+RUN cmake --preset release -DPREMARKET_BUILD_TESTS=OFF \
+      -DPREMARKET_BUILD_BENCH=ON \
+ && cmake --build --preset release --target ingest_bench
+CMD ["build/release/ingest_bench", "--benchmark_counters_tabular=true"]
+
+# ---------------------------------------------------------------------------
+FROM ${UBUNTU_IMAGE} AS supercronic
+ARG SUPERCRONIC_VERSION=v0.2.29
+# Optional: set to the release's sha1sum to verify the download.
+ARG SUPERCRONIC_SHA1SUM=
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSLo /supercronic \
+      "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" \
+ && if [ -n "${SUPERCRONIC_SHA1SUM}" ]; then \
+      echo "${SUPERCRONIC_SHA1SUM}  /supercronic" | sha1sum -c -; \
+    fi \
+ && chmod 0755 /supercronic
+
+# ---------------------------------------------------------------------------
+FROM ${UBUNTU_IMAGE} AS runtime
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=America/New_York \
+    INGEST_CRONTAB=/etc/premarket/crontab \
+    INGEST_SCHEMA_FILE=/etc/premarket/ingest-schema.sql
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libpq5 libcurl4t64 libssl3t64 ca-certificates tzdata \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10003 --create-home ingest \
+ && mkdir -p /etc/premarket
+COPY --from=supercronic /supercronic /usr/local/bin/supercronic
+COPY --from=build /src/premarket-ai/cpp/ingest/build/release/premarket-ingest /usr/local/bin/premarket-ingest
+USER ingest
+WORKDIR /home/ingest
+ENTRYPOINT ["premarket-ingest"]
+CMD ["cron"]

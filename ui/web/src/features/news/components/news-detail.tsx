@@ -12,6 +12,9 @@ import {safeHttpUrl} from '@/lib/url';
 
 import {bodyParagraphs} from '../detail';
 import {feedSearch} from '../feed';
+import {dupTypeText, evidenceBadge, ruleBadges} from '../rules';
+
+import {RuleBadgeView, RuleBadges} from './rule-badges';
 
 interface NewsDetailViewProps {
   item: NewsDetail;
@@ -47,6 +50,7 @@ export function NewsDetailView({item}: NewsDetailViewProps) {
                       date: item.feedDate,
                       ticker,
                       dups: false,
+                      flagged: false,
                     }),
                   }}
                   aria-label={`${ticker}: show its news in the feed`}
@@ -58,8 +62,10 @@ export function NewsDetailView({item}: NewsDetailViewProps) {
             ))}
           </ul>
         )}
-        {/* Reserved for verdict and rule badges (later increments). */}
-        <div data-slot="detail-badges" />
+        {/* Rule badges now; verdict badges join them in later increments. */}
+        <div data-slot="detail-badges">
+          <RuleBadges badges={ruleBadges(item)} />
+        </div>
       </header>
 
       <SourceLine url={item.sourceUrl} domain={item.sourceDomain} />
@@ -72,6 +78,8 @@ export function NewsDetailView({item}: NewsDetailViewProps) {
         ))}
       </div>
 
+      <RuleChecks item={item} />
+
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 border-t pt-4 text-sm">
         <dt className="text-muted-foreground">Feed date</dt>
         <dd>{formatLongDate(item.feedDate)}</dd>
@@ -80,13 +88,64 @@ export function NewsDetailView({item}: NewsDetailViewProps) {
         <dt className="text-muted-foreground">Duplicate</dt>
         <dd className="break-all">
           {item.isDup
-            ? `Yes, duplicate of ${item.dupOf ?? 'an earlier item'}`
+            ? `Yes, duplicate of ${item.dupOf ?? 'an earlier item'}${
+                item.dupType === null ? '' : ` (${dupTypeText(item.dupType)})`
+              }`
             : 'No'}
         </dd>
+        {item.copies > 0 && (
+          <>
+            <dt className="text-muted-foreground">Copies of this story</dt>
+            <dd>{item.copies}</dd>
+          </>
+        )}
         <dt className="text-muted-foreground">Synthetic</dt>
         <dd>{item.synthetic ? 'Yes (simulated vendor data)' : 'No'}</dd>
       </dl>
     </article>
+  );
+}
+
+interface RuleChecksProps {
+  item: NewsDetail;
+}
+
+/**
+ * What the backend's deterministic rule checks found. Messages come from
+ * the server and are rendered as plain text.
+ */
+function RuleChecks({item}: RuleChecksProps) {
+  let summary: string | undefined;
+  if (!item.rulesChecked) {
+    summary = "Rule checks haven't run for this item yet.";
+  } else if (item.ruleEvidence.every(evidence => evidence.code === null)) {
+    summary = 'No rule flagged this item.';
+  }
+  return (
+    <section
+      aria-labelledby="rule-checks-heading"
+      className="flex flex-col gap-2 border-t pt-4"
+    >
+      <h2 id="rule-checks-heading" className="text-lg font-semibold">
+        Rule checks
+      </h2>
+      {summary !== undefined && (
+        <p className="text-sm text-muted-foreground">{summary}</p>
+      )}
+      {item.rulesChecked && item.ruleEvidence.length > 0 && (
+        <ul className="flex flex-col gap-2 text-sm">
+          {item.ruleEvidence.map((evidence, index) => (
+            <li
+              key={index}
+              className="flex flex-col items-start gap-1 sm:flex-row sm:gap-2"
+            >
+              <RuleBadgeView badge={evidenceBadge(evidence)} />
+              <span className="break-words">{evidence.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

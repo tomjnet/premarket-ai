@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "premarket-ai-api"
 version = "0.1.0"
-description = "premarket-ai backend: auth and the news feed over legacy.*"
+description = "premarket-ai backend: auth, the news feed and the rule checks"
 license = "MIT"
 requires-python = ">=3.13"
 dependencies = [
@@ -19,6 +19,7 @@ dependencies = [
   "argon2-cffi==25.1.0",
   "alembic==1.20.0",
   "SQLAlchemy==2.1.1",
+  "PyYAML==6.0.3",
   "tzdata>=2025.2",
 ]
 
@@ -27,6 +28,8 @@ dev = [
   "pytest==9.1.1",
   "httpx==0.28.1",
   "fakeredis[lua]==2.38.0",
+  "hypothesis==6.168.1",
+  "pytest-benchmark==5.3.0",
   "ruff==0.11.8",
 ]
 
@@ -64,6 +67,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Test modules and test functions need no docstrings (3.8.2.1).
 "tests/**" = ["D100", "D103"]
+"evals/**" = ["D103"]
 # Alembic revision files use Alembic's module-level names.
 "src/ai_api/migrations/**" = ["D103"]
 
@@ -75,4 +79,4 @@ convention = "google"
 force-single-line = true
 force-sort-within-sections = true
 single-line-exclusions = ["collections.abc", "typing"]
-known-first-party = ["ai_api"]
+known-first-party = ["ai_api", "evals"]

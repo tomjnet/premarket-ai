@@ -28,7 +28,7 @@ export function backToFeedSearch(
     return feedSearch(parseFeedFilters(params, today));
   }
   if (feedDate !== undefined) {
-    return feedSearch({date: feedDate, dups: false});
+    return feedSearch({date: feedDate, dups: false, flagged: false});
   }
   return '';
 }

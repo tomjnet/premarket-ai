@@ -16,9 +16,16 @@ describe('feedRefetchInterval', () => {
   const list = (status: 'RUNNING' | 'DONE' | 'FAILED'): NewsList => ({
     date: '2026-09-25',
     run: {...run, status},
+    ruleRun: null,
     count: 0,
     items: [],
   });
+  const ruleRun = {
+    finishedAt: null,
+    items: 50,
+    duplicates: 7,
+    flagged: 9,
+  };
 
   it('polls every 30 s only while the run is RUNNING', () => {
     expect(feedRefetchInterval(list('RUNNING'))).toBe(FEED_POLL_MS);
@@ -26,6 +33,19 @@ describe('feedRefetchInterval', () => {
     expect(feedRefetchInterval(list('DONE'))).toBe(false);
     expect(feedRefetchInterval(list('FAILED'))).toBe(false);
     expect(feedRefetchInterval(undefined)).toBe(false);
+  });
+
+  it('also polls while the rule checks are RUNNING', () => {
+    const done = list('DONE');
+    expect(
+      feedRefetchInterval({
+        ...done,
+        ruleRun: {...ruleRun, status: 'RUNNING'},
+      }),
+    ).toBe(FEED_POLL_MS);
+    expect(
+      feedRefetchInterval({...done, ruleRun: {...ruleRun, status: 'FAILED'}}),
+    ).toBe(false);
   });
 });
 

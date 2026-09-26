@@ -1,7 +1,9 @@
 # premarket-ai: run with `podman compose` in Ubuntu WSL.
 # Increment 0 (legacy baseline): postgres, vendor-sim and the C++11 legacy
 # ingester/report. Increment 1 (web instead of PDF): redis, ai-api, two web
-# replicas and the edge proxy in front of them.
+# replicas and the edge proxy in front of them. Increment 2 (rule checks): the
+# C++20 ingester in parallel with the legacy one (shadow schema `ingest`),
+# and the rule checks, run by `ai-api rules` in the ai-api-init container.
 # Profiles: legacy (inc 0+), ai (inc 1+), observability, full.
 #   podman compose --profile legacy --profile ai up -d
 # Ollama is not a service: it runs on the GPU host (from increment 3).
@@ -73,10 +75,13 @@ services:
       context: ./python/vendor-sim
       dockerfile: ../../podman/vendor-sim/Containerfile
       target: runtime
+      additional_contexts:
+        config: ./python/config
     image: localhost/premarket-ai/vendor-sim:dev
     environment:
       VENDOR_SEED: ${VENDOR_SEED:-42}
       VENDOR_MIX: ${VENDOR_MIX:-}
+      LAB_UNIVERSE_SIZE: ${LAB_UNIVERSE_SIZE:-50}
     volumes:
       # labels.jsonl per day (ground truth for the eval harness, inc 2+).
       - vendor-data:/data
@@ -111,6 +116,36 @@ services:
       # Simulates the NFS share traders open the PDF from.
       - nfs-reports:/nfs/reports
       - ./podman/config/legacy/crontab:/etc/premarket/crontab:ro
+    restart: unless-stopped
+
+  # --- increment 2: the modern C++20 ingester, in parallel ------------------
+  # Same feed, same job as legacy, into the shadow schema `ingest`. Its own
+  # cron (05:30 ingest, 05:35 parity check against legacy.vendor_news_raw).
+  # It applies sql/03_ingest_schema.sql itself, so an existing database gets
+  # the schema too.
+  ingest:
+    profiles: [legacy, full]
+    build:
+      context: ./cpp/ingest
+      dockerfile: ../../podman/ingest/Containerfile
+      target: runtime
+    image: localhost/premarket-ai/ingest:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vendor-sim:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+      TZ: America/New_York
+      VENDOR_FEED_URL: http://vendor-sim:8080/feed
+      INGEST_WORKERS: ${INGEST_WORKERS:-4}
+      INGEST_QUEUE_CAPACITY: ${INGEST_QUEUE_CAPACITY:-64}
+      INGEST_DEDUP_WINDOW_DAYS: ${INGEST_DEDUP_WINDOW_DAYS:-7}
+      INGEST_CPU_AFFINITY: ${INGEST_CPU_AFFINITY:-0}
+    volumes:
+      - ./podman/config/ingest/crontab:/etc/premarket/crontab:ro
+      - ./sql/03_ingest_schema.sql:/etc/premarket/ingest-schema.sql:ro
     restart: unless-stopped
 
   # --- increment 1: web instead of PDF ---------------------------------------
@@ -157,6 +192,8 @@ services:
 
   # One-shot, as the database owner: Alembic migrations (ai schema), the
   # API's least-privilege role and the demo users. ai-api waits for it.
+  # `make -C python rules` reuses it for the rule checks (`ai-api rules`),
+  # which write the ai.* results and use Redis for the dedup index.
   ai-api-init:
     profiles: [ai, full]
     image: localhost/premarket-ai/ai-api:dev
@@ -169,20 +206,35 @@ services:
       AI_DB_USER: premarket_ai
       AI_DB_PASSWORD: ${AI_DB_PASSWORD:?run make -C python env}
       DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?copy it from .env.example}
+      TZ: UTC
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make -C python env}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+      REGISTRY_MAX_AGE_DAYS: ${REGISTRY_MAX_AGE_DAYS:-7}
+      STALE_MAX_AGE_DAYS: ${STALE_MAX_AGE_DAYS:-30}
+      DEDUP_WINDOW_DAYS: ${DEDUP_WINDOW_DAYS:-7}
+      DEDUP_SIMHASH_NGRAM: ${DEDUP_SIMHASH_NGRAM:-2}
+      DEDUP_SIMHASH_MAX_HAMMING: ${DEDUP_SIMHASH_MAX_HAMMING:-10}
+      DEDUP_NEAR_MAX_WORD_EDITS: ${DEDUP_NEAR_MAX_WORD_EDITS:-3}
     <<: *hardened
     tmpfs:
       - /tmp:size=16m
     restart: "no"
 
   # FastAPI: /auth/*, /news, /news/{id}, /health. Not published: only the
-  # edge proxy reaches it. Connects as premarket_ai, which can read the
-  # legacy tables and users and append audit rows, nothing else.
+  # edge proxy reaches it. Connects as premarket_ai, which can read raw news
+  # only through the ai.v_* views, plus the rule results and the users, and
+  # append audit rows, nothing else.
   ai-api:
     profiles: [ai, full]
     build:
       context: ./python/ai-api
       dockerfile: ../../podman/ai-api/Containerfile
       target: runtime
+      additional_contexts:
+        fastpath: ./cpp/fastpath
+        config: ./python/config
+        vendorsim: ./python/vendor-sim
     image: localhost/premarket-ai/ai-api:dev
     depends_on:
       postgres:

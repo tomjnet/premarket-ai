@@ -7,10 +7,21 @@ import {newsDetailWireSchema, newsListWireSchema} from '@/api/schemas/news';
 import type {NewsListWire} from '@/api/schemas/news';
 
 import {db} from '../data/db';
-import {DUPLICATES_PER_DAY, ITEMS_PER_DAY} from '../data/generator';
+import {
+  DUPLICATES_PER_DAY,
+  ITEMS_PER_DAY,
+  NEAR_COPIES_PER_DAY,
+} from '../data/generator';
 import {setScenario} from '../scenarios';
 
-import {FAILED_ITEMS, RUNNING_ITEMS_PER_STEP, RUNNING_STEP_MS} from './news';
+import {
+  FAILED_ITEMS,
+  RULES_FAILED_ITEMS,
+  RUNNING_ITEMS_PER_STEP,
+  RUNNING_STEP_MS,
+} from './news';
+
+const RULE_DUPLICATES = DUPLICATES_PER_DAY + NEAR_COPIES_PER_DAY;
 
 // Contract tests: raw fetch, so the wire format itself is checked.
 const THURSDAY = '2026-09-24';
@@ -115,9 +126,16 @@ describe('news handlers', () => {
   it('hides duplicates by default and includes them on request', async () => {
     const accessToken = await token();
     const list = await news(`date=${THURSDAY}`, accessToken);
-    expect(list.count).toBe(ITEMS_PER_DAY - DUPLICATES_PER_DAY);
+    // The rule engine's duplicates (near copies too); the ingest run keeps
+    // the legacy count.
+    expect(list.count).toBe(ITEMS_PER_DAY - RULE_DUPLICATES);
     expect(list.items.every(item => !item.is_dup)).toBe(true);
     expect(list.run?.dups).toBe(DUPLICATES_PER_DAY);
+    expect(list.rule_run).toMatchObject({
+      status: 'DONE',
+      items: ITEMS_PER_DAY,
+      duplicates: RULE_DUPLICATES,
+    });
     const all = await news(
       `date=${THURSDAY}&include_duplicates=true`,
       accessToken,
@@ -140,6 +158,7 @@ describe('news handlers', () => {
     expect(await news(`date=${SATURDAY}`, accessToken)).toEqual({
       date: SATURDAY,
       run: null,
+      rule_run: null,
       count: 0,
       items: [],
     });
@@ -167,6 +186,8 @@ describe('news handlers', () => {
     const parsed = newsDetailWireSchema.parse(detail.body);
     expect(parsed.id).toBe(first?.id);
     expect(parsed.body.length).toBeGreaterThan(0);
+    expect(first).not.toHaveProperty('body');
+    expect(first).not.toHaveProperty('rule_evidence');
 
     const missing = await get('/news/999', accessToken);
     expect(missing).toMatchObject({status: 404, body: {detail: 'Not found'}});
@@ -219,6 +240,67 @@ describe('scenarios', () => {
     expect(list.run?.status).toBe('DONE');
   });
 
+  it('running: the rules check each step one poll later', async () => {
+    const accessToken = await token();
+    setScenario('running');
+    let clock = Date.now();
+    db.now = () => clock;
+    const first = await news(all, accessToken);
+    expect(first.rule_run).toMatchObject({status: 'RUNNING', items: 0});
+    expect(first.items.every(item => !item.rules_checked)).toBe(true);
+    clock += RUNNING_STEP_MS;
+    const second = await news(all, accessToken);
+    expect(second.rule_run).toMatchObject({
+      status: 'RUNNING',
+      finished_at: null,
+      items: RUNNING_ITEMS_PER_STEP,
+    });
+    expect(second.items.filter(item => item.rules_checked)).toHaveLength(
+      RUNNING_ITEMS_PER_STEP,
+    );
+    // The detail agrees with the list.
+    const pending = second.items.find(item => !item.rules_checked);
+    const detail = await get(`/news/${pending?.id}`, accessToken);
+    expect(newsDetailWireSchema.parse(detail.body)).toMatchObject({
+      rules_checked: false,
+      reason_codes: [],
+      rule_evidence: [],
+    });
+  });
+
+  it('rules-failed: the ingest is done, half the items were checked', async () => {
+    const accessToken = await token();
+    setScenario('rules-failed');
+    const list = await news(all, accessToken);
+    expect(list.run?.status).toBe('DONE');
+    expect(list.count).toBe(ITEMS_PER_DAY);
+    expect(list.rule_run).toMatchObject({
+      status: 'FAILED',
+      items: RULES_FAILED_ITEMS,
+    });
+    expect(list.rule_run?.finished_at).not.toBeNull();
+    expect(list.items.filter(item => item.rules_checked)).toHaveLength(
+      RULES_FAILED_ITEMS,
+    );
+    // Unchecked items keep the legacy flags: no near copies among them.
+    expect(
+      list.items.filter(item => !item.rules_checked && item.dup_type !== null),
+    ).toEqual([]);
+  });
+
+  it('a date before the rule engine started: no rule run, legacy flags', async () => {
+    const accessToken = await token();
+    const list = await news(
+      'date=2026-09-18&include_duplicates=true',
+      accessToken,
+    );
+    expect(list.rule_run).toBeNull();
+    expect(list.items.every(item => !item.rules_checked)).toBe(true);
+    expect(list.items.filter(item => item.is_dup)).toHaveLength(
+      DUPLICATES_PER_DAY,
+    );
+  });
+
   it('running and failed: items that have not arrived answer 404', async () => {
     const accessToken = await token();
     // The newest item arrives last.
@@ -238,6 +320,8 @@ describe('scenarios', () => {
       rows_received: FAILED_ITEMS,
     });
     expect(list.count).toBe(FAILED_ITEMS);
+    // The rules checked what arrived.
+    expect(list.rule_run).toMatchObject({status: 'DONE', items: FAILED_ITEMS});
   });
 
   it('slow: every call takes 2–3 s', async () => {

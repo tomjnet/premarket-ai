@@ -65,9 +65,47 @@ def test_every_item_is_marked_synthetic():
 
 
 def test_fake_companies_are_not_real():
-    real = {company.ticker for company in companies.REAL_COMPANIES}
+    real = {company.ticker for company in companies.real_companies()}
     fake = {company.ticker for company in companies.FAKE_COMPANIES}
     assert not real & fake
+
+
+def test_universe_is_the_50_company_lab_universe():
+    universe = companies.real_companies()
+    assert len(universe) == 50
+    assert len({company.ticker for company in universe}) == 50
+    assert universe[0].ticker == "NVDA"
+    assert companies.real_companies(20) == universe[:20]
+    with pytest.raises(ValueError):
+        companies.real_companies(1)
+
+
+def test_lab_universe_size_limits_the_companies(monkeypatch):
+    monkeypatch.setenv("LAB_UNIVERSE_SIZE", "20")
+    universe = {company.ticker for company in companies.real_companies()}
+    feed = generator.generate_feed(_DAY)
+    labels = {label.id: label for label in feed.labels}
+    for item in feed.items:
+        if labels[item.id].kind == "real":
+            assert set(item.tickers) <= universe
+
+
+def _story(item: generator.NewsItem) -> str:
+    """The text without the dateline, lowercase, whitespace collapsed."""
+    story = item.body.split(") -- ", 1)[-1]
+    return " ".join(f"{item.headline}\n{story}".lower().split())
+
+
+def test_originals_never_repeat_a_story_of_the_week_before():
+    """Only labeled duplicates may share story text with the last 7 days."""
+    seen: dict[str, str] = {}
+    for days_back in range(7, -1, -1):
+        feed = generator.generate_feed(_DAY - datetime.timedelta(days_back))
+        for item, label in zip(feed.items, feed.labels, strict=True):
+            if label.kind == "duplicate":
+                continue
+            assert _story(item) not in seen, (item.id, seen.get(_story(item)))
+            seen[_story(item)] = item.id
 
 
 def test_stale_duplicates_copy_an_earlier_feed():

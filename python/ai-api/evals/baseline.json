@@ -1,0 +1,21 @@
+{
+  "eval": "rules_eval",
+  "seed": 42,
+  "metrics": {
+    "dedup.precision": 1.0,
+    "dedup.link_accuracy": 1.0,
+    "dedup.recall.url": 1.0,
+    "dedup.recall.exact": 1.0,
+    "dedup.recall.near": 1.0,
+    "dedup.recall.stale": 1.0,
+    "dedup.recall.paraphrase": 0.0,
+    "FAKE_COMPANY.precision": 1.0,
+    "FAKE_COMPANY.recall": 1.0,
+    "FAKE_TICKER.precision": 1.0,
+    "FAKE_TICKER.recall": 1.0,
+    "SPOOFED_SOURCE.precision": 1.0,
+    "SPOOFED_SOURCE.recall": 1.0,
+    "STALE.precision": 1.0,
+    "STALE.recall": 1.0
+  }
+}

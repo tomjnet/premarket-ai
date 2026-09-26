@@ -8,6 +8,7 @@ export const SCENARIOS = [
   'empty',
   'running',
   'failed',
+  'rules-failed',
   'slow',
   'server-error',
   'expired-session',

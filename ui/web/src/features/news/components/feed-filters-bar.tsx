@@ -51,7 +51,7 @@ function searchValue(text: string): string | undefined {
   return q === '' ? undefined : q;
 }
 
-/** Date, ticker, text search and the duplicates toggle. */
+/** Date, ticker, text search, and the duplicates and flagged toggles. */
 export function FeedFiltersBar({
   filters,
   today,
@@ -174,6 +174,17 @@ export function FeedFiltersBar({
           className="size-4"
         />
         Show duplicates
+      </label>
+      <label className="flex h-8 items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={filters.flagged}
+          onChange={event =>
+            onChange({...filters, flagged: event.target.checked})
+          }
+          className="size-4"
+        />
+        Flagged only
       </label>
       {(filters.ticker !== undefined || filters.q !== undefined) && (
         <Button

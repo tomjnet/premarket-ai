@@ -1,0 +1,63 @@
+# premarket-ai lab universe: the 50 largest S&P 500 companies by market
+# capitalization (snapshot taken 2026-09-25, rank order). Committed so every
+# run is reproducible; LAB_UNIVERSE_SIZE takes the first N (20 for a quick
+# demo). Regenerate by hand when the ranking drifts.
+#
+# vendor-sim writes its real and MISLEADING news only about these companies.
+# The rule engine doesn't use this list to decide what's fake: it checks the
+# full SEC ticker registry, so a real company outside the list is never
+# flagged.
+#
+# Fields: ticker (as the vendor writes it), name (legal name), short (name in
+# headlines), sector (GICS).
+companies:
+  - {ticker: NVDA, name: NVIDIA Corporation, short: NVIDIA, sector: Information Technology}
+  - {ticker: MSFT, name: Microsoft Corporation, short: Microsoft, sector: Information Technology}
+  - {ticker: AAPL, name: Apple Inc., short: Apple, sector: Information Technology}
+  - {ticker: AMZN, name: "Amazon.com, Inc.", short: Amazon, sector: Consumer Discretionary}
+  - {ticker: GOOGL, name: Alphabet Inc., short: Alphabet, sector: Communication Services}
+  - {ticker: META, name: "Meta Platforms, Inc.", short: Meta, sector: Communication Services}
+  - {ticker: AVGO, name: Broadcom Inc., short: Broadcom, sector: Information Technology}
+  - {ticker: TSLA, name: "Tesla, Inc.", short: Tesla, sector: Consumer Discretionary}
+  - {ticker: BRK.B, name: Berkshire Hathaway Inc., short: Berkshire Hathaway, sector: Financials}
+  - {ticker: JPM, name: JPMorgan Chase & Co., short: JPMorgan, sector: Financials}
+  - {ticker: WMT, name: Walmart Inc., short: Walmart, sector: Consumer Staples}
+  - {ticker: LLY, name: Eli Lilly and Company, short: Eli Lilly, sector: Health Care}
+  - {ticker: ORCL, name: Oracle Corporation, short: Oracle, sector: Information Technology}
+  - {ticker: V, name: Visa Inc., short: Visa, sector: Financials}
+  - {ticker: MA, name: Mastercard Incorporated, short: Mastercard, sector: Financials}
+  - {ticker: NFLX, name: "Netflix, Inc.", short: Netflix, sector: Communication Services}
+  - {ticker: XOM, name: Exxon Mobil Corporation, short: Exxon Mobil, sector: Energy}
+  - {ticker: COST, name: Costco Wholesale Corporation, short: Costco, sector: Consumer Staples}
+  - {ticker: JNJ, name: Johnson & Johnson, short: Johnson & Johnson, sector: Health Care}
+  - {ticker: PLTR, name: Palantir Technologies Inc., short: Palantir, sector: Information Technology}
+  - {ticker: HD, name: "The Home Depot, Inc.", short: Home Depot, sector: Consumer Discretionary}
+  - {ticker: PG, name: The Procter & Gamble Company, short: Procter & Gamble, sector: Consumer Staples}
+  - {ticker: ABBV, name: AbbVie Inc., short: AbbVie, sector: Health Care}
+  - {ticker: BAC, name: Bank of America Corporation, short: Bank of America, sector: Financials}
+  - {ticker: AMD, name: "Advanced Micro Devices, Inc.", short: AMD, sector: Information Technology}
+  - {ticker: UNH, name: UnitedHealth Group Incorporated, short: UnitedHealth, sector: Health Care}
+  - {ticker: KO, name: The Coca-Cola Company, short: Coca-Cola, sector: Consumer Staples}
+  - {ticker: GE, name: GE Aerospace, short: GE Aerospace, sector: Industrials}
+  - {ticker: CSCO, name: "Cisco Systems, Inc.", short: Cisco, sector: Information Technology}
+  - {ticker: CVX, name: Chevron Corporation, short: Chevron, sector: Energy}
+  - {ticker: TMUS, name: "T-Mobile US, Inc.", short: T-Mobile, sector: Communication Services}
+  - {ticker: WFC, name: Wells Fargo & Company, short: Wells Fargo, sector: Financials}
+  - {ticker: PM, name: Philip Morris International Inc., short: Philip Morris, sector: Consumer Staples}
+  - {ticker: IBM, name: International Business Machines Corporation, short: IBM, sector: Information Technology}
+  - {ticker: CRM, name: "Salesforce, Inc.", short: Salesforce, sector: Information Technology}
+  - {ticker: MS, name: Morgan Stanley, short: Morgan Stanley, sector: Financials}
+  - {ticker: ABT, name: Abbott Laboratories, short: Abbott, sector: Health Care}
+  - {ticker: GS, name: "The Goldman Sachs Group, Inc.", short: Goldman Sachs, sector: Financials}
+  - {ticker: AXP, name: American Express Company, short: American Express, sector: Financials}
+  - {ticker: LIN, name: Linde plc, short: Linde, sector: Materials}
+  - {ticker: MCD, name: McDonald's Corporation, short: McDonald's, sector: Consumer Discretionary}
+  - {ticker: INTU, name: Intuit Inc., short: Intuit, sector: Information Technology}
+  - {ticker: DIS, name: The Walt Disney Company, short: Disney, sector: Communication Services}
+  - {ticker: T, name: AT&T Inc., short: AT&T, sector: Communication Services}
+  - {ticker: RTX, name: RTX Corporation, short: RTX, sector: Industrials}
+  - {ticker: MRK, name: "Merck & Co., Inc.", short: Merck, sector: Health Care}
+  - {ticker: UBER, name: "Uber Technologies, Inc.", short: Uber, sector: Industrials}
+  - {ticker: NOW, name: "ServiceNow, Inc.", short: ServiceNow, sector: Information Technology}
+  - {ticker: PEP, name: "PepsiCo, Inc.", short: PepsiCo, sector: Consumer Staples}
+  - {ticker: CAT, name: Caterpillar Inc., short: Caterpillar, sector: Industrials}

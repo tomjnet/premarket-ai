@@ -1,0 +1,37 @@
+# premarket-ai source reputation seed (increment 2). ai-api's rule run copies
+# it into ai.source_reputation (the admin pages edit it from increment 6).
+#
+# tier: trusted | neutral | low | blocked. reputation: 0.0 (worst) to 1.0.
+# In the simulation, the vendor's outlets use reserved .example domains.
+reputations:
+  - {domain: wire.vendornews.example, tier: trusted, reputation: 0.9, note: vendor newswire}
+  - {domain: markets.dailybrief.example, tier: trusted, reputation: 0.85, note: vendor partner outlet}
+  - {domain: newsdesk.finwire.example, tier: trusted, reputation: 0.85, note: vendor partner outlet}
+  - {domain: press.marketline.example, tier: trusted, reputation: 0.8, note: vendor partner outlet}
+  - {domain: stockbuzz-alerts.example, tier: low, reputation: 0.2, note: promotional stock alerts}
+  - {domain: pennyrocket.example, tier: low, reputation: 0.1, note: penny-stock promotion}
+  - {domain: hot-tickers.example, tier: low, reputation: 0.15, note: promotional stock alerts}
+  - {domain: sec.gov, tier: trusted, reputation: 1.0, note: primary source (filings)}
+  - {domain: federalreserve.gov, tier: trusted, reputation: 1.0, note: primary source (regulator)}
+
+# Real outlets and primary sources whose names get imitated. A domain that
+# contains a brand as a label part (reuters-news.test) or one edit away from
+# it (reutres.com, bl00mberg.com after homoglyph folding), and isn't one of the
+# brand's official domains or their subdomains, is SPOOFED_SOURCE.
+brands:
+  reuters: [reuters.com]
+  bloomberg: [bloomberg.com, bloomberg.net]
+  cnbc: [cnbc.com]
+  wsj: [wsj.com]
+  ft: [ft.com]
+  apnews: [apnews.com]
+  marketwatch: [marketwatch.com]
+  barrons: [barrons.com]
+  nytimes: [nytimes.com]
+  businesswire: [businesswire.com]
+  prnewswire: [prnewswire.com]
+  globenewswire: [globenewswire.com]
+  nasdaq: [nasdaq.com]
+  nyse: [nyse.com]
+  sec: [sec.gov]
+  federalreserve: [federalreserve.gov]

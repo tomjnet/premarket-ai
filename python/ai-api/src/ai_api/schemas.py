@@ -14,6 +14,8 @@ import pydantic
 
 Role = Literal["TRADER", "ANALYST", "ADMIN"]
 RunStatus = Literal["RUNNING", "DONE", "FAILED"]
+DupType = Literal["url", "exact", "near", "paraphrase"]
+RuleCheck = Literal["entity", "source", "dedup", "stale"]
 
 
 def utc_z(value: datetime.datetime) -> str:
@@ -66,8 +68,34 @@ class IngestRunOut(pydantic.BaseModel):
         )
 
 
+class RuleRunOut(pydantic.BaseModel):
+    """The latest rule-check run of a feed date."""
+
+    status: RunStatus
+    finished_at: str | None
+    items: int
+    duplicates: int
+    flagged: int
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> RuleRunOut:
+        """Builds the model from an ``ai.rule_run`` row."""
+        finished = row["finished_at"]
+        return cls(
+            status=row["status"],
+            finished_at=None if finished is None else utc_z(finished),
+            items=row["items"],
+            duplicates=row["duplicates"],
+            flagged=row["flagged"],
+        )
+
+
 class NewsItemOut(pydantic.BaseModel):
-    """One item of ``GET /news``."""
+    """One item of ``GET /news``.
+
+    ``is_dup`` / ``dup_of`` come from the rule engine once
+    ``rules_checked`` is true, else from the legacy exact-hash flags.
+    """
 
     id: int
     vendor_item_id: str
@@ -81,12 +109,25 @@ class NewsItemOut(pydantic.BaseModel):
     synthetic: bool
     is_dup: bool
     dup_of: str | None
+    reason_codes: list[str]
+    dup_type: DupType | None
+    copies: int
+    rules_checked: bool
+
+
+class RuleEvidenceOut(pydantic.BaseModel):
+    """Why a rule flagged (or cleared) an item; plain text."""
+
+    check: RuleCheck
+    code: str | None
+    message: str
 
 
 class NewsDetailOut(NewsItemOut):
-    """``GET /news/{id}``: the item plus its full body."""
+    """``GET /news/{id}``: the item, its full body and rule evidence."""
 
     body: str
+    rule_evidence: list[RuleEvidenceOut]
 
 
 class NewsListOut(pydantic.BaseModel):
@@ -94,6 +135,7 @@ class NewsListOut(pydantic.BaseModel):
 
     date: str
     run: IngestRunOut | None
+    rule_run: RuleRunOut | None
     count: int
     items: list[NewsItemOut]
 

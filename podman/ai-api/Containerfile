@@ -1,27 +1,108 @@
-# premarket-ai ai-api (Python 3.13, FastAPI).
-# Build context: python/ai-api
-#   podman build -f podman/ai-api/Containerfile --target runtime python/ai-api
-# Stages: base -> test (pytest), lint (ruff), runtime (default).
+# premarket-ai ai-api (Python 3.13, FastAPI) with the C++20 fastpath module.
+# Build context: python/ai-api, plus named contexts:
+#   fastpath  = cpp/fastpath        (C++20 nanobind module, built as a wheel)
+#   config    = python/config       (lab universe, source reputation seed)
+#   vendorsim = python/vendor-sim   (eval stage only: the labeled golden set)
+#   podman build -f podman/ai-api/Containerfile --target runtime \
+#     --build-context fastpath=cpp/fastpath \
+#     --build-context config=python/config \
+#     --build-context vendorsim=python/vendor-sim python/ai-api
+# Stages:
+#   fastpath-toolchain  gcc 14, CMake, Ninja, OpenSSL, LLVM 18 (Ubuntu 24.04)
+#   fastpath-test       C++ core: debug build + ctest (GoogleTest)
+#   fastpath-lint       clang-format --dry-run --Werror, cpplint, clang-tidy
+#   fastpath-asan       C++ core under ASan + UBSan + ctest
+#   fastpath-wheel      the premarket_fastpath wheel (scikit-build-core)
+#   test                pytest, including the C++ vs Python parity tests
+#   lint                ruff
+#   eval                rule/dedup eval on the seed-42 golden set (gates)
+#   runtime             the API image (default)
 
-FROM docker.io/library/python:3.13-slim-bookworm AS base
+ARG PYTHON_IMAGE=docker.io/library/python:3.13-slim-trixie
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04
+
+# ---------------------------------------------------------------------------
+# C++20 fastpath: the core library is tested like the other C++ projects.
+FROM ${UBUNTU_IMAGE} AS fastpath-toolchain
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      g++-14 cmake ninja-build pkg-config ca-certificates libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+# cpplint derives header guards from the path under /src:
+# premarket-ai/cpp/fastpath/... -> PREMARKET_AI_CPP_FASTPATH_..._H_
+WORKDIR /src/premarket-ai/cpp/fastpath
+COPY --from=fastpath . .
+
+FROM fastpath-toolchain AS fastpath-test
+RUN cmake --preset debug \
+ && cmake --build --preset debug \
+ && ctest --preset debug
+
+FROM fastpath-toolchain AS fastpath-asan
+RUN cmake --preset asan \
+ && cmake --build --preset asan \
+ && ctest --preset asan
+
+FROM fastpath-toolchain AS fastpath-lint
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      clang-format-18 clang-tidy-18 python3-pip \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip3 install --no-cache-dir --break-system-packages cpplint==2.0.2
+# clang-tidy checks the core only: src/python/binding.cc needs nanobind and
+# the Python headers, which this build (no FASTPATH_BUILD_PYTHON) lacks.
+RUN clang-format-18 --dry-run --Werror \
+      $(find src tests bench -name '*.h' -o -name '*.cc') \
+ && cpplint --repository=/src --recursive --quiet src tests bench \
+ && cmake --preset debug -DFASTPATH_BUILD_TESTS=OFF \
+ && clang-tidy-18 -p build/debug --quiet $(find src/fastpath -name '*.cc')
+
+# The wheel is built with the same Python and glibc as the runtime image.
+FROM ${PYTHON_IMAGE} AS fastpath-wheel
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      g++ cmake ninja-build ca-certificates libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=fastpath . /src/fastpath
+RUN pip wheel --no-deps --wheel-dir /wheels /src/fastpath
+
+# ---------------------------------------------------------------------------
+FROM ${PYTHON_IMAGE} AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PREMARKET_CONFIG_DIR=/app/config \
+    PREMARKET_FASTPATH=required
 WORKDIR /app
+COPY --from=config universe.yaml sources.yaml /app/config/
+COPY --from=fastpath-wheel /wheels /wheels
+RUN pip install /wheels/*.whl && rm -rf /wheels
 
-# ---------------------------------------------------------------------------
 FROM base AS dev
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install -e ".[dev]"
 COPY tests ./tests
+COPY evals ./evals
 
 FROM dev AS test
 RUN pytest -q
 
 FROM dev AS lint
-RUN ruff check src tests && ruff format --check src tests
+RUN ruff check src tests evals && ruff format --check src tests evals
+
+# The eval generates the labeled golden set with vendor-sim's generator
+# (seed 42). The labels exist only in this stage; the runtime image never
+# has them. --no-deps: only the generator is used, not vendor-sim's API.
+FROM dev AS eval
+COPY --from=vendorsim . /tmp/vendor-sim
+RUN pip install --no-deps /tmp/vendor-sim && rm -rf /tmp/vendor-sim
+RUN python -m evals.rules_eval --check
 
 # ---------------------------------------------------------------------------
 FROM base AS runtime

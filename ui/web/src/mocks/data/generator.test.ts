@@ -8,6 +8,8 @@ import {
   FOOTER,
   HEADLINE_PREFIX,
   ITEMS_PER_DAY,
+  NEAR_COPIES_PER_DAY,
+  RULES_START_DATE,
   generateDay,
   parseItemId,
 } from './generator';
@@ -34,10 +36,10 @@ describe('generateDay', () => {
       publishedAt: newest?.published_at,
     }).toMatchInlineSnapshot(`
       {
-        "headline": "[SYNTHETIC] Umbrix to be acquired by Quantavex for $40B in all-cash deal",
-        "id": 2458088,
-        "publishedAt": "2026-09-24T08:58:00Z",
-        "vendorItemId": "VND-20260924-088",
+        "headline": "[SYNTHETIC] <script>alert("headline")</script> Umbrix Robotics reports <b>record</b> orders (update)",
+        "id": 2458095,
+        "publishedAt": "2026-09-24T09:33:00Z",
+        "vendorItemId": "VND-20260924-095",
       }
     `);
   });
@@ -49,17 +51,21 @@ describe('generateDay', () => {
   });
 
   it('has no run and no items on a weekend', () => {
-    expect(generateDay(SATURDAY)).toEqual({
+    expect(generateDay(SATURDAY)).toMatchObject({
       date: SATURDAY,
       run: null,
+      ruleRun: null,
       items: [],
     });
   });
 
-  it('gives a weekday 100 items, 9 of them duplicates, newest first', () => {
+  it('gives a weekday 100 items, 9 legacy and 14 rule duplicates, newest first', () => {
     const day = generateDay(THURSDAY);
     expect(day.items).toHaveLength(ITEMS_PER_DAY);
     expect(day.items.filter(item => item.is_dup)).toHaveLength(
+      DUPLICATES_PER_DAY + NEAR_COPIES_PER_DAY,
+    );
+    expect([...day.legacy.values()].filter(flags => flags.is_dup)).toHaveLength(
       DUPLICATES_PER_DAY,
     );
     const times = day.items.map(item => item.published_at);
@@ -133,6 +139,98 @@ describe('generateDay', () => {
       }
       expect(generateDay(date).run === null).toBe(isWeekend(date));
     }
+  });
+});
+
+describe('generateDay: rule results', () => {
+  const day = generateDay(THURSDAY);
+  const withCode = (code: string) =>
+    day.items.filter(item => item.reason_codes.includes(code));
+
+  it('checks every item and counts the run', () => {
+    expect(day.items.every(item => item.rules_checked)).toBe(true);
+    expect(day.ruleRun).toEqual({
+      status: 'DONE',
+      finished_at: '2026-09-24T09:30:45Z',
+      items: ITEMS_PER_DAY,
+      duplicates: DUPLICATES_PER_DAY + NEAR_COPIES_PER_DAY,
+      flagged: day.items.filter(item => item.reason_codes.length > 0).length,
+    });
+  });
+
+  it('flags fake companies and tickers, spoofed sources and stale copies', () => {
+    expect(withCode('FAKE_COMPANY').length).toBeGreaterThan(3);
+    expect(withCode('FAKE_TICKER').length).toBeGreaterThan(3);
+    for (const item of withCode('SPOOFED_SOURCE')) {
+      expect(item.source_domain).toMatch(/\.test$/);
+    }
+    expect(withCode('SPOOFED_SOURCE').length).toBeGreaterThan(0);
+    const stale = withCode('STALE');
+    expect(stale).toHaveLength(3);
+    for (const item of stale) {
+      expect(item).toMatchObject({is_dup: true, dup_type: 'exact'});
+      expect(item.dup_of?.startsWith('VND-20260923-')).toBe(true);
+    }
+    // Real companies from trusted outlets are not flagged.
+    const clean = day.items.filter(
+      item => item.reason_codes.length === 0 && !item.is_dup,
+    );
+    expect(clean.length).toBeGreaterThan(40);
+  });
+
+  it('explains each code in the evidence, sorted and plain text', () => {
+    for (const item of day.items) {
+      const codes = new Set(
+        item.rule_evidence.flatMap(entry =>
+          entry.code === null ? [] : [entry.code],
+        ),
+      );
+      expect([...codes].sort()).toEqual(item.reason_codes);
+      expect([...item.reason_codes].sort()).toEqual(item.reason_codes);
+    }
+    const [fake] = withCode('FAKE_TICKER');
+    expect(
+      fake?.rule_evidence.some(entry =>
+        /^Ticker [A-Z]+ is not in the SEC ticker registry \(10,381 tickers, refreshed 2026-09-23\)\.$/.test(
+          entry.message,
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('finds the near copies the legacy exact hash misses', () => {
+    const near = day.items.filter(item => item.dup_type === 'near');
+    expect(near).toHaveLength(NEAR_COPIES_PER_DAY);
+    for (const item of near) {
+      expect(item.is_dup).toBe(true);
+      expect(day.legacy.get(item.id)).toEqual({is_dup: false, dup_of: null});
+    }
+    expect(new Set(day.items.map(item => item.dup_type))).toEqual(
+      new Set([null, 'exact', 'url', 'near']),
+    );
+  });
+
+  it('counts on each original the copies the rules linked to it', () => {
+    for (const item of day.items) {
+      const copies = day.items.filter(
+        other => other.dup_of === item.vendor_item_id,
+      ).length;
+      expect(item.copies).toBe(copies);
+    }
+    expect(day.items.some(item => item.copies > 0)).toBe(true);
+  });
+
+  it(`has no rule run before ${RULES_START_DATE}: legacy flags only`, () => {
+    const early = generateDay('2026-09-18');
+    expect(early.ruleRun).toBeNull();
+    expect(early.items.every(item => !item.rules_checked)).toBe(true);
+    expect(early.items.every(item => item.reason_codes.length === 0)).toBe(
+      true,
+    );
+    expect(early.items.filter(item => item.is_dup)).toHaveLength(
+      DUPLICATES_PER_DAY,
+    );
+    expect(early.items.every(item => item.copies === 0)).toBe(true);
   });
 });
 

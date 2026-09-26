@@ -5,12 +5,14 @@ import type {
   NewsDetailWire,
   NewsItemWire,
   NewsListWire,
+  RuleRunWire,
 } from '@/api/schemas/news';
 import {apiUrl} from '@/lib/env';
 import {isIsoDate} from '@/lib/time';
 
 import {db} from '../data/db';
 import type {GeneratedDay} from '../data/generator';
+import {ruleRunOf, withRuleProgress} from '../data/rules';
 import {activeScenario} from '../scenarios';
 
 import {
@@ -30,6 +32,8 @@ export const RUNNING_ITEMS_PER_STEP = 25;
 export const RUNNING_STEP_MS = 30_000;
 /** `failed`: how many items arrived before the run failed. */
 export const FAILED_ITEMS = 40;
+/** `rules-failed`: how many items (oldest first) the rules checked. */
+export const RULES_FAILED_ITEMS = 50;
 
 // Pydantic's accepted spellings for a bool query parameter.
 const TRUE_VALUES = ['true', '1', 'yes', 'on', 't', 'y'];
@@ -75,6 +79,7 @@ export const newsHandlers = [
     const list: NewsListWire = {
       date,
       run: feed.run,
+      rule_run: feed.ruleRun,
       count: items.length,
       items,
     };
@@ -102,14 +107,16 @@ export const newsHandlers = [
         type: 'int_parsing',
       });
     }
-    const item = db.item(Number(id));
-    // In `running`/`failed`, items that haven't arrived don't exist yet.
-    const arrived =
-      item !== undefined &&
-      scenarioFeed(db.day(item.feed_date)).items.some(
-        candidate => candidate.id === item.id,
-      );
-    if (!arrived) {
+    const stored = db.item(Number(id));
+    // In `running`/`failed`, items that haven't arrived don't exist yet;
+    // the scenario also decides whether the rules have checked it.
+    const item =
+      stored === undefined
+        ? undefined
+        : scenarioFeed(db.day(stored.feed_date)).items.find(
+            candidate => candidate.id === stored.id,
+          );
+    if (item === undefined) {
       return notFound();
     }
     if (activeScenario() === 'contract-drift') {
@@ -120,8 +127,12 @@ export const newsHandlers = [
   }),
 ];
 
-/** The list endpoint sends items without their body. */
-function withoutBody({body, ...item}: NewsDetailWire): NewsItemWire {
+/** The list endpoint sends items without their body and evidence. */
+function withoutBody({
+  body,
+  rule_evidence,
+  ...item
+}: NewsDetailWire): NewsItemWire {
   return item;
 }
 
@@ -154,17 +165,20 @@ function matchesText(item: NewsDetailWire, q: string | null): boolean {
   );
 }
 
-/** The run and items the active scenario shows for a day. */
-function scenarioFeed(day: GeneratedDay): {
+interface ScenarioFeed {
   run: IngestRunWire | null;
+  ruleRun: RuleRunWire | null;
   items: NewsDetailWire[];
-} {
+}
+
+/** The runs and items the active scenario shows for a day. */
+function scenarioFeed(day: GeneratedDay): ScenarioFeed {
   if (day.run === null) {
     return day;
   }
   switch (activeScenario()) {
     case 'empty':
-      return {run: null, items: []};
+      return {run: null, ruleRun: null, items: []};
     case 'running': {
       const steps = Math.floor(
         (db.now() - db.runningSince(day.date)) / RUNNING_STEP_MS,
@@ -173,31 +187,79 @@ function scenarioFeed(day: GeneratedDay): {
       if (shown >= day.items.length) {
         return day;
       }
-      return partialFeed(day.run, day.items, shown, 'RUNNING');
+      // The rules are still checking the newest step's items.
+      const checked = shown - RUNNING_ITEMS_PER_STEP;
+      return partialFeed(day, day.run, shown, 'RUNNING', checked);
     }
     case 'failed':
-      return partialFeed(day.run, day.items, FAILED_ITEMS, 'FAILED');
+      return partialFeed(day, day.run, FAILED_ITEMS, 'FAILED', FAILED_ITEMS);
+    case 'rules-failed':
+      return rulesFailedFeed(day);
     default:
       return day;
   }
 }
 
-/** The first `count` items to arrive (oldest first) of a newest-first list. */
+/**
+ * The first `count` items to arrive (oldest first) of the day, the first
+ * `checked` of them through the rules. The rule run is still running while
+ * the ingest run is, and done when it failed.
+ */
 function partialFeed(
+  day: GeneratedDay,
   run: IngestRunWire,
-  items: readonly NewsDetailWire[],
   count: number,
   status: 'RUNNING' | 'FAILED',
-): {run: IngestRunWire; items: NewsDetailWire[]} {
-  const arrived = items.slice(-count);
+  checked: number,
+): ScenarioFeed {
+  const arrived = day.ruleResults.slice(-count);
+  const checkedIds = new Set(
+    arrived.slice(arrived.length - checked).map(item => item.id),
+  );
+  const items = withRuleProgress(
+    arrived,
+    day.legacy,
+    item => day.rulesRun && checkedIds.has(item.id),
+  );
   return {
     run: {
       ...run,
       status,
       finished_at: status === 'RUNNING' ? null : run.finished_at,
       rows_received: arrived.length,
-      dups: arrived.filter(item => item.is_dup).length,
+      // The ingest run counts the legacy duplicates.
+      dups: arrived.filter(item => day.legacy.get(item.id)?.is_dup === true)
+        .length,
     },
-    items: arrived,
+    ruleRun: ruleRunFor(day, items, status === 'RUNNING' ? 'RUNNING' : 'DONE'),
+    items,
   };
+}
+
+/** `rules-failed`: the ingest run is done; the rules failed half way. */
+function rulesFailedFeed(day: GeneratedDay): ScenarioFeed {
+  const checkedIds = new Set(
+    day.ruleResults.slice(-RULES_FAILED_ITEMS).map(item => item.id),
+  );
+  const items = withRuleProgress(
+    day.ruleResults,
+    day.legacy,
+    item => day.rulesRun && checkedIds.has(item.id),
+  );
+  return {run: day.run, ruleRun: ruleRunFor(day, items, 'FAILED'), items};
+}
+
+function ruleRunFor(
+  day: GeneratedDay,
+  items: readonly NewsDetailWire[],
+  status: 'RUNNING' | 'DONE' | 'FAILED',
+): RuleRunWire | null {
+  if (day.ruleRun === null) {
+    return null;
+  }
+  return ruleRunOf(
+    items,
+    status,
+    status === 'RUNNING' ? null : day.ruleRun.finished_at,
+  );
 }

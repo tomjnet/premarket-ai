@@ -2,7 +2,8 @@
 
 Runs once per ``up`` as the database owner, in its own short-lived
 container. The long-running API then connects as a role that can only read
-the legacy tables and users and append audit rows.
+raw news through the ``ai.v_*`` views, the rule results and the users, and
+append audit rows.
 """
 
 from __future__ import annotations
@@ -84,15 +85,18 @@ def grant_api_role(
             " NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 20 PASSWORD {}"
         ).format(ident, sql.Literal(password))
     )
+    # From increment 2 the API reads raw news only through the ai.v_* views
+    # (the strangler-fig seam): it has no access to the legacy schema.
     statements = (
         "GRANT CONNECT ON DATABASE {db} TO {role}",
-        "GRANT USAGE ON SCHEMA legacy TO {role}",
-        "GRANT SELECT ON legacy.ingest_run, legacy.vendor_news_raw,"
-        " legacy.companies TO {role}",
+        "REVOKE ALL ON ALL TABLES IN SCHEMA legacy FROM {role}",
+        "REVOKE USAGE ON SCHEMA legacy FROM {role}",
         "GRANT USAGE ON SCHEMA ai TO {role}",
         "GRANT SELECT ON ai.app_user TO {role}",
         "GRANT INSERT ON ai.audit_log TO {role}",
         "GRANT USAGE ON SEQUENCE ai.audit_log_id_seq TO {role}",
+        "GRANT SELECT ON ai.v_raw_news, ai.v_ingest_run, ai.news_item,"
+        " ai.duplicate_link, ai.rule_check, ai.rule_run TO {role}",
     )
     for statement in statements:
         conn.execute(

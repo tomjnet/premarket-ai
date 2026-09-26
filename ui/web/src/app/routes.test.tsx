@@ -94,7 +94,7 @@ describe('app shell', () => {
     expect(await screen.findByText('MOCK API')).toBeInTheDocument();
     const switcher = screen.getByLabelText('Mock scenario');
     expect(switcher).toHaveValue('failed');
-    expect(screen.getAllByRole('option')).toHaveLength(9);
+    expect(screen.getAllByRole('option')).toHaveLength(10);
     // Changing the select alone doesn't reload; Apply does.
     const apply = screen.getByRole('button', {name: 'Apply (reloads)'});
     expect(apply).toBeDisabled();
@@ -131,7 +131,10 @@ describe('app shell', () => {
   it('ends on login with a notice when the proactive refresh gets 401', async () => {
     db.tokenTtlS = 2;
     withMockSession();
-    const {router} = renderApp('/news');
+    // A light page (a weekend, no rows): with the whole suite running in
+    // parallel, re-rendering 100 feed rows after every 1 s refresh starved
+    // this test's timers.
+    const {router} = renderApp('/news?date=2026-09-26');
     await screen.findByRole('heading', {name: 'News feed'});
 
     setScenario('logged-out');
@@ -146,7 +149,9 @@ describe('app shell', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'Your session expired. Please log in again.',
     );
-    expect(router.state.location.search).toBe('?next=%2Fnews');
+    expect(router.state.location.search).toBe(
+      `?next=${encodeURIComponent('/news?date=2026-09-26')}`,
+    );
   });
 
   it('offers a retry when the backend is unreachable at start', async () => {

@@ -68,21 +68,48 @@ def make_row(number: int, **overrides: Any) -> dict[str, Any]:
         "synthetic": True,
         "is_dup": False,
         "dup_of": None,
+        "reason_codes": [],
+        "dup_type": None,
+        "copies": 0,
+        "rules_checked": True,
+        "evidence": [
+            {
+                "check": "entity",
+                "code": None,
+                "message": "AAPL is Apple Inc. in the SEC ticker registry.",
+            }
+        ],
     }
     row.update(overrides)
     return row
 
 
 class FakeNews:
-    """Three items of 2026-09-24 (one duplicate) and a DONE run."""
+    """Three items of 2026-09-24 (one duplicate), a DONE run and rule run."""
 
     def __init__(self) -> None:
-        """Creates the rows and the run."""
+        """Creates the rows and the runs."""
         self.rows = [
-            make_row(1),
-            make_row(2, tickers=["MSFT"]),
-            make_row(3, is_dup=True, dup_of="VND-20260924-001"),
+            make_row(1, copies=1),
+            make_row(
+                2,
+                tickers=["QVXH"],
+                reason_codes=["FAKE_COMPANY", "FAKE_TICKER"],
+            ),
+            make_row(
+                3,
+                is_dup=True,
+                dup_of="VND-20260924-001",
+                dup_type="near",
+            ),
         ]
+        self.rule_run: dict[str, Any] | None = {
+            "status": "DONE",
+            "finished_at": datetime.datetime(2026, 9, 24, 10, 0, tzinfo=UTC),
+            "items": 3,
+            "duplicates": 1,
+            "flagged": 1,
+        }
         self.queries: list[news.NewsQuery] = []
         self.run: dict[str, Any] | None = {
             "run_id": 42,
@@ -98,6 +125,12 @@ class FakeNews:
     async def latest_run(self, day: datetime.date) -> dict[str, Any] | None:
         """Returns the run for DAY only."""
         return self.run if day == DAY else None
+
+    async def latest_rule_run(
+        self, day: datetime.date
+    ) -> dict[str, Any] | None:
+        """Returns the rule run for DAY only."""
+        return self.rule_run if day == DAY else None
 
     async def items(self, query: news.NewsQuery) -> list[dict[str, Any]]:
         """Applies the date, duplicate and ticker filters."""

@@ -1,6 +1,7 @@
 import {useQuery} from '@tanstack/react-query';
 
 import {getNews} from '@/api/news';
+import type {NewsFilters} from '@/api/news';
 import type {NewsList} from '@/api/schemas/news';
 import {useSession} from '@/features/auth/session-context';
 
@@ -10,28 +11,30 @@ import {newsKeys} from '../query-keys';
 /** While a run is still arriving, the feed polls this often. */
 export const FEED_POLL_MS = 30_000;
 
-/** Poll only while the run is `RUNNING`. */
+/** Poll only while the ingest run or the rule-check run is `RUNNING`. */
 export function feedRefetchInterval(
   list: NewsList | undefined,
 ): number | false {
-  return list?.run?.status === 'RUNNING' ? FEED_POLL_MS : false;
+  const running =
+    list?.run?.status === 'RUNNING' || list?.ruleRun?.status === 'RUNNING';
+  return running ? FEED_POLL_MS : false;
 }
 
-/** `GET /news` for the filters. */
+/**
+ * `GET /news` for the filters. "Flagged only" is applied by the page to
+ * this list, so it is not part of the request or the query key.
+ */
 export function useNewsFeed(filters: FeedFilters) {
   const {client} = useSession();
+  const request: NewsFilters = {
+    date: filters.date,
+    ticker: filters.ticker,
+    q: filters.q,
+    includeDuplicates: filters.dups,
+  };
   return useQuery({
-    queryKey: newsKeys.list(filters),
-    queryFn: ({signal}) =>
-      getNews(
-        {
-          date: filters.date,
-          ticker: filters.ticker,
-          q: filters.q,
-          includeDuplicates: filters.dups,
-        },
-        {client, signal},
-      ),
+    queryKey: newsKeys.list(request),
+    queryFn: ({signal}) => getNews(request, {client, signal}),
     // While another filter of the same date loads, keep the current list on
     // screen; a different date never shows the previous date's items.
     placeholderData: previous =>

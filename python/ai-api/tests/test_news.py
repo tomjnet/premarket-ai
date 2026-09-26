@@ -61,7 +61,7 @@ def test_feed_matches_the_contract(harness):
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"date", "run", "count", "items"}
+    assert set(body) == {"date", "run", "rule_run", "count", "items"}
     assert body["date"] == "2026-09-24"
     assert body["count"] == len(body["items"]) == 2
     assert body["run"] == {
@@ -71,6 +71,13 @@ def test_feed_matches_the_contract(harness):
         "finished_at": "2026-09-24T09:30:05Z",
         "rows_received": 3,
         "dups": 1,
+    }
+    assert body["rule_run"] == {
+        "status": "DONE",
+        "finished_at": "2026-09-24T10:00:00Z",
+        "items": 3,
+        "duplicates": 1,
+        "flagged": 1,
     }
     item = body["items"][0]
     assert set(item) == {
@@ -86,9 +93,17 @@ def test_feed_matches_the_contract(harness):
         "synthetic",
         "is_dup",
         "dup_of",
+        "reason_codes",
+        "dup_type",
+        "copies",
+        "rules_checked",
     }
     assert _UTC_Z.match(item["published_at"])
     assert "body" not in item
+    assert "rule_evidence" not in item
+    by_id = {entry["id"]: entry for entry in body["items"]}
+    assert by_id[2001]["copies"] == 1
+    assert by_id[2002]["reason_codes"] == ["FAKE_COMPANY", "FAKE_TICKER"]
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-content-type-options"] == "nosniff"
 
@@ -127,7 +142,37 @@ def test_no_run_for_the_date(harness):
     body = harness.client.get(
         "/news", params={"date": "2026-09-26"}, headers=_bearer(harness)
     ).json()
-    assert body == {"date": "2026-09-26", "run": None, "count": 0, "items": []}
+    assert body == {
+        "date": "2026-09-26",
+        "run": None,
+        "rule_run": None,
+        "count": 0,
+        "items": [],
+    }
+
+
+def test_duplicates_carry_the_match_type(harness):
+    body = harness.client.get(
+        "/news",
+        params={"date": "2026-09-24", "include_duplicates": "true"},
+        headers=_bearer(harness),
+    ).json()
+    duplicate = next(item for item in body["items"] if item["is_dup"])
+    assert duplicate["dup_of"] == "VND-20260924-001"
+    assert duplicate["dup_type"] == "near"
+
+
+def test_items_before_the_rule_run_keep_the_legacy_flags(harness):
+    harness.news.rows[0].update(rules_checked=False, evidence=None)
+    harness.news.rule_run = None
+    body = harness.client.get(
+        "/news", params={"date": "2026-09-24"}, headers=_bearer(harness)
+    ).json()
+    assert body["rule_run"] is None
+    by_id = {item["id"]: item for item in body["items"]}
+    assert by_id[2001]["rules_checked"] is False
+    detail = harness.client.get("/news/2001", headers=_bearer(harness))
+    assert detail.json()["rule_evidence"] == []
 
 
 def test_running_run_has_null_finished_at(harness):
@@ -152,10 +197,17 @@ def test_bad_parameters_are_422(harness):
         assert response.status_code == 422, params
 
 
-def test_detail_has_the_body(harness):
+def test_detail_has_the_body_and_rule_evidence(harness):
     response = harness.client.get("/news/2001", headers=_bearer(harness))
     assert response.status_code == 200
     assert response.json()["body"].startswith("NEW YORK")
+    assert response.json()["rule_evidence"] == [
+        {
+            "check": "entity",
+            "code": None,
+            "message": "AAPL is Apple Inc. in the SEC ticker registry.",
+        }
+    ]
 
 
 def test_detail_404_and_bad_id(harness):

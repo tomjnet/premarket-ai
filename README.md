@@ -25,16 +25,26 @@ Each increment is developed on its own branch, merged to `main` through a PR onc
 | 6 | `inc-6-production` | A reliable brief **before 07:30 ET** every trading day, alerts, and the vendor scorecard |
 | 7 | `inc-7-enterprise-cloud-theory` | *(Theory only)* How a large enterprise would build the same platform on **Azure, AWS and GCP** |
 
-## This branch: increment 1, web instead of PDF
-Traders read the day's news on a **website** instead of the PDF. There's no AI yet. The legacy pipeline from increment 0 keeps running unchanged, and the PDF is still produced every day (a parallel run), so traders can compare.
-- **web** (React + Vite + TypeScript, TanStack Query, Tailwind + shadcn/ui): login, a News Feed per trading date (filters for date, ticker, text search and duplicates, all in the URL, plus keyboard navigation) and a News detail page with the source link. The **SIMULATION** ribbon and the "Decision support only, not investment advice" banner are on every page. It's built as static files and served by **two nginx replicas** (`web-1`, `web-2`).
-- **ai-api** (Python 3.13, FastAPI) reads the legacy tables read-only and serves `/auth/login`, `/auth/refresh`, `/auth/logout`, `/news`, `/news/{id}` and `/health`. Users have one of three roles (TRADER, ANALYST, ADMIN) and argon2id password hashes, and the demo users are seeded at start-up.
-- **edge** (nginx) is the only published port. It load balances the two web replicas, proxies `/api/*` to ai-api, and applies the rate limits and security headers.
-- **redis** holds login sessions and failed-login counters: temporary state only, never persisted.
-- The feed shows the same stories as the PDF: duplicates are hidden by default, and a "Show duplicates" switch brings them back, marked.
+## This branch: increment 2, rule-based checks (no LLM)
+Traders now see **why a story is suspect** before any AI exists: the feed marks items with **FAKE COMPANY**, **FAKE TICKER**, **SPOOFED SOURCE**, **STALE** and **DUPLICATE ×N** badges, and the news detail page explains each one. Everything is deterministic: rules, hashes and lookups, no LLM. At the same time, a **modern C++20 ingester** starts running in parallel with the C++11 legacy one (a shadow run), and a parity check proves they store exactly the same rows. The PDF is still produced every day.
+
+- **Duplicate check** (ai-api, Redis): three levels, cheapest first, before any AI work.
+  - **L0 URL:** the same article link again, ignoring case, tracking parameters (`utm_*`, `ref`, `fbclid`…), fragments and trailing slashes.
+  - **L1 exact:** the same story after normalization (the `[SYNTHETIC]` marker, dateline and footer removed; HTML, invisible characters, case and spacing ignored).
+  - **L2 near:** small edits ("said" → "stated", a word added). A 64-bit **SimHash** finds candidates in 11 Redis band sets; a candidate counts only if the tickers and every number, month and number word are identical ("up 5%" and "up 50%" are different stories) and at most 3 words differ.
+  - A copy of an **earlier day's** story is also **STALE** (old news re-sent as new). Duplicates are linked to their original (`ai.duplicate_link`) and hidden from the feed by default.
+  - Redis is only a fast 7-day index: it has no persistence, and the rule run rebuilds it from Postgres when needed.
+- **Entity check:** every ticker is looked up in the **SEC ticker registry** (all US-listed tickers, from SEC EDGAR, refreshed weekly and cached in Postgres; downloads go through a Redis rate limiter). An unknown ticker is **FAKE_TICKER**; if the company name next to it isn't a registered company either, it's also **FAKE_COMPANY**.
+- **Source check:** a domain that imitates a real outlet (`reuters-news.test`, `bl00mberg.test`, one typo away from a brand) or doesn't match the link's host is **SPOOFED_SOURCE**. Domain reputations (trusted / low) are shown as evidence.
+- **Stale check:** a story dated more than 30 days before the feed date ("On January 3, 2026, …") is **STALE**.
+- **C++20 ingester** (`cpp/ingest`): the same job as the legacy ingester (fetch, parse, hash, flag duplicates, COPY), written to low-latency rules: no allocation after startup, a lock-free ring buffer, a persistent `std::jthread` worker pool, simdjson and Abseil. It writes to the shadow schema `ingest.*`, and `parity` compares every row with `legacy.*`: the website only goes on if there are **zero differences**. `make -C python bench` compares both.
+- **C++20 fastpath module** (`cpp/fastpath`): a Python extension (nanobind) with the hot text functions of the duplicate check (normalization, URL canonicalization, SHA-256, SimHash, band keys, key numbers). Each function has a pure-Python reference, and randomized parity tests (Hypothesis) prove they return identical results.
+- **The AI side reads raw news only through two views**, `ai.v_raw_news` and `ai.v_ingest_run`. They point at the legacy tables today and will switch to the C++20 tables when the legacy ingester is retired. ai-api's database role no longer has any access to the `legacy` schema.
+- **Eval harness v1:** a labeled golden set (vendor-sim, seed 42) measures the rules on every CI run and fails the build on a regression.
+- **Lab universe:** vendor-sim now writes about the **50 largest S&P 500 companies** (`python/config/universe.yaml`).
 
 ### Security
-Even though this is a demo, the website is built the way a production internal site should be. Each layer assumes the one in front of it can fail.
+Unchanged from increment 1; the website is built the way a production internal site should be. Each layer assumes the one in front of it can fail.
 
 | Layer | Protection |
 |---|---|
@@ -45,11 +55,11 @@ Even though this is a demo, the website is built the way a production internal s
 | **Brute force** | Five failed logins lock that username for 15 minutes (429 with `Retry-After`), on top of the edge's per-client limit. Wrong usernames and wrong passwords get the same answer in the same time (a dummy argon2 check), so user names can't be discovered. |
 | **CSRF** | SameSite=Strict, plus a server-side `Origin` / `Sec-Fetch-Site` check on every `/auth/*` call: a page on another site gets 403. |
 | **API** | Every input is validated (dates, tickers, text length, ids, password length before hashing). Responses are `no-store`, `nosniff` and CSP `default-src 'none'`. Queries time out after 5 s. There's no `/docs` or `/openapi.json` in the stack. |
-| **Database** | ai-api connects as `premarket_ai`, which can only read the legacy tables and the users and append audit rows. The migrations and seed run once, as the owner, in a separate short-lived container (`ai-api-init`). |
+| **Database** | ai-api connects as `premarket_ai`, which can read raw news only through the `ai.v_*` views, plus the rule results and the users, and append audit rows. The migrations, the seed and the batch jobs (rule checks, smoke) run as the owner in a separate short-lived container (`ai-api-init`). |
 | **Audit** | Logins, failures, lockouts, token reuse and logouts go to `ai.audit_log` (`make -C python audit`). No password or token is ever logged. |
 | **Containers** | Non-root users, **read-only root filesystems**, all Linux capabilities dropped, `no-new-privileges`, memory and process limits. Only the edge publishes a port; postgres, redis, ai-api and the web replicas aren't reachable from the host. Image tags are pinned. The web build runs `npm ci --ignore-scripts` and fails if any mock code reaches the bundle. |
 | **Secrets** | `make -C python env` generates `JWT_SECRET`, `REDIS_PASSWORD` and `AI_DB_PASSWORD` (256-bit random values) into `.env` (mode 600, gitignored). ai-api refuses to start with a missing or placeholder secret. |
-| **Untrusted news text** | Vendor text is rendered as text only (never as HTML or Markdown), and only `http(s)` source links become links, showing the host they really open. |
+| **Untrusted news text** | Vendor text is rendered as text only (never as HTML or Markdown), and only `http(s)` source links become links, showing the host they really open. The rule checks strip markup and invisible characters before comparing text. |
 
 Next steps, not in this increment:
 - **HTTPS on the edge** with HSTS: a local CA (mkcert) or Caddy's internal CA, for access from other machines.
@@ -61,28 +71,36 @@ Next steps, not in this increment:
 ### Project structure
 ```
 premarket-ai/
-├── compose.yaml              # the stack: legacy (profile "legacy") + website (profile "ai")
+├── compose.yaml              # the stack: both ingesters (profile "legacy") + website (profile "ai")
 ├── .env.example              # settings; `make -C python env` creates .env with random secrets
-├── .github/workflows/        # CI: every Containerfile stage, the UI checks, nginx config tests
-├── cpp/legacy/               # C++11 legacy app: ingest + PDF report (unchanged, still running)
+├── .github/workflows/        # CI: every Containerfile stage, the rule eval, the UI checks, nginx config tests
+├── cpp/
+│   ├── legacy/               # C++11 legacy app: ingest + PDF report (unchanged, still running)
+│   ├── ingest/               # C++20 low-latency ingester (shadow run + parity check against legacy)
+│   └── fastpath/             # C++20 nanobind module premarket_fastpath, built into the ai-api image
 ├── python/
-│   ├── Makefile              # task runner: build, up, test, lint, demo, smoke, audit, ...
+│   ├── Makefile              # task runner: build, up, test, lint, eval, demo, rules, parity, smoke, ...
+│   ├── config/               # lab universe (50 companies) and source reputation seed
 │   ├── vendor-sim/           # the synthetic news vendor (FastAPI) + pytest tests
-│   └── ai-api/               # the new backend (FastAPI): auth, sessions, news feed
-│       ├── src/ai_api/       #   routes/, config, tokens, sessions, passwords, news, users,
-│       │                     #   bootstrap (init), migrations/ (Alembic), cli (init, smoke, openapi)
-│       └── tests/            #   pytest: auth, rotation, lockout, CSRF, news contract
+│   └── ai-api/               # the new backend (FastAPI)
+│       ├── src/ai_api/       #   routes/, auth, news feed, migrations/ (Alembic), cli (init, rules, smoke)
+│       │   ├── dedup/        #   duplicate check L0-L2: normalize, simhash (C++ or Python), Redis store
+│       │   └── rules/        #   SEC registry, rate limiter, entity/source/stale checks, engine, runner
+│       ├── tests/            #   pytest: auth, news contract, dedup, rules, C++ vs Python parity
+│       └── evals/            #   eval harness v1 (golden set, baseline.json, SEC registry fixture)
 ├── ui/
 │   ├── Makefile              # UI task runner: install, dev, test, lint, build, check, e2e
 │   └── web/                  # React + Vite + TypeScript website, with an in-browser mock backend
-├── sql/                      # legacy schema and company seed (PostgreSQL init scripts)
+├── sql/                      # PostgreSQL init scripts: legacy schema + seed, the C++20 ingest schema
 ├── podman/
 │   ├── legacy/Containerfile      # stages: build, test, lint, asan, tsan, bench, runtime
+│   ├── ingest/Containerfile      # the same stages, for the C++20 ingester
 │   ├── vendor-sim/Containerfile  # stages: test, lint, runtime
-│   ├── ai-api/Containerfile      # stages: test, lint, runtime
+│   ├── ai-api/Containerfile      # stages: fastpath-test/-lint/-asan/-wheel, test, lint, eval, runtime
 │   ├── web/Containerfile         # Node build of the UI -> unprivileged nginx with the static files
 │   └── config/
-│       ├── legacy/crontab        # supercronic schedule (mounted read-only)
+│       ├── legacy/crontab        # supercronic schedule of the legacy ingester (mounted read-only)
+│       ├── ingest/crontab        # supercronic schedule of the C++20 ingester and the parity check
 │       ├── web/default.conf      # nginx of the two web replicas (static files only)
 │       └── edge/                 # the edge proxy: nginx.conf, templates/ (site), snippets/
 ├── scripts/                  # one-time setup for the GPU host and Ubuntu WSL
@@ -90,43 +108,49 @@ premarket-ai/
 ```
 
 ### Setup dependencies
-Increment 1 still doesn't need the GPU host or any model.
+Increment 2 still doesn't need the GPU host or any model.
 
-On the host you need only **Podman with `podman compose`, git and make**. There's no Node or Python on the host: the UI is built in a Node 22 container, and the backend in a Python 3.13 container.
+On the host you need only **Podman with `podman compose`, git and make**. There's no C++, Node or Python toolchain on the host: everything builds in containers.
 1. One-time setup as in increment 0: the WSL configuration and `scripts/wsl/00_setup-wsl.sh`, `01_move-repo.sh` and `02_setup-podman.sh`, then `sudo apt install -y make`.
-2. Create or update your settings: `make -C python env`. It copies `.env.example` to `.env` if needed, adds the increment 1 settings to an older `.env`, and fills `JWT_SECRET`, `REDIS_PASSWORD` and `AI_DB_PASSWORD` with random values. Change `DEMO_USER_PASSWORD` if you like (at least 12 characters).
+2. Update your settings: `make -C python env`. It adds the increment 2 settings to an older `.env`.
+3. **New:** set `SEC_USER_AGENT` in `.env` to your name and a contact email, for example `SEC_USER_AGENT=premarket-ai lab you@example.com`. SEC EDGAR requires it to download the ticker registry (about 1 MB, once a week, at most 10 requests per second). Without it, the FAKE COMPANY / FAKE TICKER checks are skipped and the website check fails.
 
-The first build also downloads the Node 22, nginx-unprivileged and Redis 8 images.
+The first build downloads Abseil, simdjson, GoogleTest, Google Benchmark and nanobind (pinned versions) and compiles them, so it takes several minutes; later builds are cached.
 
 ### Build
 ```bash
-make -C python build        # all four images (layers are cached)
+make -C python build        # all five images (layers are cached)
 ```
 This runs:
 ```bash
-podman build -f podman/vendor-sim/Containerfile --target runtime -t localhost/premarket-ai/vendor-sim:dev python/vendor-sim
-podman build -f podman/legacy/Containerfile     --target runtime -t localhost/premarket-ai/legacy:dev     cpp/legacy
-podman build -f podman/ai-api/Containerfile     --target runtime -t localhost/premarket-ai/ai-api:dev     python/ai-api
-podman build -f podman/web/Containerfile        --target runtime -t localhost/premarket-ai/web:dev        ui/web
+podman build -f podman/vendor-sim/Containerfile --target runtime --build-context config=python/config -t localhost/premarket-ai/vendor-sim:dev python/vendor-sim
+podman build -f podman/legacy/Containerfile     --target runtime -t localhost/premarket-ai/legacy:dev cpp/legacy
+podman build -f podman/ingest/Containerfile     --target runtime -t localhost/premarket-ai/ingest:dev cpp/ingest
+podman build -f podman/ai-api/Containerfile     --target runtime --build-context fastpath=cpp/fastpath --build-context config=python/config --build-context vendorsim=python/vendor-sim -t localhost/premarket-ai/ai-api:dev python/ai-api
+podman build -f podman/web/Containerfile        --target runtime -t localhost/premarket-ai/web:dev ui/web
 ```
-`make -C python help` and `make -C ui help` list every task. Add `ENGINE=docker` to any task to use Docker instead of Podman.
+The C++ projects use CMake presets (`debug`, `release`, `asan`, `tsan`) inside those builds; the fastpath module is compiled into a wheel (scikit-build-core) inside the ai-api build. `make -C python help` and `make -C ui help` list every task. Add `ENGINE=docker` to any task to use Docker instead of Podman.
 
 ### Run
 ```bash
-make -C python up                         # everything: legacy + website; waits until healthy
-make -C python demo DATE=2026-09-24       # a whole day now: ingest, PDF, then the website check
+make -C python up                         # everything: both ingesters + website; waits until healthy
+make -C python demo DATE=2026-09-24       # a whole day now (see below), then the website check
 ```
-Open **http://localhost:8080** and log in as `trader1`, `analyst1` or `admin1` with the `DEMO_USER_PASSWORD` from `.env`. Pick the date you ran the demo for (the feed opens on today in New York).
+`demo` runs, for each of the 5 days before `DATE` and then `DATE`: both ingesters, the parity check and the rule checks. Then it renders the PDF to `out/<DATE>.pdf` and runs `smoke`.
 
-`demo` ingests the 5 days before `DATE`, then `DATE`, renders its PDF to `out/<DATE>.pdf`, and runs `smoke`, which checks the website end to end.
+Open **http://localhost:8080** and log in as `trader1`, `analyst1` or `admin1` with the `DEMO_USER_PASSWORD` from `.env`. Pick the date you ran the demo for. Flagged stories carry their badges; open one to see why ("Ticker QVXH is not in the SEC ticker registry…").
 
 More tasks (the date defaults to today in New York; `up` must have run first):
 ```bash
-make -C python smoke DATE=2026-09-24      # website check through the edge (see Test)
-make -C python audit                      # last 20 logins, failures, lockouts, logouts
-make -C python openapi                    # ai-api's OpenAPI document -> out/openapi.json
-make -C python ingest | report | runs | pdf | feed-summary DATE=2026-09-24
-make -C python psql | logs | ps | down | reset
+make -C python ingest DATE=2026-09-24     # both ingesters (ingest-legacy, ingest-modern)
+make -C python parity DATE=2026-09-24     # compare legacy vs C++20 rows (exit 1 on any difference)
+make -C python rules DATE=2026-09-24      # the rule checks for a date (re-running is safe)
+make -C python registry                   # refresh the SEC ticker registry now
+make -C python dedup-rebuild DATE=2026-09-24   # re-index the 7-day dedup window into Redis
+make -C python runs | rule-runs           # ingest runs of both ingesters + parity; rule runs
+make -C python bench                      # C++11 vs C++20 micro-benchmarks
+make -C python smoke DATE=2026-09-24      # the website check through the edge (see Test)
+make -C python audit | openapi | report | pdf | feed-summary | psql | logs | ps | down | reset
 make -C ui dev                            # UI dev server with the mock backend: http://localhost:5173
 make -C ui dev VITE_API_MODE=live         # UI dev server against the running stack (through the edge)
 ```
@@ -136,11 +160,12 @@ make -C ui dev VITE_API_MODE=live         # UI dev server against the running st
 | edge | `http://edge:8080`: `/` → web-1/web-2, `/api/*` → ai-api | **`127.0.0.1:8080`** (`WEB_BIND`, `WEB_PORT`) |
 | web-1, web-2 | `http://web-1:8080`, `http://web-2:8080` (static UI) | none |
 | ai-api | `http://ai-api:8000` (`/auth/*`, `/news`, `/news/{id}`, `/health`) | none |
-| ai-api-init | one-shot: migrations, database role, demo users | none |
-| redis | `redis:6379` (password) | none |
+| ai-api-init | one-shot: migrations, database role, demo users; also runs `rules`, `registry`, `smoke` | none |
+| redis | `redis:6379` (password): sessions, dedup index, EDGAR rate limit | none |
 | postgres | `postgres:5432`, database `premarket` | none |
 | vendor-sim | `http://vendor-sim:8080/feed?date=YYYY-MM-DD` | none |
-| legacy | supercronic (05:30 ET, Mon–Fri): ingest + PDF | none |
+| legacy | supercronic (05:30 ET, Mon–Fri): C++11 ingest + PDF | none |
+| ingest | supercronic (05:30 ET ingest, 05:35 ET parity, Mon–Fri): C++20 ingester | none |
 
 | Demo login | Role |
 |---|---|
@@ -148,26 +173,32 @@ make -C ui dev VITE_API_MODE=live         # UI dev server against the running st
 | `analyst1` | ANALYST (same pages as TRADER for now) |
 | `admin1` | ADMIN (same pages as TRADER for now) |
 
+**Password of the demo logins.** All three users share one password, the value of `DEMO_USER_PASSWORD` in `.env` (default `premarket-demo-2026`, copied from `.env.example`). It must have at least 12 characters, so a short word like `demo` never works. To see yours:
+```bash
+grep '^DEMO_USER_PASSWORD=' .env
+```
+To change it, edit `DEMO_USER_PASSWORD` in `.env` and run `make -C python up`: every `up` resets the three users to that password. After 5 wrong passwords a username is locked for 15 minutes ("Too many attempts"); wait, or log in as another demo user meanwhile.
+
 ### Test
 ```bash
-make -C python test         # pytest (vendor-sim, ai-api) + GoogleTest via ctest (legacy)
-make -C python lint         # ruff (vendor-sim, ai-api) + clang-format, cpplint, clang-tidy
-make -C python sanitizers   # GoogleTest under ASan + UBSan, and under TSan
-make -C python check        # test + lint + sanitizers
+make -C python test         # pytest (vendor-sim, ai-api incl. C++ vs Python parity) + GoogleTest (all 3 C++ projects)
+make -C python lint         # ruff + clang-format, cpplint, clang-tidy (all 3 C++ projects)
+make -C python sanitizers   # GoogleTest under ASan + UBSan (legacy, ingest, fastpath) and TSan (legacy, ingest)
+make -C python eval         # rule eval on the seed-42 golden set; fails on a regression
+make -C python check        # test + lint + sanitizers + eval
 make -C ui check            # UI: ESLint (gts, zero warnings), tsc, Vitest with coverage, production build without mocks
 make -C ui e2e              # UI in Chromium (Playwright): every mock scenario, axe (WCAG 2.2 AA), keyboard, 360 px
 ```
-`make -C python api-test` and `api-lint` run only the ai-api stages. CI also validates both nginx configs with `nginx -t` on a read-only root filesystem.
+The eval scores 200 labeled items (2026-09-24 and 25, after 7 days of history) and gates: duplicate precision and link accuracy ≥ 0.99, URL and exact recall 1.0, near and stale recall ≥ 0.95, FAKE_COMPANY / FAKE_TICKER recall ≥ 0.8 with precision ≥ 0.95, SPOOFED_SOURCE / STALE recall ≥ 0.9 with precision ≥ 0.95, and no metric more than 2 points below `python/ai-api/evals/baseline.json`. Paraphrase recall is reported but not gated (it needs embeddings, next increment).
 
-**Done when** (increment 1):
-1. `make -C python demo DATE=2026-09-24` ends with **`17/17 checks passed`** from `smoke`, which covers:
-   - the security headers, and 401 for the API without a login
-   - a wrong password (401), then a login, with the refresh cookie `__Host-`, `HttpOnly`, `Secure` and `SameSite=Strict`
-   - the feed for the date, whose run is `DONE` and which shows **the same number of stories as the PDF** (`web 91 vs PDF 91`)
-   - a news detail, and a 404 for an unknown item
-   - a cross-site refresh refused (403), cookie rotation, and logout revoking the access token
-2. A trader logs in at http://localhost:8080, reads 2026-09-24's news, filters by ticker, opens an item and follows its source link, without opening the PDF. The PDF is still written to `/nfs/reports` (parallel run).
-3. `make -C python lint test` and `make -C ui check` pass with zero warnings.
+**Done when** (increment 2):
+1. `make -C python eval` prints `PASS every gated metric`: most FAKE_COMPANY / FAKE_TICKER items and all exact duplicates are flagged **without any LLM**.
+2. `make -C python demo DATE=2026-09-24` ends with **`21/21 checks passed`** from `smoke`, which adds to the increment 1 checks:
+   - the C++20 ingester's parity check for the date is PASS (zero differences with legacy)
+   - the rule run is DONE, and the rules catch every duplicate the legacy hash caught
+   - the feed shows every unique story, hides exactly the rule duplicates, and has FAKE COMPANY and FAKE TICKER badges
+   - the news detail has the rule evidence
+3. `make -C python test lint sanitizers` passes with zero warnings, including the `premarket_fastpath` parity tests, and `make -C ui check` passes.
 
 ## Architecture by increment
 **Legend:** 🟩 green = new in this increment · ⬜ grey = already there · 🟥 red dashed = retired

@@ -1,0 +1,17 @@
+# C++20: modernize-* is on. Excluded checks are style choices the Google
+# guide does not ask for (trailing return types, [[nodiscard]] everywhere).
+# src/python/binding.cc (nanobind, needs Python headers) is not checked:
+# the lint stage configures without FASTPATH_BUILD_PYTHON.
+Checks: >
+  -*,
+  google-*,
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  -bugprone-easily-swappable-parameters,
+  -performance-enum-size,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/cpp/fastpath/src/.*'
+FormatStyle: file

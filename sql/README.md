@@ -1,4 +1,4 @@
-# sql/: legacy database
+# sql/: database init scripts
 
 PostgreSQL runs these init scripts once, when the `pgdata` volume is first created:
 
@@ -6,6 +6,9 @@ PostgreSQL runs these init scripts once, when the `pgdata` volume is first creat
 |---|---|
 | `01_legacy_schema.sql` | `legacy` schema: `companies`, `ingest_run`, `vendor_news_raw` |
 | `02_legacy_seed.sql` | Seeds `legacy.companies` with 20 large US companies |
+| `03_ingest_schema.sql` | `ingest` schema of the C++20 ingester: `ingest_run`, `vendor_news_raw` (same columns as legacy), `parity_run`. Idempotent: the ingester also applies it itself before every run, so an existing database gets it without a reset. |
+
+The `ai` schema (users, audit, the `ai.v_*` views over raw news, rule results) isn't here: ai-api's Alembic migrations create it (`ai-api init`, on every `make -C python up`).
 
 PostgreSQL's init step skips this README (it runs only `*.sql`, `*.sql.gz` and `*.sh`). To re-run the scripts, delete the volume with `make -C python reset`. **This erases all data.**
 
@@ -234,6 +237,69 @@ LEFT JOIN legacy.vendor_news_raw n ON n.run_id = r.run_id
 WHERE r.status = 'DONE'
 GROUP BY r.run_id
 ORDER BY r.run_id DESC;
+```
+
+## Increment 2: C++20 ingester and rule checks
+
+**Parity: the C++20 ingester against legacy.** Every check must be PASS with 0 differences.
+```sql
+SELECT feed_date, status, differences, legacy_rows, modern_rows, sample
+FROM ingest.parity_run
+ORDER BY id DESC
+LIMIT 10;
+```
+
+**Legacy vs modern latency** (per-item process p50/p99/p99.9, same meaning in both)
+```sql
+SELECT 'legacy' AS ingester, feed_date, workers, p50_us, p99_us, p999_us, total_ms
+FROM legacy.ingest_run WHERE status = 'DONE'
+UNION ALL
+SELECT 'modern', feed_date, workers, p50_us, p99_us, p999_us, total_ms
+FROM ingest.ingest_run WHERE status = 'DONE'
+ORDER BY feed_date DESC, ingester
+LIMIT 20;
+```
+
+**Rule runs** (duplicates by type, reason codes)
+```sql
+SELECT feed_date, status, items, duplicates, stale, flagged, by_type, reason_counts
+FROM ai.rule_run
+ORDER BY run_id DESC
+LIMIT 10;
+```
+
+**Flagged items of a day, with their reason codes**
+```sql
+SELECT r.vendor_item_id, c.reason_codes, left(r.headline, 60) AS headline
+FROM ai.v_raw_news r
+JOIN ai.news_item n USING (feed_date, vendor_item_id)
+JOIN ai.rule_check c ON c.news_id = n.id
+WHERE r.feed_date = '2026-09-24' AND c.reason_codes <> '{}'
+ORDER BY r.vendor_item_id;
+```
+
+**Each duplicate and how it was matched** (`stale` = a copy of an earlier day's story)
+```sql
+SELECT d.vendor_item_id AS duplicate, o.vendor_item_id AS original,
+       o.feed_date AS original_day, l.dup_type, l.level, l.score, l.stale
+FROM ai.duplicate_link l
+JOIN ai.news_item d ON d.id = l.news_id
+JOIN ai.news_item o ON o.id = l.canonical_id
+WHERE d.feed_date = '2026-09-24'
+ORDER BY l.level, d.vendor_item_id;
+```
+
+**Why one item was flagged** (the evidence the detail page shows)
+```sql
+SELECT jsonb_pretty(c.evidence)
+FROM ai.rule_check c
+JOIN ai.news_item n ON n.id = c.news_id
+WHERE n.feed_date = '2026-09-24' AND n.vendor_item_id = 'VND-20260924-061';
+```
+
+**SEC ticker registry copy**
+```sql
+SELECT count(*) AS tickers, max(refreshed_at) AS refreshed_at FROM ai.ticker_registry;
 ```
 
 ## Database overview

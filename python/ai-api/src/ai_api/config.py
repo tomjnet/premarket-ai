@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import dataclasses
+import pathlib
 
 from psycopg import conninfo
+
+from ai_api.dedup import config as dedup_config
 
 # Values from .env.example that must never reach a running service.
 _PLACEHOLDERS = frozenset({"change-me", "changeme", "secret"})
@@ -218,3 +221,61 @@ def demo_password(env: Mapping[str, str]) -> str:
             f"{_MIN_DEMO_PASSWORD_CHARS} characters"
         )
     return value
+
+
+@dataclasses.dataclass(frozen=True)
+class RulesSettings:
+    """Settings of ``ai-api rules`` (runs as the database owner).
+
+    Attributes:
+        owner: The database owner's connection parameters.
+        redis_host: Redis host (dedup index, EDGAR rate limit).
+        redis_password: Redis password.
+        dedup: Duplicate-check thresholds (DEDUP_*).
+        sec_user_agent: SEC_USER_AGENT: a name and contact email. Empty
+            means the registry isn't refreshed from SEC.
+        registry_max_age_days: Refresh the SEC registry when older.
+        stale_max_age_days: Dated text older than this is STALE.
+        config_dir: Folder with ``sources.yaml`` (PREMARKET_CONFIG_DIR).
+    """
+
+    owner: Database
+    redis_host: str
+    redis_password: str = dataclasses.field(repr=False)
+    dedup: dedup_config.DedupConfig = dedup_config.DedupConfig()
+    sec_user_agent: str = ""
+    registry_max_age_days: int = 7
+    stale_max_age_days: int = 30
+    config_dir: pathlib.Path = pathlib.Path("/app/config")
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> RulesSettings:
+        """Builds the settings from environment variables.
+
+        Args:
+            env: The environment.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ConfigError: A setting is missing or invalid.
+        """
+        try:
+            dedup = dedup_config.DedupConfig.from_env(env)
+        except ValueError as e:
+            raise ConfigError(str(e)) from e
+        return cls(
+            owner=Database.from_env(env, "PGUSER", "PGPASSWORD"),
+            redis_host=env.get("REDIS_HOST", "redis"),
+            redis_password=_secret(env, "REDIS_PASSWORD"),
+            dedup=dedup,
+            sec_user_agent=env.get("SEC_USER_AGENT", "").strip(),
+            registry_max_age_days=_positive_int(
+                env, "REGISTRY_MAX_AGE_DAYS", 7
+            ),
+            stale_max_age_days=_positive_int(env, "STALE_MAX_AGE_DAYS", 30),
+            config_dir=pathlib.Path(
+                env.get("PREMARKET_CONFIG_DIR", "/app/config")
+            ),
+        )

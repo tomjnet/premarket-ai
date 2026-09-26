@@ -15,6 +15,13 @@ const wireList = {
     rows_received: 100,
     dups: 9,
   },
+  rule_run: {
+    status: 'DONE',
+    finished_at: '2026-09-24T09:30:45Z',
+    items: 100,
+    duplicates: 14,
+    flagged: 17,
+  },
   count: 1,
   items: [
     {
@@ -31,9 +38,19 @@ const wireList = {
       synthetic: true,
       is_dup: false,
       dup_of: null,
+      reason_codes: ['FAKE_TICKER', 'SPOOFED_SOURCE'],
+      dup_type: null,
+      copies: 2,
+      rules_checked: true,
     },
   ],
 };
+
+const wireItem = wireList.items[0];
+
+function listWithItem(changes: Record<string, unknown>) {
+  return {...wireList, items: [{...wireItem, ...changes}]};
+}
 
 describe('news schemas', () => {
   it('maps the wire list to the camelCase UI model', () => {
@@ -46,6 +63,13 @@ describe('news schemas', () => {
         finishedAt: '2026-09-24T09:30:05Z',
         rowsReceived: 100,
         dups: 9,
+      },
+      ruleRun: {
+        status: 'DONE',
+        finishedAt: '2026-09-24T09:30:45Z',
+        items: 100,
+        duplicates: 14,
+        flagged: 17,
       },
       count: 1,
       items: [
@@ -64,15 +88,105 @@ describe('news schemas', () => {
           synthetic: true,
           isDup: false,
           dupOf: null,
+          reasonCodes: ['FAKE_TICKER', 'SPOOFED_SOURCE'],
+          dupType: null,
+          copies: 2,
+          rulesChecked: true,
         },
       ],
     });
   });
 
+  it('accepts reason codes of later increments, and no rule run yet', () => {
+    const parsed = newsListSchema.parse({
+      ...listWithItem({
+        reason_codes: ['FABRICATED_CLAIM', 'INJECTION_ATTEMPT'],
+        rules_checked: true,
+      }),
+      rule_run: null,
+    });
+    expect(parsed.ruleRun).toBeNull();
+    expect(parsed.items[0]?.reasonCodes).toEqual([
+      'FABRICATED_CLAIM',
+      'INJECTION_ATTEMPT',
+    ]);
+  });
+
+  it('rejects reason codes that are not upper-case codes', () => {
+    for (const code of ['fake_ticker', 'X', '_STALE', 'FAKE TICKER', '']) {
+      expect(
+        newsListSchema.safeParse(listWithItem({reason_codes: [code]})).success,
+      ).toBe(false);
+    }
+    expect(
+      newsListSchema.safeParse(
+        listWithItem({reason_codes: [`A${'B'.repeat(41)}`]}),
+      ).success,
+    ).toBe(false);
+  });
+
+  it('reads every duplicate type and rejects others', () => {
+    for (const dupType of ['url', 'exact', 'near', 'paraphrase']) {
+      const parsed = newsListSchema.parse(
+        listWithItem({is_dup: true, dup_of: 'VND-1', dup_type: dupType}),
+      );
+      expect(parsed.items[0]?.dupType).toBe(dupType);
+    }
+    expect(
+      newsListSchema.safeParse(listWithItem({dup_type: 'fuzzy'})).success,
+    ).toBe(false);
+  });
+
+  it('requires the rule fields (always present on the wire)', () => {
+    for (const field of [
+      'reason_codes',
+      'dup_type',
+      'copies',
+      'rules_checked',
+    ]) {
+      const item: Record<string, unknown> = {...wireItem};
+      delete item[field];
+      expect(
+        newsListSchema.safeParse({...wireList, items: [item]}).success,
+      ).toBe(false);
+    }
+    const withoutRuleRun: Record<string, unknown> = {...wireList};
+    delete withoutRuleRun.rule_run;
+    expect(newsListSchema.safeParse(withoutRuleRun).success).toBe(false);
+    expect(newsListSchema.safeParse(listWithItem({copies: -1})).success).toBe(
+      false,
+    );
+  });
+
+  it('reads RUNNING and FAILED rule runs', () => {
+    const running = newsListSchema.parse({
+      ...wireList,
+      rule_run: {...wireList.rule_run, status: 'RUNNING', finished_at: null},
+    });
+    expect(running.ruleRun).toEqual({
+      status: 'RUNNING',
+      finishedAt: null,
+      items: 100,
+      duplicates: 14,
+      flagged: 17,
+    });
+    expect(
+      newsListSchema.safeParse({
+        ...wireList,
+        rule_run: {...wireList.rule_run, status: 'PAUSED'},
+      }).success,
+    ).toBe(false);
+  });
+
   it('accepts a day without a run and a RUNNING run without finished_at', () => {
     expect(
-      newsListSchema.parse({date: '2026-09-26', run: null, count: 0, items: []})
-        .run,
+      newsListSchema.parse({
+        date: '2026-09-26',
+        run: null,
+        rule_run: null,
+        count: 0,
+        items: [],
+      }).run,
     ).toBeNull();
     const running = {
       ...wireList,
@@ -131,9 +245,43 @@ describe('news schemas', () => {
     const detail = newsDetailSchema.parse({
       ...wireList.items[0],
       body: 'Line one.\n<b>Line two.</b>',
+      rule_evidence: [],
     });
     expect(detail.body).toBe('Line one.\n<b>Line two.</b>');
     expect(detail.vendorItemId).toBe('acme-20260924-0007');
+    expect(detail.ruleEvidence).toEqual([]);
+  });
+
+  it('reads the rule evidence of the detail', () => {
+    const evidence = [
+      {
+        check: 'entity',
+        code: 'FAKE_TICKER',
+        message:
+          'Ticker AAPLQZ is not in the SEC ticker registry (10,381 tickers, refreshed 2026-09-24).',
+      },
+      {
+        check: 'dedup',
+        code: null,
+        message: 'Exact copy (L1) of VND-20260921-014 from 2026-09-21.',
+      },
+    ];
+    const detail = newsDetailSchema.parse({
+      ...wireItem,
+      body: 'Body.',
+      rule_evidence: evidence,
+    });
+    expect(detail.ruleEvidence).toEqual(evidence);
+    expect(
+      newsDetailSchema.safeParse({...wireItem, body: 'Body.'}).success,
+    ).toBe(false);
+    expect(
+      newsDetailSchema.safeParse({
+        ...wireItem,
+        body: 'Body.',
+        rule_evidence: [{check: 'llm', code: null, message: 'x'}],
+      }).success,
+    ).toBe(false);
   });
 });
 

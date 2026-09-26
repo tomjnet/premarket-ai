@@ -1,6 +1,7 @@
 import {fireEvent, screen, waitFor, within} from '@testing-library/react';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
+import {db} from '@/mocks/data/db';
 import {server} from '@/mocks/node';
 import {setScenario} from '@/mocks/scenarios';
 import {expectNoA11yViolations} from '@/test/axe';
@@ -11,6 +12,8 @@ const NOW = new Date('2026-09-25T13:00:00Z');
 // Re-rendering ~100 rows twice (StrictMode) in jsdom takes a moment, more
 // so when all test files run in parallel. waitFor returns as soon as it can.
 const SLOW_DOM = {timeout: 10_000};
+// 100 items, 14 of them duplicates by the rule checks (9 of them by legacy).
+const SHOWN_BY_DEFAULT = 86;
 
 beforeEach(() => {
   vi.useFakeTimers({toFake: ['Date']});
@@ -22,10 +25,35 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** The feed rows (not the items of their badge lists). */
 function rows(): HTMLElement[] {
-  return within(screen.getByRole('list', {name: 'News items'})).getAllByRole(
-    'listitem',
+  return within(screen.getByRole('list', {name: 'News items'}))
+    .getAllByRole('listitem')
+    .filter(row => row.hasAttribute('data-feed-row'));
+}
+
+/** The row of item `id` (headlines can repeat: copies). */
+function rowOf(id: number | undefined): HTMLElement {
+  const row = rows().find(
+    candidate =>
+      candidate.querySelector('a[data-row-link]')?.getAttribute('href') ===
+      `/news/${id}`,
   );
+  if (row === undefined) {
+    throw new Error(`No row for item ${id}`);
+  }
+  return row;
+}
+
+/** The texts of a row's rule badges, in order. */
+function badgeTexts(row: HTMLElement): string[] {
+  const list = within(row).queryByRole('list', {name: 'Rule checks'});
+  if (list === null) {
+    return [];
+  }
+  return within(list)
+    .getAllByRole('listitem')
+    .map(item => item.textContent ?? '');
 }
 
 async function openFeed(path = '/news') {
@@ -34,7 +62,7 @@ async function openFeed(path = '/news') {
   return view;
 }
 
-describe('FeedPage: default day', () => {
+describe('FeedPage: default day', {timeout: 30_000}, () => {
   it("shows today's feed, newest first, duplicates hidden", async () => {
     await openFeed('/');
 
@@ -43,10 +71,10 @@ describe('FeedPage: default day', () => {
       within(main).getByText('Friday, September 25, 2026'),
     ).toBeInTheDocument();
     expect(
-      screen.getByText('91 items · 9 duplicates hidden · updated 05:30 ET'),
+      screen.getByText('86 items · 14 duplicates hidden · updated 05:30 ET'),
     ).toBeInTheDocument();
     const all = rows();
-    expect(all).toHaveLength(91);
+    expect(all).toHaveLength(SHOWN_BY_DEFAULT);
     const times = all.map(
       row => row.querySelector('time')?.getAttribute('dateTime') ?? '',
     );
@@ -67,14 +95,155 @@ describe('FeedPage: default day', () => {
 
     await waitFor(() => expect(rows()).toHaveLength(100), SLOW_DOM);
     expect(router.state.location.search).toContain('dups=1');
-    expect(screen.getAllByText(/^Duplicate of VND-/)).toHaveLength(9);
+    expect(screen.getAllByText(/^Duplicate of VND-/)).toHaveLength(14);
     expect(
-      screen.getByText('100 items · 9 duplicates shown · updated 05:30 ET'),
+      screen.getByText('100 items · 14 duplicates shown · updated 05:30 ET'),
     ).toBeInTheDocument();
   });
 });
 
-describe('FeedPage: filters in the URL', () => {
+// Several tests here render the full feed more than once: slower in jsdom.
+describe('FeedPage: rule checks', {timeout: 30_000}, () => {
+  const day = () => db.day('2026-09-25');
+
+  it('summarizes the rule run in the header', async () => {
+    await openFeed();
+
+    expect(
+      screen.getByText(
+        `Rule checks: 100 items · 14 duplicates · ${day().ruleRun?.flagged} flagged`,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('shows the badges of flagged items, in order', async () => {
+    await openFeed();
+    const item = day().items.find(
+      entry =>
+        !entry.is_dup &&
+        entry.reason_codes.includes('FAKE_COMPANY') &&
+        entry.reason_codes.includes('SPOOFED_SOURCE'),
+    );
+    const clean = day().items.find(
+      entry =>
+        !entry.is_dup && entry.reason_codes.length === 0 && entry.copies === 0,
+    );
+
+    expect(badgeTexts(rowOf(item?.id))).toEqual([
+      'FAKE COMPANY',
+      'FAKE TICKER',
+      'SPOOFED SOURCE',
+    ]);
+    expect(badgeTexts(rowOf(clean?.id))).toEqual([]);
+  });
+
+  it('counts the hidden copies of a story, and marks the copies', async () => {
+    const {user} = await openFeed();
+    const original = day().items.find(entry => entry.copies > 0);
+    const copies = original?.copies ?? 0;
+    const row = rowOf(original?.id);
+    const spoken = `${copies} ${copies === 1 ? 'copy' : 'copies'} of this story`;
+
+    expect(badgeTexts(row).at(-1)).toBe(`DUPLICATE ×${copies}${spoken} hidden`);
+    expect(within(row).getByText(`${spoken} hidden`)).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText('Show duplicates'));
+    await waitFor(() => expect(rows()).toHaveLength(100), SLOW_DOM);
+    expect(
+      within(rowOf(original?.id)).getByText(`${spoken} shown`),
+    ).toBeInTheDocument();
+    const near = day().items.find(entry => entry.dup_type === 'near');
+    const nearRow = rowOf(near?.id);
+    expect(within(nearRow).getByText('DUPLICATE · near')).toBeInTheDocument();
+    expect(
+      within(nearRow).getByText(`Duplicate of ${near?.dup_of ?? ''}`),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('STALE').length).toBeGreaterThan(0);
+  });
+
+  it('"Flagged only" lists flagged items without a new request, in the URL', async () => {
+    const {user, router} = await openFeed();
+    let requests = 0;
+    server.events.on('request:start', () => {
+      requests += 1;
+    });
+    const flagged = day().items.filter(
+      entry => !entry.is_dup && entry.reason_codes.length > 0,
+    ).length;
+
+    await user.click(screen.getByLabelText('Flagged only'));
+
+    await waitFor(() => expect(rows()).toHaveLength(flagged), SLOW_DOM);
+    expect(router.state.location.search).toContain('flagged=1');
+    expect(requests).toBe(0);
+    expect(
+      screen.getByText(
+        `${flagged} of ${SHOWN_BY_DEFAULT} items flagged · 14 duplicates hidden · updated 05:30 ET`,
+      ),
+    ).toBeInTheDocument();
+    for (const row of rows()) {
+      expect(badgeTexts(row).length).toBeGreaterThan(0);
+    }
+    server.events.removeAllListeners();
+
+    await router.navigate(-1);
+    await waitFor(
+      () => expect(rows()).toHaveLength(SHOWN_BY_DEFAULT),
+      SLOW_DOM,
+    );
+  });
+
+  it('"Flagged only" with nothing flagged offers all items', async () => {
+    // Real companies from the vendor's outlets: no rule flags them.
+    const {user, router} = renderApp('/news?ticker=AAPL&flagged=1');
+
+    expect(
+      await screen.findByText(
+        'No item in this view was flagged by the rule checks.',
+        {},
+        SLOW_DOM,
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', {name: 'Show all items'}));
+    expect(
+      await screen.findByRole('list', {name: 'News items'}, SLOW_DOM),
+    ).toBeInTheDocument();
+    expect(router.state.location.search).toBe('?date=2026-09-25&ticker=AAPL');
+  });
+
+  it('before the rules ran for a date: says so, no badges, legacy duplicates', async () => {
+    await openFeed('/news?date=2026-09-18');
+
+    expect(
+      screen.getByText("Rule checks haven't run for this date yet."),
+    ).toBeInTheDocument();
+    expect(rows()).toHaveLength(91);
+    expect(
+      screen.queryByRole('list', {name: 'Rule checks'}),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Not checked yet')).not.toBeInTheDocument();
+  });
+
+  it('rules-failed: a notice, and unchecked items say so', async () => {
+    setScenario('rules-failed');
+    await openFeed();
+
+    expect(screen.getByText('Rule checks failed')).toBeInTheDocument();
+    expect(
+      screen.getByText(/^Rule checks failed after 50 items\./),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('Not checked yet').length).toBeGreaterThan(0);
+  });
+
+  it('has no axe violations with badges', async () => {
+    const {container} = await openFeed('/news?flagged=1&ticker=QVXH&dups=1');
+
+    expect(rows().length).toBeGreaterThan(0);
+    await expectNoA11yViolations(container);
+  });
+});
+
+describe('FeedPage: filters in the URL', {timeout: 30_000}, () => {
   it('filters by a ticker chip, and back undoes it', async () => {
     const {user, router} = await openFeed();
     const [chip] = within(rows()[0] ?? document.body).getAllByRole('button', {
@@ -87,7 +256,10 @@ describe('FeedPage: filters in the URL', () => {
     await waitFor(() =>
       expect(router.state.location.search).toContain(`ticker=${ticker}`),
     );
-    await waitFor(() => expect(rows().length).toBeLessThan(91), SLOW_DOM);
+    await waitFor(
+      () => expect(rows().length).toBeLessThan(SHOWN_BY_DEFAULT),
+      SLOW_DOM,
+    );
     for (const row of rows()) {
       expect(
         within(row).getByRole('button', {name: `Filter by ${ticker}`}),
@@ -96,7 +268,10 @@ describe('FeedPage: filters in the URL', () => {
     expect(screen.getByLabelText('Ticker')).toHaveValue(ticker);
 
     await router.navigate(-1);
-    await waitFor(() => expect(rows()).toHaveLength(91), SLOW_DOM);
+    await waitFor(
+      () => expect(rows()).toHaveLength(SHOWN_BY_DEFAULT),
+      SLOW_DOM,
+    );
     expect(screen.getByLabelText('Ticker')).toHaveValue('');
   });
 
@@ -112,7 +287,10 @@ describe('FeedPage: filters in the URL', () => {
     await waitFor(() =>
       expect(router.state.location.search).toContain('q=Zentrality'),
     );
-    await waitFor(() => expect(rows().length).toBeLessThan(91), SLOW_DOM);
+    await waitFor(
+      () => expect(rows().length).toBeLessThan(SHOWN_BY_DEFAULT),
+      SLOW_DOM,
+    );
     expect(screen.getByText(/matching item/)).toBeInTheDocument();
   });
 
@@ -148,7 +326,10 @@ describe('FeedPage: filters in the URL', () => {
     );
     // Wait for the filtered list itself (router.state changes first, and
     // the old list stays on screen while the new one loads).
-    await waitFor(() => expect(rows().length).toBeLessThan(91), SLOW_DOM);
+    await waitFor(
+      () => expect(rows().length).toBeLessThan(SHOWN_BY_DEFAULT),
+      SLOW_DOM,
+    );
     await router.navigate(-1);
 
     await waitFor(
@@ -158,7 +339,7 @@ describe('FeedPage: filters in the URL', () => {
         ),
       SLOW_DOM,
     );
-    expect(rows()).toHaveLength(91);
+    expect(rows()).toHaveLength(SHOWN_BY_DEFAULT);
     expect(router.state.location.search).not.toContain('q=');
   });
 
@@ -182,7 +363,10 @@ describe('FeedPage: filters in the URL', () => {
 
     await user.click(screen.getByLabelText('Show duplicates'));
 
-    await waitFor(() => expect(rows()).toHaveLength(91), SLOW_DOM);
+    await waitFor(
+      () => expect(rows()).toHaveLength(SHOWN_BY_DEFAULT),
+      SLOW_DOM,
+    );
     expect(router.state.location.search).not.toContain('dups=1');
   });
 
@@ -247,7 +431,10 @@ describe('FeedPage: filters in the URL', () => {
       await screen.findByText('No items match this ticker or search.'),
     ).toBeInTheDocument();
     await user.click(screen.getByRole('button', {name: 'Show all items'}));
-    await waitFor(() => expect(rows()).toHaveLength(91), SLOW_DOM);
+    await waitFor(
+      () => expect(rows()).toHaveLength(SHOWN_BY_DEFAULT),
+      SLOW_DOM,
+    );
   });
 });
 
@@ -320,14 +507,21 @@ describe('FeedPage: scenarios', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/25 items received so far/)).toBeInTheDocument();
     expect(rows()).toHaveLength(25);
+    expect(
+      screen.getByText('Rule checks are running: 0 items checked so far.'),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('Not checked yet')).toHaveLength(25);
 
     await vi.advanceTimersByTimeAsync(30_000);
     await waitFor(() => expect(rows()).toHaveLength(50), SLOW_DOM);
+    expect(
+      screen.getByText('Rule checks are running: 25 items checked so far.'),
+    ).toBeInTheDocument();
 
     await vi.advanceTimersByTimeAsync(60_000);
     await waitFor(() => expect(rows()).toHaveLength(100), SLOW_DOM);
     expect(
-      screen.getByText('100 items · 9 duplicates shown · updated 05:30 ET'),
+      screen.getByText('100 items · 14 duplicates shown · updated 05:30 ET'),
     ).toBeInTheDocument();
     const callsAtDone = newsCalls;
     await vi.advanceTimersByTimeAsync(90_000);
@@ -380,7 +574,7 @@ describe('FeedPage: scenarios', () => {
     setScenario('expired-session');
     await openFeed();
 
-    expect(rows()).toHaveLength(91);
+    expect(rows()).toHaveLength(SHOWN_BY_DEFAULT);
   });
 
   it('slow: skeleton first, then the list', async () => {

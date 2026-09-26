@@ -1,0 +1,24 @@
+# premarket_fastpath: the C++20 core of cpp/fastpath as a Python extension.
+# Built as a wheel by the fastpath-wheel stage of podman/ai-api/Containerfile.
+[build-system]
+requires = ["scikit-build-core==0.11.6", "nanobind==2.9.2"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "premarket-fastpath"
+version = "0.1.0"
+description = "C++20 text, URL and SimHash fast path for the premarket-ai ai-api"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.28"
+cmake.build-type = "Release"
+# Only the extension module and its stub (installed by CMake).
+wheel.packages = []
+
+[tool.scikit-build.cmake.define]
+FASTPATH_BUILD_PYTHON = "ON"
+FASTPATH_BUILD_TESTS = "OFF"
+FASTPATH_BUILD_BENCH = "OFF"

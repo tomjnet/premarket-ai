@@ -6,7 +6,12 @@ import {
   previousTradingDate,
 } from '@/lib/time';
 
-/** The feed's filters. They live in the URL: `/news?date=&ticker=&q=&dups=1`. */
+import {isFlagged} from './rules';
+
+/**
+ * The feed's filters. They live in the URL:
+ * `/news?date=&ticker=&q=&dups=1&flagged=1`.
+ */
 export interface FeedFilters {
   /** Trading date, `YYYY-MM-DD`. */
   date: string;
@@ -14,6 +19,11 @@ export interface FeedFilters {
   q?: string;
   /** Show duplicates (hidden by default, like the PDF). */
   dups: boolean;
+  /**
+   * Only items with a rule reason code. Applied in the browser to the list
+   * the API returned; the API has no such parameter.
+   */
+  flagged: boolean;
 }
 
 const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/;
@@ -28,8 +38,8 @@ export function normalizeTicker(value: string): string | undefined {
 
 /**
  * Reads the filters from the URL. Anything missing or invalid falls back to
- * its default (today's date, no ticker, no search, duplicates hidden), so a
- * hand-edited or old link never breaks the page.
+ * its default (today's date, no ticker, no search, duplicates hidden, every
+ * item), so a hand-edited or old link never breaks the page.
  */
 export function parseFeedFilters(
   params: URLSearchParams,
@@ -42,6 +52,7 @@ export function parseFeedFilters(
     ticker: normalizeTicker(params.get('ticker') ?? ''),
     q: q === '' ? undefined : q,
     dups: params.get('dups') === '1',
+    flagged: params.get('flagged') === '1',
   };
 }
 
@@ -56,6 +67,9 @@ export function feedSearch(filters: FeedFilters): string {
   }
   if (filters.dups) {
     params.set('dups', '1');
+  }
+  if (filters.flagged) {
+    params.set('flagged', '1');
   }
   return `?${params.toString()}`;
 }
@@ -73,16 +87,34 @@ function plural(count: number, word: string): string {
 }
 
 /**
+ * How many duplicates the `include_duplicates` filter drops: the rule
+ * engine's count once it has checked the whole date, else the ingest run's
+ * legacy count.
+ */
+export function duplicateCount(list: NewsList): number {
+  if (list.ruleRun?.status === 'DONE') {
+    return list.ruleRun.duplicates;
+  }
+  return list.run?.dups ?? 0;
+}
+
+/**
  * The summary line of a finished run, for example
- * `91 items · 9 duplicates hidden · updated 05:30 ET`.
+ * `86 items · 14 duplicates hidden · updated 05:30 ET`, or with "Flagged
+ * only" `17 of 86 items flagged · ...`.
  */
 export function feedSummary(list: NewsList, filters: FeedFilters): string {
   const parts: string[] = [];
   const filtered = filters.ticker !== undefined || filters.q !== undefined;
-  parts.push(plural(list.count, filtered ? 'matching item' : 'item'));
+  const items = plural(list.count, filtered ? 'matching item' : 'item');
+  if (filters.flagged) {
+    parts.push(`${list.items.filter(isFlagged).length} of ${items} flagged`);
+  } else {
+    parts.push(items);
+  }
   if (list.run !== null && !filtered) {
     const state = filters.dups ? 'shown' : 'hidden';
-    parts.push(`${plural(list.run.dups, 'duplicate')} ${state}`);
+    parts.push(`${plural(duplicateCount(list), 'duplicate')} ${state}`);
   }
   const finishedAt = list.run?.finishedAt;
   if (finishedAt !== null && finishedAt !== undefined) {
@@ -100,4 +132,12 @@ export function feedFallbackDate(date: string, today: string): string {
     return isWeekend(today) ? previousTradingDate(today) : today;
   }
   return previousTradingDate(date);
+}
+
+/** The items the page lists: all of them, or only the flagged ones. */
+export function visibleItems(
+  items: readonly NewsItem[],
+  filters: FeedFilters,
+): NewsItem[] {
+  return filters.flagged ? items.filter(isFlagged) : [...items];
 }

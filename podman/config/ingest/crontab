@@ -1,0 +1,7 @@
+# premarket-ai C++20 ingester schedule (supercronic, TZ=America/New_York).
+# Weekdays at 05:30 ET: load the vendor feed into ingest.* in parallel with
+# the legacy job, then at 05:35 compare the two (parity waits up to
+# INGEST_PARITY_WAIT_S for both runs to be DONE).
+# NYSE holidays are not skipped here, same as the legacy schedule.
+30 5 * * 1-5 premarket-ingest ingest
+35 5 * * 1-5 premarket-ingest parity

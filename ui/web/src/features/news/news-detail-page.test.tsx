@@ -1,7 +1,9 @@
 import {screen, waitFor, within} from '@testing-library/react';
+import {HttpResponse, http} from 'msw';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 import type {NewsDetailWire} from '@/api/schemas/news';
+import {apiUrl} from '@/lib/env';
 import {db} from '@/mocks/data/db';
 import {server} from '@/mocks/node';
 import {setScenario} from '@/mocks/scenarios';
@@ -107,7 +109,7 @@ describe('NewsDetailPage: content', () => {
     expect(
       screen.getByRole('link', {name: /opens in a new tab/}),
     ).toHaveTextContent('pennyrocket.example');
-    expect(screen.getByText(/reuters-news\.test/)).toBeInTheDocument();
+    expect(screen.getByText(/^Source: reuters-news\.test/)).toBeInTheDocument();
   });
 
   it('never links a javascript: source', async () => {
@@ -131,13 +133,14 @@ describe('NewsDetailPage: content', () => {
     ).toBeInTheDocument();
   });
 
-  it('says which item a duplicate copies', async () => {
-    const item = todayItem(entry => entry.is_dup);
+  it('says which item a duplicate copies, and how it matched', async () => {
+    const item = todayItem(entry => entry.dup_type === 'near');
     await openItem(item.id);
 
     expect(
-      screen.getByText(`Yes, duplicate of ${item.dup_of ?? ''}`),
+      screen.getByText(`Yes, duplicate of ${item.dup_of ?? ''} (near copy)`),
     ).toBeInTheDocument();
+    expect(screen.getByText('DUPLICATE · near')).toBeInTheDocument();
   });
 
   it("links each ticker to that day's feed filtered by it", async () => {
@@ -148,6 +151,109 @@ describe('NewsDetailPage: content', () => {
     expect(
       screen.getByRole('link', {name: `${ticker}: show its news in the feed`}),
     ).toHaveAttribute('href', `/news?date=${TODAY}&ticker=${ticker}`);
+  });
+});
+
+describe('NewsDetailPage: rule checks', () => {
+  function ruleSection(): HTMLElement {
+    return screen.getByRole('region', {name: 'Rule checks'});
+  }
+
+  it('lists what the rules found, badge and message', async () => {
+    const item = todayItem(
+      entry =>
+        entry.reason_codes.includes('SPOOFED_SOURCE') &&
+        entry.reason_codes.includes('FAKE_TICKER'),
+    );
+    const {container} = await openItem(item.id);
+
+    const section = ruleSection();
+    for (const evidence of item.rule_evidence) {
+      expect(within(section).getByText(evidence.message)).toBeInTheDocument();
+    }
+    expect(within(section).getAllByText('FAKE TICKER').length).toBeGreaterThan(
+      0,
+    );
+    expect(within(section).getByText('SPOOFED SOURCE')).toBeInTheDocument();
+    expect(
+      within(section).queryByText('No rule flagged this item.'),
+    ).not.toBeInTheDocument();
+    // The same codes as badges under the headline.
+    expect(
+      within(screen.getByRole('list', {name: 'Rule checks'})).getByText(
+        'SPOOFED SOURCE',
+      ),
+    ).toBeInTheDocument();
+    await expectNoA11yViolations(container);
+  });
+
+  it('says so when no rule flagged the item', async () => {
+    await openItem(
+      todayItem(
+        entry =>
+          entry.reason_codes.length === 0 &&
+          !entry.is_dup &&
+          entry.copies === 0,
+      ).id,
+    );
+
+    expect(
+      within(ruleSection()).getByText('No rule flagged this item.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('list', {name: 'Rule checks'}),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the copies of an original', async () => {
+    const item = todayItem(entry => entry.copies > 0);
+    await openItem(item.id);
+
+    expect(screen.getByText('Copies of this story')).toBeInTheDocument();
+    expect(screen.getByText(`DUPLICATE ×${item.copies}`)).toBeInTheDocument();
+  });
+
+  it("says so when the rules haven't run for the item", async () => {
+    const item = db.day('2026-09-18').items[0];
+    await openItem(item?.id ?? 0);
+
+    expect(
+      within(ruleSection()).getByText(
+        "Rule checks haven't run for this item yet.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('renders evidence as text and unknown codes as neutral badges', async () => {
+    const item = plainItem();
+    server.use(
+      http.get(apiUrl('/news/:id'), () =>
+        HttpResponse.json({
+          ...item,
+          reason_codes: ['INJECTION_ATTEMPT'],
+          rule_evidence: [
+            {
+              check: 'entity',
+              code: 'INJECTION_ATTEMPT',
+              message: 'Body says <img src=x onerror=alert(1)> to the model.',
+            },
+          ],
+        }),
+      ),
+    );
+    await openItem(item.id);
+
+    const section = ruleSection();
+    expect(
+      within(section).getByText(
+        'Body says <img src=x onerror=alert(1)> to the model.',
+      ),
+    ).toBeInTheDocument();
+    expect(section.querySelector('img')).toBeNull();
+    expect(within(section).getByText('INJECTION ATTEMPT')).toHaveAttribute(
+      'data-variant',
+      'outline',
+    );
   });
 });
 

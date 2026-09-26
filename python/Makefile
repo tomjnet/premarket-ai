@@ -11,27 +11,40 @@ DATE ?= $(shell TZ=America/New_York date +%F)
 HISTORY_DAYS ?= 5
 
 LEGACY_BUILD = $(ENGINE) build -f podman/legacy/Containerfile cpp/legacy
-VENDOR_BUILD = $(ENGINE) build -f podman/vendor-sim/Containerfile python/vendor-sim
-API_BUILD = $(ENGINE) build -f podman/ai-api/Containerfile python/ai-api
+INGEST_BUILD = $(ENGINE) build -f podman/ingest/Containerfile cpp/ingest
+# Named build contexts: the lab universe (config), the C++20 fastpath module
+# built into ai-api, and vendor-sim's generator for the eval stage.
+VENDOR_BUILD = $(ENGINE) build -f podman/vendor-sim/Containerfile \
+  --build-context config=python/config python/vendor-sim
+API_BUILD = $(ENGINE) build -f podman/ai-api/Containerfile \
+  --build-context fastpath=cpp/fastpath --build-context config=python/config \
+  --build-context vendorsim=python/vendor-sim python/ai-api
 WEB_BUILD = $(ENGINE) build -f podman/web/Containerfile ui/web
 PSQL = $(COMPOSE) exec -T postgres psql -U premarket -d premarket
-# Increment 1 runs the legacy pipeline and the website side by side.
+# Increment 1 runs the legacy pipeline and the website side by side;
+# increment 2 adds the C++20 ingester (profile legacy) and the rule checks.
 # `run` always uses --no-deps: with Podman, compose recreates the running
 # postgres for every `run` with dependencies, and ai-api would lose its
 # connections for a few seconds. `up` (or `demo`) starts everything first.
 PROFILES = --profile legacy --profile ai
 # Secrets `env` fills with random values when .env has them empty or missing.
 SECRETS = JWT_SECRET REDIS_PASSWORD AI_DB_PASSWORD
-# Increment 1 settings added to an older .env (from increment 0).
+# Settings added to an older .env (from increments 0 and 1).
 NEW_SETTINGS = WEB_PORT WEB_BIND DEMO_USER_PASSWORD ACCESS_TOKEN_TTL_S \
-  REFRESH_TOKEN_TTL_S LOGIN_MAX_FAILURES LOGIN_LOCKOUT_S
+  REFRESH_TOKEN_TTL_S LOGIN_MAX_FAILURES LOGIN_LOCKOUT_S \
+  LAB_UNIVERSE_SIZE INGEST_WORKERS INGEST_QUEUE_CAPACITY \
+  INGEST_DEDUP_WINDOW_DAYS INGEST_CPU_AFFINITY SEC_USER_AGENT \
+  REGISTRY_MAX_AGE_DAYS STALE_MAX_AGE_DAYS DEDUP_WINDOW_DAYS \
+  DEDUP_SIMHASH_NGRAM DEDUP_SIMHASH_MAX_HAMMING DEDUP_NEAR_MAX_WORD_EDITS
 WEB_PORT ?= $(shell grep -s '^WEB_PORT=' $(ROOT)/.env | cut -d= -f2)
 
 .DEFAULT_GOAL := help
 .PHONY: help env build up down logs ps test lint cpp-test cpp-lint \
         cpp-asan cpp-tsan cpp-bench sanitizers check demo ingest report \
         runs pdf feed-summary psql reset api-test api-lint web-image smoke \
-        web openapi audit
+        web openapi audit ingest-legacy ingest-modern parity rules registry \
+        dedup-rebuild rule-runs eval bench ingest-test ingest-lint \
+        ingest-asan ingest-tsan fastpath-test fastpath-lint fastpath-asan
 
 help: ## List the tasks
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -53,13 +66,14 @@ env: ## Create .env from .env.example and fill empty secrets with random values
 	@chmod 600 $(ROOT)/.env
 
 # --- build and run ----------------------------------------------------------
-build: env ## Build the service images (vendor-sim, legacy, ai-api, web)
+build: env ## Build the images (vendor-sim, legacy, ingest, ai-api, web)
 	cd $(ROOT) && $(VENDOR_BUILD) --target runtime -t $(PREFIX)/vendor-sim:dev
 	cd $(ROOT) && $(LEGACY_BUILD) --target runtime -t $(PREFIX)/legacy:dev
+	cd $(ROOT) && $(INGEST_BUILD) --target runtime -t $(PREFIX)/ingest:dev
 	cd $(ROOT) && $(API_BUILD) --target runtime -t $(PREFIX)/ai-api:dev
 	cd $(ROOT) && $(WEB_BUILD) --target runtime -t $(PREFIX)/web:dev
 
-up: build ## Build (cached) and start everything: legacy + the website
+up: build ## Build (cached) and start everything: both ingesters + website
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) up -d --wait
 	@$(MAKE) --no-print-directory web
 
@@ -80,17 +94,21 @@ web: ## Print the website URL and the demo logins
 	@echo "Logins:  trader1, analyst1, admin1 (password: DEMO_USER_PASSWORD in .env)"
 
 # --- tests ------------------------------------------------------------------
-test: ## Unit tests: pytest (vendor-sim, ai-api) + GoogleTest (legacy)
+test: ## Unit tests: pytest (vendor-sim, ai-api + parity) + GoogleTest (C++)
 	cd $(ROOT) && $(VENDOR_BUILD) --target test -t $(PREFIX)/vendor-sim:test
 	$(MAKE) --no-print-directory api-test
 	$(MAKE) --no-print-directory cpp-test
+	$(MAKE) --no-print-directory ingest-test
+	$(MAKE) --no-print-directory fastpath-test
 
-lint: ## Style: ruff (vendor-sim, ai-api) + clang-format/cpplint/clang-tidy
+lint: ## Style: ruff + clang-format/cpplint/clang-tidy (all C++ projects)
 	cd $(ROOT) && $(VENDOR_BUILD) --target lint -t $(PREFIX)/vendor-sim:lint
 	$(MAKE) --no-print-directory api-lint
 	$(MAKE) --no-print-directory cpp-lint
+	$(MAKE) --no-print-directory ingest-lint
+	$(MAKE) --no-print-directory fastpath-lint
 
-api-test: ## ai-api pytest (auth, sessions, news contract)
+api-test: ## ai-api pytest (auth, news, rules, dedup, C++ vs Python parity)
 	cd $(ROOT) && $(API_BUILD) --target test -t $(PREFIX)/ai-api:test
 
 api-lint: ## ai-api ruff
@@ -99,7 +117,10 @@ api-lint: ## ai-api ruff
 web-image: ## Build only the web image (production UI bundle + nginx)
 	cd $(ROOT) && $(WEB_BUILD) --target runtime -t $(PREFIX)/web:dev
 
-cpp-test: ## C++ debug build + ctest
+eval: ## Rule/dedup eval on the seed-42 golden set (fails on regression)
+	cd $(ROOT) && $(API_BUILD) --target eval -t $(PREFIX)/ai-api:eval
+
+cpp-test: ## C++11 legacy: debug build + ctest
 	cd $(ROOT) && $(LEGACY_BUILD) --target test -t $(PREFIX)/legacy:test
 
 cpp-lint: ## C++ clang-format, cpplint, clang-tidy
@@ -111,17 +132,46 @@ cpp-asan: ## C++ tests under AddressSanitizer + UBSan
 cpp-tsan: ## C++ tests under ThreadSanitizer
 	cd $(ROOT) && $(LEGACY_BUILD) --target tsan -t $(PREFIX)/legacy:tsan
 
-sanitizers: cpp-asan cpp-tsan ## Both sanitizer builds
+ingest-test: ## C++20 ingester: debug build + ctest
+	cd $(ROOT) && $(INGEST_BUILD) --target test -t $(PREFIX)/ingest:test
+
+ingest-lint: ## C++20 ingester: clang-format, cpplint, clang-tidy
+	cd $(ROOT) && $(INGEST_BUILD) --target lint -t $(PREFIX)/ingest:lint
+
+ingest-asan: ## C++20 ingester under ASan + UBSan
+	cd $(ROOT) && $(INGEST_BUILD) --target asan -t $(PREFIX)/ingest:asan
+
+# seccomp=unconfined lets the stage run ctest with ASLR off (setarch -R):
+# GCC 14's TSan aborts with the high ASLR entropy of the WSL kernel.
+ingest-tsan: ## C++20 ingester under TSan (lock-free queue, worker pool)
+	cd $(ROOT) && $(INGEST_BUILD) --security-opt seccomp=unconfined \
+	  --target tsan -t $(PREFIX)/ingest:tsan
+
+fastpath-test: ## C++20 fastpath core: debug build + ctest
+	cd $(ROOT) && $(API_BUILD) --target fastpath-test -t $(PREFIX)/fastpath:test
+
+fastpath-lint: ## C++20 fastpath: clang-format, cpplint, clang-tidy
+	cd $(ROOT) && $(API_BUILD) --target fastpath-lint -t $(PREFIX)/fastpath:lint
+
+fastpath-asan: ## C++20 fastpath core under ASan + UBSan
+	cd $(ROOT) && $(API_BUILD) --target fastpath-asan -t $(PREFIX)/fastpath:asan
+
+sanitizers: cpp-asan cpp-tsan ingest-asan ingest-tsan fastpath-asan ## All sanitizer builds
 
 cpp-bench: ## Build and run the legacy micro-benchmarks
 	cd $(ROOT) && $(LEGACY_BUILD) --target bench -t $(PREFIX)/legacy:bench
 	$(ENGINE) run --rm $(PREFIX)/legacy:bench
 
-check: test lint sanitizers ## Everything CI runs
+bench: cpp-bench ## Legacy (C++11) vs modern (C++20) micro-benchmarks
+	cd $(ROOT) && $(INGEST_BUILD) --target bench -t $(PREFIX)/ingest:bench
+	$(ENGINE) run --rm $(PREFIX)/ingest:bench
 
-# The increment's "done when": the website shows DATE's news (the same items
-# as the PDF), through the edge, with the security settings in place.
-smoke: ## Website check for DATE: login, feed = PDF rows, headers, logout
+check: test lint sanitizers eval ## Everything CI runs
+
+# The increment's "done when", through the edge: C++20 parity PASS, the rule
+# run DONE, the feed hides exactly the rule duplicates and shows FAKE badges,
+# plus the increment 1 security checks.
+smoke: ## Website check for DATE: parity, rules, badges, login, headers
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
 	  ai-api smoke --base-url http://edge:8080 --date $(DATE)
 
@@ -136,26 +186,60 @@ audit: ## Last 20 auth events (logins, failures, lockouts, logouts)
 	  client_ip FROM ai.audit_log ORDER BY id DESC LIMIT 20"
 
 # --- the demo day -----------------------------------------------------------
-demo: up ## Whole day now: ingest history + DATE, PDF, website check
-	@cd $(ROOT) && for i in $$(seq $(HISTORY_DAYS) -1 1); do \
+demo: up ## Whole day now: history + DATE (both ingesters, rules), PDF, check
+	@for i in $$(seq $(HISTORY_DAYS) -1 1); do \
 	  d=$$(date -d "$(DATE) -$$i day" +%F); \
-	  echo "== history ingest $$d"; \
-	  $(COMPOSE) $(PROFILES) run --rm --no-deps legacy ingest --date $$d || exit 1; \
+	  echo "== history $$d"; \
+	  $(MAKE) --no-print-directory ingest parity rules DATE=$$d || exit 1; \
 	done
-	$(MAKE) --no-print-directory ingest report runs pdf smoke web DATE=$(DATE)
+	$(MAKE) --no-print-directory ingest parity rules report runs pdf smoke \
+	  web DATE=$(DATE)
 
-ingest: ## Run the C++11 ingest for DATE
+ingest: ingest-legacy ingest-modern ## Ingest DATE with both ingesters
+
+ingest-legacy: ## Run the C++11 legacy ingest for DATE
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps legacy ingest --date $(DATE)
+
+ingest-modern: ## Run the C++20 ingest for DATE (shadow schema ingest.*)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ingest ingest --date $(DATE)
+
+parity: ## Compare DATE's legacy and C++20 rows (must be 0 differences)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ingest parity --date $(DATE)
+
+rules: ## Rule checks for DATE: dedup L0-L2, SEC registry, sources, stale
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api rules --date $(DATE)
+
+registry: ## Refresh the SEC ticker registry now (needs SEC_USER_AGENT)
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api registry
+
+dedup-rebuild: ## Re-index the 7-day dedup window ending at DATE into Redis
+	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps ai-api-init \
+	  ai-api dedup-rebuild --date $(DATE)
 
 report: ## Render /nfs/reports/DATE.pdf
 	cd $(ROOT) && $(COMPOSE) $(PROFILES) run --rm --no-deps legacy report --date $(DATE)
 
-runs: ## Last 10 rows of legacy.ingest_run
+rule-runs: ## Last 10 rule runs (duplicates by type, reason codes)
+	@cd $(ROOT) && $(PSQL) -c "SELECT run_id, feed_date, status, items, \
+	  duplicates AS dups, stale, flagged, by_type, reason_counts, backend, \
+	  total_ms FROM ai.rule_run ORDER BY run_id DESC LIMIT 10"
+
+runs: ## Last 10 runs of each ingester, and the parity checks
 	@cd $(ROOT) && $(PSQL) -c "SELECT run_id, feed_date, status, \
 	  rows_received AS received, dups, workers, p50_us, p99_us, p999_us, \
 	  total_ms, to_char(finished_at AT TIME ZONE 'America/New_York', \
 	  'HH24:MI:SS') AS finished_et FROM legacy.ingest_run \
 	  ORDER BY run_id DESC LIMIT 10"
+	@cd $(ROOT) && $(PSQL) -c "SELECT run_id, feed_date, status, \
+	  rows_received AS received, dups, workers, p50_us, p99_us, p999_us, \
+	  wait_p99_us, parse_us, copy_ms, total_ms FROM ingest.ingest_run \
+	  ORDER BY run_id DESC LIMIT 10"
+	@cd $(ROOT) && $(PSQL) -c "SELECT feed_date, status, differences, \
+	  legacy_rows, modern_rows, to_char(checked_at AT TIME ZONE \
+	  'America/New_York', 'MM-DD HH24:MI') AS checked_et \
+	  FROM ingest.parity_run ORDER BY id DESC LIMIT 10"
 
 pdf: ## Copy DATE's PDF from the NFS volume to out/DATE.pdf
 	@mkdir -p $(ROOT)/out

@@ -40,9 +40,16 @@ def _item(row: dict[str, Any], *, with_body: bool) -> dict[str, Any]:
         "synthetic": row["synthetic"],
         "is_dup": row["is_dup"],
         "dup_of": row["dup_of"],
+        "reason_codes": list(row["reason_codes"]),
+        "dup_type": row["dup_type"],
+        "copies": row["copies"],
+        "rules_checked": row["rules_checked"],
     }
     if with_body:
         fields["body"] = row["body"]
+        fields["rule_evidence"] = [
+            schemas.RuleEvidenceOut(**entry) for entry in row["evidence"] or []
+        ]
     return fields
 
 
@@ -66,7 +73,8 @@ async def list_news(
         include_duplicates: Also return items flagged as duplicates.
 
     Returns:
-        The date's ingest run (or null) and the matching items.
+        The date's ingest run and rule run (or null) and the matching
+        items with their rule results.
     """
     if day is None:
         day = datetime.datetime.now(_NEW_YORK).date()
@@ -78,11 +86,15 @@ async def list_news(
         include_duplicates=include_duplicates,
     )
     run = await services.news.latest_run(day)
+    rule_run = await services.news.latest_rule_run(day)
     rows = await services.news.items(query)
     items = [schemas.NewsItemOut(**_item(row, with_body=False)) for row in rows]
     return schemas.NewsListOut(
         date=day.isoformat(),
         run=None if run is None else schemas.IngestRunOut.from_row(run),
+        rule_run=(
+            None if rule_run is None else schemas.RuleRunOut.from_row(rule_run)
+        ),
         count=len(items),
         items=items,
     )
@@ -93,7 +105,7 @@ async def get_news_item(
     services: deps.ServicesDep,
     item_id: Annotated[int, fastapi.Path(ge=1, le=2**63 - 1)],
 ) -> schemas.NewsDetailOut:
-    """One item with its full body.
+    """One item with its full body and the rule evidence.
 
     Raises:
         fastapi.HTTPException: 404 when there is no such item.

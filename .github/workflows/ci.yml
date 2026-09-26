@@ -27,7 +27,8 @@ jobs:
       - name: vendor-sim ${{ matrix.stage }}
         run: >
           podman build -f podman/vendor-sim/Containerfile
-          --target ${{ matrix.stage }} python/vendor-sim
+          --target ${{ matrix.stage }}
+          --build-context config=python/config python/vendor-sim
 
   legacy-cpp:
     runs-on: ubuntu-24.04
@@ -45,18 +46,51 @@ jobs:
           podman build -f podman/legacy/Containerfile
           --target ${{ matrix.stage }} cpp/legacy
 
+  # C++20 modern ingester (increment 2). Parity with legacy needs a
+  # database, so it's checked by `make -C python demo`, not here.
+  ingest-cpp:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [test, lint, asan, tsan, runtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Allow ThreadSanitizer's memory layout
+        if: matrix.stage == 'tsan'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      # seccomp=unconfined: the tsan stage runs ctest with ASLR off.
+      - name: ingest ${{ matrix.stage }}
+        run: >
+          podman build -f podman/ingest/Containerfile
+          --security-opt seccomp=unconfined
+          --target ${{ matrix.stage }} cpp/ingest
+
+  # ai-api with the C++20 fastpath module: C++ stages, pytest (including
+  # the C++ vs Python parity tests), ruff, and the rule eval (eval harness
+  # v1: the deterministic layers, so it runs on hosted runners).
   ai-api:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        stage: [test, lint, runtime]
+        stage:
+          - fastpath-test
+          - fastpath-lint
+          - fastpath-asan
+          - test
+          - lint
+          - eval
+          - runtime
     steps:
       - uses: actions/checkout@v4
       - name: ai-api ${{ matrix.stage }}
         run: >
           podman build -f podman/ai-api/Containerfile
-          --target ${{ matrix.stage }} python/ai-api
+          --target ${{ matrix.stage }}
+          --build-context fastpath=cpp/fastpath
+          --build-context config=python/config
+          --build-context vendorsim=python/vendor-sim python/ai-api
 
   web:
     runs-on: ubuntu-24.04

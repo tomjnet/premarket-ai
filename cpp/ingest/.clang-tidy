@@ -1,0 +1,15 @@
+# C++20: modernize-* is on. Excluded checks are style choices the Google
+# guide does not ask for (trailing return types, [[nodiscard]] everywhere).
+Checks: >
+  -*,
+  google-*,
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  -bugprone-easily-swappable-parameters,
+  -performance-enum-size,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/cpp/ingest/src/.*'
+FormatStyle: file

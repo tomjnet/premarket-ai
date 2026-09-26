@@ -3,6 +3,8 @@
 The same (seed, date) always gives the same 100 items and labels. Duplicates
 point at the item they copy (``dup_of``); stale duplicates copy a real item
 from an earlier day's feed, so the legacy 7-day hash lookup can catch them.
+Originals never repeat the story text (ignoring the dateline) of an original
+from the 7 days before, so every text copy in the feed is labeled as one.
 
 Typical usage:
 
@@ -28,6 +30,9 @@ _NEW_YORK = zoneinfo.ZoneInfo("America/New_York")
 _DUP_TYPES = ("exact", "url", "near", "paraphrase", "stale")
 _FAKE_KINDS = ("fake_company", "fabricated", "spoofed", "fake_ticker")
 _MISLEADING_KINDS = ("number_mismatch", "sensational", "old_news")
+# Originals differ from every original of this many earlier days.
+_UNIQUE_WINDOW_DAYS = 7
+_DATELINE_END = ") -- "
 
 
 @dataclasses.dataclass(frozen=True)
@@ -264,8 +269,15 @@ def _pick_two(
 
 
 def _text_key(item: NewsItem) -> str:
-    """The text as exact-hash dedup sees it: lowercase, whitespace collapsed."""
-    return " ".join(f"{item.headline}\n{item.body}".lower().split())
+    """The story as exact-hash dedup sees it, without the day's dateline.
+
+    Lowercase and whitespace collapsed, like the legacy hash. The dateline
+    is dropped so the same story on two days has the same key.
+    """
+    _, found, story = item.body.partition(_DATELINE_END)
+    if not found:
+        story = item.body
+    return " ".join(f"{item.headline}\n{story}".lower().split())
 
 
 def _claim(used: set[str], item: NewsItem) -> bool:
@@ -284,14 +296,17 @@ class _Originals:
     Attributes:
         day: The feed date.
         rng: The random source shared by every original of the day.
+        universe: The real companies stories are written about.
         items: The items kept so far; item N has ID number N.
         labels: The labels of ``items``, in the same order.
         facts: The template and facts behind each real item.
-        used: The text keys of ``items``, so no two items share text.
+        used: The text keys of ``items`` and of the originals of the days
+            before, so no two stories share text.
     """
 
     day: datetime.date
     rng: random.Random
+    universe: tuple[companies.Company, ...]
     items: list[NewsItem] = dataclasses.field(default_factory=list)
     labels: list[Label] = dataclasses.field(default_factory=list)
     facts: _Facts = dataclasses.field(default_factory=dict)
@@ -325,7 +340,7 @@ def _add_real(originals: _Originals, count: int) -> None:
     rng = originals.rng
     added = 0
     while added < count:
-        company, other = _pick_two(rng, companies.REAL_COMPANIES)
+        company, other = _pick_two(rng, originals.universe)
         template = rng.choice(templates.REAL_TEMPLATES)
         params = _params(rng, company, other)
         tickers = (company.ticker,)
@@ -344,18 +359,21 @@ def _add_real(originals: _Originals, count: int) -> None:
 
 
 def _fake_story(
-    rng: random.Random, kind: str
+    rng: random.Random,
+    kind: str,
+    universe: tuple[companies.Company, ...],
 ) -> tuple[str, str, str, tuple[str, ...], tuple[str, ...]]:
     """Writes one FAKE story of ``kind``.
 
     Args:
         rng: The day's random source.
         kind: One of ``_FAKE_KINDS``.
+        universe: The real companies.
 
     Returns:
         The headline, body, source domain, tickers and reason codes.
     """
-    real, other = _pick_two(rng, companies.REAL_COMPANIES)
+    real, other = _pick_two(rng, universe)
     fake = rng.choice(companies.FAKE_COMPANIES)
     if kind == "fake_company":
         params = _params(rng, fake, real)
@@ -402,7 +420,7 @@ def _add_fake(originals: _Originals, count: int, injection: int) -> None:
     added = 0
     while added < count:
         headline, body, domain, tickers, reasons = _fake_story(
-            originals.rng, kind
+            originals.rng, kind, originals.universe
         )
         if added < injection:
             lines = templates.INJECTION_LINES
@@ -422,7 +440,7 @@ def _add_misleading(originals: _Originals, count: int) -> None:
     kind = next(misleading_kinds)
     added = 0
     while added < count:
-        company, other = _pick_two(rng, companies.REAL_COMPANIES)
+        company, other = _pick_two(rng, originals.universe)
         params = _params(rng, company, other)
         reasons: tuple[str, ...]
         if kind == "number_mismatch":
@@ -449,10 +467,30 @@ def _add_misleading(originals: _Originals, count: int) -> None:
             kind = next(misleading_kinds)
 
 
-def _originals(day: datetime.date, seed: int, mix: FeedMix) -> _Originals:
-    """Real, FAKE and MISLEADING items for ``day`` (IDs 1..N, no copies)."""
+def _originals(
+    day: datetime.date, seed: int, mix: FeedMix, *, window: bool = True
+) -> _Originals:
+    """Real, FAKE and MISLEADING items for ``day`` (IDs 1..N, no copies).
+
+    Args:
+        day: The feed date.
+        seed: The random seed.
+        mix: How many items of each kind.
+        window: Also keep the stories different from the originals of the
+            7 days before. Those days are generated without this check, so
+            the recursion stops; the result differs only in the rare case
+            where an earlier day itself had to re-roll a story.
+
+    Returns:
+        The day's originals.
+    """
     rng = random.Random(f"{seed}:{day.isoformat()}:originals")
-    originals = _Originals(day, rng)
+    originals = _Originals(day, rng, companies.real_companies())
+    if window:
+        for days_back in range(1, _UNIQUE_WINDOW_DAYS + 1):
+            earlier = day - datetime.timedelta(days=days_back)
+            previous = _originals(earlier, seed, mix, window=False)
+            originals.used.update(_text_key(item) for item in previous.items)
     _add_real(originals, mix.real)
     _add_fake(originals, mix.fake, mix.injection)
     _add_misleading(originals, mix.misleading)
@@ -570,7 +608,7 @@ def _duplicates(
         if "INJECTION_ATTEMPT" not in label_by_id[item.id].reason_codes
     ]
     by_id = {item.id: item for item in originals.items}
-    used = {_text_key(item) for item in originals.items}
+    used = set(originals.used)
 
     duplicates: list[tuple[NewsItem, Label]] = []
     number = len(originals.items)

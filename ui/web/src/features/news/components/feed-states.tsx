@@ -1,12 +1,13 @@
 import {Link} from 'react-router';
 
-import type {NewsList} from '@/api/schemas/news';
+import type {NewsList, RuleRun} from '@/api/schemas/news';
 import {Alert, AlertDescription, AlertTitle} from '@/components/ui/alert';
 import {Skeleton} from '@/components/ui/skeleton';
 import {formatLongDate, isWeekend} from '@/lib/time';
 
 import {feedFallbackDate, feedSearch, feedSummary} from '../feed';
 import type {FeedFilters} from '../feed';
+import {ruleRunSummary} from '../rules';
 
 const SKELETON_ROWS = 6;
 
@@ -54,7 +55,7 @@ export function NoFeed({date, today}: NoFeedProps) {
         <Link
           to={{
             pathname: '/news',
-            search: feedSearch({date: fallback, dups: false}),
+            search: feedSearch({date: fallback, dups: false, flagged: false}),
           }}
           className="font-medium underline underline-offset-4"
         >
@@ -107,4 +108,25 @@ export function RunStatus({list, filters, today}: RunStatusProps) {
       {feedSummary(list, filters)}
     </p>
   );
+}
+
+interface RuleRunStatusProps {
+  ruleRun: RuleRun | null;
+}
+
+/**
+ * The date's rule-check run: its counts when `DONE`, progress while
+ * `RUNNING`, a notice when `FAILED` or when the rules haven't run.
+ */
+export function RuleRunStatus({ruleRun}: RuleRunStatusProps) {
+  const text = ruleRunSummary(ruleRun);
+  if (ruleRun?.status === 'FAILED') {
+    return (
+      <Alert role="status">
+        <AlertTitle>Rule checks failed</AlertTitle>
+        <AlertDescription>{text}</AlertDescription>
+      </Alert>
+    );
+  }
+  return <p className="text-sm text-muted-foreground">{text}</p>;
 }

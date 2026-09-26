@@ -3,7 +3,7 @@ import type {NewsDetailWire} from '@/api/schemas/news';
 import {ENV} from '@/lib/env';
 import {todayInNewYork} from '@/lib/time';
 
-import {generateDay, parseItemId} from './generator';
+import {emptyDay, generateDay, parseItemId} from './generator';
 import type {GeneratedDay} from './generator';
 import {MOCK_PASSWORD, MOCK_USERS} from './users';
 
@@ -100,7 +100,7 @@ export class MockDb {
   /** The feed of a date. Dates after today in New York have no run yet. */
   day(date: string): GeneratedDay {
     if (date > this.today()) {
-      return {date, run: null, items: []};
+      return emptyDay(date);
     }
     let day = this.days.get(date);
     if (day === undefined) {
