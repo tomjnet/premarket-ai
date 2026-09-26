@@ -36,6 +36,7 @@ describe('LoginPage', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/log in as trader1/)).toBeInTheDocument();
     await expectNoA11yViolations(container);
+    expect(document.title).toBe('Log in · premarket-ai');
   });
 
   it('logs in with Enter and goes back to ?next=', async () => {

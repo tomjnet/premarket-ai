@@ -8,16 +8,19 @@ against a **mock backend** in the browser (MSW, Mock Service Worker) that
 serves the agreed JSON contract. Setting one environment variable,
 `VITE_API_MODE=live`, switches to the real backend without a code change.
 
-> Status: **milestone M4 (news detail)**. Log in, read a trading date's
-> news (filters in the URL, duplicates, running or failed runs, keyboard
-> navigation), open an item to read it in full with its source link, and go
-> back to the feed with the filters kept. M5 (hardening) is next.
+> Status: **increment 1 web UI complete (milestones M0–M5)**. Log in, read
+> a trading date's news (filters in the URL, duplicates, running or failed
+> runs, keyboard navigation), open an item in full with its source link, and
+> go back to the feed with the filters kept. Every mock scenario is covered
+> by unit tests and by browser tests in Chromium, and the
+> [definition of done](#definition-of-done) is met.
 
 ## Contents
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
 - [Tasks](#tasks)
 - [How to test](#how-to-test)
+- [Definition of done](#definition-of-done)
 - [Mock backend](#mock-backend)
 - [Configuration](#configuration)
 - [Project structure](#project-structure)
@@ -55,11 +58,13 @@ Run `make -C ui help` for the list.
 | `dev` | Vite dev server on port 5173 (`--host 0.0.0.0`), mock mode by default. |
 | `test` | Vitest (unit, component and contract tests) with coverage. |
 | `test-watch` | Vitest in watch mode: re-runs tests on every save. Needs a terminal. |
-| `typecheck` | `tsc` for the app and for `vite.config.ts`. |
+| `typecheck` | `tsc` for the app, and for the Vite and Playwright configs and `e2e/`. |
 | `lint` | ESLint with the gts config (Google TypeScript style) plus React Hooks and jsx-a11y rules, **zero warnings allowed**. |
 | `fix` | gts fix: reformats and autofixes what it can. |
 | `build` | Production build into `web/dist` (always live mode), then fails if any MSW code is in `dist/`. |
 | `check` | `lint`, `typecheck`, `test`, `build`, stopping at the first failure. |
+| `e2e` | Browser tests: Playwright drives Chromium against the dev server in mock mode (every scenario, axe with contrast, keyboard, 360 px). First run pulls a ~2.5 GB image. |
+| `verify` | `check` and then `e2e`: the full definition of done. |
 | `npm` | Any npm command in the container, for example `make -C ui npm ARGS="install zod"`. |
 | `clean` | Removes `web/dist`, `web/coverage` and the node_modules volume. |
 
@@ -76,7 +81,7 @@ make -C ui check
 Pass criteria, in order:
 1. `lint`: no output from ESLint (0 errors, 0 warnings).
 2. `typecheck`: no output from `tsc`.
-3. `test`: `Test Files  23 passed`, `Tests  199 passed`, and the coverage
+3. `test`: `Test Files  23 passed`, `Tests  200 passed`, and the coverage
    summary. This step fails if `src/api`, `src/features` or `src/lib` drop
    below 80 % line coverage.
 4. `build`: `built in …ms` and no `MSW code found in dist/` line.
@@ -107,7 +112,31 @@ make -C ui test-watch
 ```
 The HTML coverage report is written to `web/coverage/index.html`.
 
-### 2. Manual check in the browser
+### 2. Browser tests (real Chromium)
+```bash
+make -C ui e2e
+```
+Playwright starts the dev server in mock mode inside its container and runs
+`web/e2e/app.spec.ts` in Chromium, with the page clock pinned to Friday
+2026-09-25 09:00 ET (time then runs normally). Expected: `18 passed`. They check:
+- the MSW service worker starts (`[MSW] Mocking enabled.`);
+- every scenario (`default`, `empty`, `running`, `failed`, `slow`,
+  `server-error`, `expired-session`, `logged-out`, `contract-drift`) and the
+  footer switcher. `running` grows from 25 to 50 items after 30 s of page
+  time; `expired-session` shows the real `401` → one refresh → `200` on the
+  network; `slow` has no list after 1 s;
+- axe, WCAG 2.2 A/AA **with colour contrast**, in light and dark mode, on
+  login, feed, detail, 404 and the red error states (wrong password, failed
+  run, server error);
+- a keyboard-only walkthrough (Tab order from the skip link, login, `/` to
+  search, `j`, Enter, back with the search kept);
+- no horizontal scrolling at 360 px (with the 200+ character headline);
+- vendor `<script>`/`<img onerror>` text stays inert (no dialog, no element).
+
+On a failure, open the report `ui/web/coverage/e2e/report/index.html`, or the
+trace printed in the output.
+
+### 3. Manual check in the browser
 ```bash
 make -C ui dev
 ```
@@ -139,7 +168,7 @@ Then the news feed (logged in as `trader1`, mock mode, scenario `default`):
 | 17 | Look for the item with `<script>` in the headline (search `Umbrix`) | The text `<script>alert("headline")</script>` is shown literally; no alert pops up. |
 | 18 | Tick **Show duplicates** | 100 items; 9 rows have a dashed border and "Duplicate of VND-…". |
 | 19 | Pick a date in the Date field (for example yesterday) | That date's feed; the URL has `date=…`. Pick a Saturday: "No feed for …" and "Go to Friday …". |
-| 20 | Keyboard: press `/`, type, Esc, then click the page title and press `j`, `j`, `k`, Enter | `/` focuses search; `j`/`k` move a focus ring between headlines; Enter opens the item (placeholder page). "Turn off single-key shortcuts" disables them (remembered). |
+| 20 | Keyboard: press `/`, type, Esc, then click the page title and press `j`, `j`, `k`, Enter | `/` focuses search; `j`/`k` move a focus ring between headlines; Enter opens the item. "Turn off single-key shortcuts" disables them (remembered). |
 | 21 | Footer: `running` + Apply | "Today's feed is still arriving", 25 items received; every 30 s 25 more arrive; after 90 s the normal summary. |
 | 22 | Footer: `failed`, `empty`, `server-error`, `contract-drift`, `slow` + Apply (one at a time) | failed: red "The ingest run for this date failed" panel and the 40 items that arrived. empty: "No ingest run exists for this date yet." server-error: "The server had a problem. Try again." with Retry. contract-drift: "Unexpected response from the server." slow: skeleton rows for 2–3 s, then the list. Finish with `default` + Apply. |
 | 23 | Copy the URL with filters into a new tab | The same view: date, ticker, search and duplicates restored from the URL. |
@@ -179,7 +208,7 @@ http://localhost:5173/?scenario=failed), paste the snippet again and compare
 with the [scenario table](#scenarios). The choice is remembered for the tab;
 open `?scenario=default` to go back.
 
-### 3. The production bundle has no mocks
+### 4. The production bundle has no mocks
 `make -C ui build` does this for you: the live build drops the mock code, the
 build deletes the copied `mockServiceWorker.js`, and the task fails if
 `mockServiceWorker`, `setupWorker` or `[MSW]` appears anywhere in `dist/`.
@@ -188,6 +217,20 @@ To see it yourself:
 make -C ui build && ls ui/web/dist/assets
 ```
 There is a single `index-*.js` and no `browser-*.js` chunk.
+
+## Definition of done
+```bash
+make -C ui verify
+```
+
+| Requirement | How it is checked |
+|---|---|
+| `check` passes with zero lint warnings | `make -C ui check` (lint uses `--max-warnings=0`) |
+| Coverage: 80 % lines in `src/api`, `src/features`, `src/lib` | enforced by `make -C ui test` (currently about 98 %) |
+| Every mock scenario works in the browser | `make -C ui e2e` (all 9 scenarios in Chromium), plus the manual steps above |
+| No mock code in the production build | `make -C ui build` fails if MSW is in `dist/` |
+| Switching to the real backend needs no code change | `make -C ui dev VITE_API_MODE=live` (step 13) |
+| Accessible (WCAG 2.2 AA) | axe with contrast in light and dark (`e2e`), vitest-axe on login, shell, feed, detail, "item doesn't exist", 403 and the mock-start page, keyboard walkthrough, 360 px |
 
 ## Mock backend
 In mock mode, MSW answers every API call inside the browser (and inside
@@ -229,7 +272,7 @@ Pick one with `?scenario=<name>` in the page URL.
 | `failed` | Run `FAILED` with the first 40 items |
 | `slow` | Every call takes 2–3 s |
 | `server-error` | `/news` and `/news/{id}` answer `500` |
-| `expired-session` | The next authenticated call answers `401`; the refresh then works |
+| `expired-session` | The current access token is revoked: the next authenticated call answers `401`, one silent refresh gets a new token, then everything works |
 | `logged-out` | Refresh answers `401`; logging in again still works |
 | `contract-drift` | `/news` sends `count` and `/news/{id}` sends `id` as a string, so the UI must say "Unexpected response from the server" |
 
@@ -265,8 +308,10 @@ ui/
     ├── .npmrc                # save-exact=true
     ├── .env.example          # VITE_* settings, documented
     ├── tsconfig.json         # app: strict, noUncheckedIndexedAccess, @/ alias
-    ├── tsconfig.node.json    # vite.config.ts
+    ├── tsconfig.node.json    # vite.config.ts, playwright.config.ts, e2e/
     ├── vite.config.ts        # Vite + Vitest config, /api proxy for live mode
+    ├── playwright.config.ts  # browser tests: Chromium against the dev server (mock mode)
+    ├── e2e/                  # browser tests: app.spec.ts, helpers.ts
     ├── eslint.config.js      # gts + React Hooks + jsx-a11y + project rules
     ├── .prettierrc.js        # gts Prettier settings
     ├── components.json       # shadcn/ui settings (Radix base)
@@ -312,7 +357,7 @@ Versions are pinned exactly in `web/package.json`.
 | Validation | zod 4 |
 | UI | Tailwind CSS 4, shadcn/ui (Radix), lucide icons |
 | Mocks | MSW 2 (browser in dev, Node in tests) |
-| Tests | Vitest 5, jsdom, Testing Library, user-event, jest-dom, vitest-axe |
+| Tests | Vitest 5, jsdom, Testing Library, user-event, jest-dom, vitest-axe; Playwright 1.63 + axe-core for browser tests |
 | Style | gts 7 (ESLint + Prettier, Google settings), React Hooks, jsx-a11y |
 
 Add a shadcn/ui component:
@@ -339,3 +384,7 @@ gts. On top of what gts checks:
 | `port 5173 already in use` | Another dev server is still running: `podman ps`, then `podman stop <id>`. Or use `make -C ui dev PORT=5174`. |
 | Strange dependency errors | Reset the node_modules volume: `make -C ui clean && make -C ui install`. |
 | `make -C ui dev` can't reach the backend in live mode | Check `API_PROXY_TARGET`. From inside the container the host is `host.containers.internal`, not `localhost`. |
+| `make -C ui e2e` is slow the first time | It pulls `mcr.microsoft.com/playwright:v1.63.0-noble` (~2.5 GB) once. |
+| An e2e test fails | Open `ui/web/coverage/e2e/report/index.html` in a browser: it shows the failing step, a screenshot and the trace. |
+| The e2e report is gone | `make -C ui test` cleans `web/coverage/` (unit coverage lives there too). Run `make -C ui e2e` again. |
+| `make -C ui e2e` says "Dependencies changed: run make -C ui install first" | The browser image doesn't install packages itself: run `make -C ui install` (or use `make -C ui verify`, which runs `check` first). |

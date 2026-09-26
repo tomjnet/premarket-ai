@@ -260,6 +260,8 @@ describe('scenarios', () => {
     const accessToken = await token();
     setScenario('expired-session');
     expect((await get(`/news?date=${THURSDAY}`, accessToken)).status).toBe(401);
+    // The token stays expired: a call the app cancelled can't use it up.
+    expect((await get(`/news?date=${THURSDAY}`, accessToken)).status).toBe(401);
     const refreshed = await fetch('/api/auth/refresh', {method: 'POST'});
     const fresh = tokenResponseWireSchema.parse(await refreshed.json());
     expect(

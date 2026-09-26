@@ -23,7 +23,7 @@ export interface Session {
   user: AuthUser;
 }
 
-/** Why the session changed, for listeners (the session context, later). */
+/** Why the session changed, for listeners (the session context). */
 export type SessionChange = 'login' | 'refresh' | 'logout' | 'expired';
 
 type SessionListener = (

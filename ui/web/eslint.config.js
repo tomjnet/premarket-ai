@@ -53,7 +53,7 @@ export default defineConfig([
   },
   {
     // Tool configs whose tool requires a default export.
-    files: ['vite.config.ts'],
+    files: ['vite.config.ts', 'playwright.config.ts'],
     rules: {'no-restricted-syntax': 'off'},
   },
 ]);

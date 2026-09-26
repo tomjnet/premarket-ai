@@ -1,5 +1,6 @@
 import {ComplianceNotices} from '@/components/layout/compliance-notices';
 import {PageMain} from '@/components/layout/page-main';
+import {useDocumentTitle} from '@/components/layout/use-document-title';
 
 /**
  * Shown instead of the app when mock mode is on but the MSW service worker
@@ -7,6 +8,7 @@ import {PageMain} from '@/components/layout/page-main';
  * workers). Without it the page would stay blank.
  */
 export function MockStartError() {
+  useDocumentTitle("The mock backend didn't start");
   return (
     <div className="flex min-h-svh flex-col">
       <ComplianceNotices />

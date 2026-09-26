@@ -214,6 +214,7 @@ describe('403, 404 and crashes', () => {
     expect(
       screen.getByRole('link', {name: 'Back to the news feed'}),
     ).toHaveAttribute('href', '/');
+    expect(document.title).toBe('Page not found · premarket-ai');
   });
 
   const adminRoutes = [
@@ -235,7 +236,7 @@ describe('403, 404 and crashes', () => {
 
   it('shows 403 when the role may not see the page', async () => {
     withMockSession('trader1');
-    renderApp('/admin', adminRoutes);
+    const {container} = renderApp('/admin', adminRoutes);
 
     expect(
       await screen.findByRole('heading', {
@@ -243,6 +244,27 @@ describe('403, 404 and crashes', () => {
       }),
     ).toBeInTheDocument();
     expect(screen.queryByText('Admin area')).not.toBeInTheDocument();
+    expect(document.title).toBe(
+      "You don't have access to this page · premarket-ai",
+    );
+    await expectNoA11yViolations(container);
+  });
+
+  it('announces the new page to screen readers after navigation', async () => {
+    withMockSession();
+    const {router} = renderApp('/');
+    await screen.findByRole('heading', {name: 'News feed'});
+    const announcer = document.querySelector(
+      '[aria-live="polite"][aria-atomic="true"]',
+    );
+    // Silent on the first page.
+    expect(announcer?.textContent).toBe('');
+
+    await act(() => router.navigate('/no-such-page'));
+
+    await waitFor(() =>
+      expect(announcer?.textContent).toBe('Page not found · premarket-ai'),
+    );
   });
 
   it('lets the right role through', async () => {

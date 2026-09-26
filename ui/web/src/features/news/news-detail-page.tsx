@@ -3,6 +3,7 @@ import type {ReactNode} from 'react';
 import {Link, useLocation, useParams} from 'react-router';
 
 import {HttpError} from '@/api/errors';
+import {useDocumentTitle} from '@/components/layout/use-document-title';
 import {LoadError} from '@/components/load-error';
 import {Skeleton} from '@/components/ui/skeleton';
 import {todayInNewYork} from '@/lib/time';
@@ -26,6 +27,9 @@ export function NewsDetailPage() {
   const notFound =
     id === undefined ||
     (item.error instanceof HttpError && item.error.status === 404);
+  useDocumentTitle(
+    notFound ? 'Item not found' : (item.data?.headline ?? 'News item'),
+  );
   // Every state has an h1, so a screen reader finds the page heading while
   // the item loads or after an error.
   let content: ReactNode;

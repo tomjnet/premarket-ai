@@ -1,6 +1,8 @@
 import type {ReactNode} from 'react';
 import {Link} from 'react-router';
 
+import {useDocumentTitle} from '@/components/layout/use-document-title';
+
 interface StatusPageProps {
   title: string;
   children: ReactNode;
@@ -8,6 +10,7 @@ interface StatusPageProps {
 
 /** A short message page (403, 404, errors) with a way back to the feed. */
 export function StatusPage({title, children}: StatusPageProps) {
+  useDocumentTitle(title);
   return (
     <section className="mx-auto flex max-w-xl flex-col gap-3 py-12">
       <h1 className="text-2xl font-semibold">{title}</h1>

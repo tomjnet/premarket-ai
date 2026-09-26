@@ -1,4 +1,4 @@
-import {useEffect, useRef} from 'react';
+import {useLayoutEffect, useRef} from 'react';
 import type {ReactNode} from 'react';
 
 import {cn} from '@/lib/utils';
@@ -28,7 +28,9 @@ interface PageMainProps {
  */
 export function PageMain({focusKey, className, children}: PageMainProps) {
   const ref = useRef<HTMLElement>(null);
-  useEffect(() => {
+  // A layout effect: focus moves in the same commit as the new page, before
+  // anyone (or any test) can see the page without it.
+  useLayoutEffect(() => {
     const active = document.activeElement;
     if (userHasInteracted && (active === null || active === document.body)) {
       ref.current?.focus();

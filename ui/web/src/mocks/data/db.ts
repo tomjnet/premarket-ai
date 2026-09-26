@@ -83,6 +83,11 @@ export class MockDb {
     this.accessTokens.clear();
   }
 
+  /** Makes an access token invalid, as if it had expired. */
+  revokeToken(token: string): void {
+    this.accessTokens.delete(token);
+  }
+
   /** The user of a valid, unexpired access token. */
   userForToken(token: string): string | undefined {
     const entry = this.accessTokens.get(token);

@@ -10,6 +10,8 @@ ENGINE ?= podman
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 WEB := $(ROOT)/ui/web
 NODE_IMAGE ?= docker.io/library/node:22-bookworm-slim
+# Must match the @playwright/test version in web/package.json.
+PLAYWRIGHT_IMAGE ?= mcr.microsoft.com/playwright:v1.63.0-noble
 PORT ?= 5173
 
 # Dev server settings (see web/.env.example). `make dev` is mock mode;
@@ -34,15 +36,20 @@ DEPS = h="$$(sha256sum package-lock.json)" && \
   [ "$$(cat node_modules/.lock-hash 2>/dev/null)" = "$$h" ] || \
   { $(NPM_CI) && echo "$$h" > node_modules/.lock-hash; }
 # Fails when the production bundle contains mock code (MSW or its worker).
-NO_MSW = if grep -rlE "mockServiceWorker|setupWorker|\[MSW\]" dist; then \
+# e2e runs in the Playwright image, whose Node isn't the project's Node 22:
+# it uses the installed node_modules and never installs them itself.
+DEPS_READY = [ "$$(cat node_modules/.lock-hash 2>/dev/null)" = \
+  "$$(sha256sum package-lock.json)" ] || \
+  { echo "Dependencies changed: run make -C ui install first" >&2; exit 1; }
+NO_MSW =if grep -rlE "mockServiceWorker|setupWorker|\[MSW\]" dist; then \
   echo "MSW code found in dist/" >&2; exit 1; fi
 
 .DEFAULT_GOAL := help
-.PHONY: help web-check install dev test test-watch typecheck build check \
+.PHONY: help web-check install dev test test-watch e2e typecheck build check verify \
   lint fix npm clean
 
 help: ## List the tasks
-	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
+	@grep -hE '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 web-check:
@@ -77,6 +84,14 @@ test-watch: web-check ## Re-run tests on every file change (Ctrl+C stops)
 	  -v $(WEB):/app -v $(NODE_VOLUME):/app/node_modules \
 	  -w /app $(NODE_IMAGE) sh -c '$(DEPS) && npx vitest --watch'
 
+# Real Chromium against the dev server in mock mode (started by Playwright
+# inside the container): every scenario, axe (WCAG 2.2 AA, with contrast),
+# keyboard only, 360 px. Report: web/coverage/e2e/report/index.html.
+e2e: web-check ## Browser tests (Playwright, Chromium) of every mock scenario
+	$(ENGINE) run --rm --init --ipc=host \
+	  -v $(WEB):/app -v $(NODE_VOLUME):/app/node_modules \
+	  -w /app $(PLAYWRIGHT_IMAGE) sh -c '$(DEPS_READY) && npx playwright test'
+
 typecheck: web-check ## TypeScript: tsc --noEmit
 	$(NODE_RUN) sh -c '$(DEPS) && npm run typecheck'
 
@@ -84,6 +99,8 @@ build: web-check ## Production build (live mode, no MSW) into web/dist
 	$(NODE_RUN) sh -c '$(DEPS) && VITE_API_MODE=live npm run build && $(NO_MSW)'
 
 check: lint typecheck test build ## Everything CI would run
+
+verify: check e2e ## check + the browser tests (definition of done)
 
 # The tasks share one node_modules volume, so `make -j` must not run two
 # `npm ci` at once.

@@ -5,6 +5,7 @@ import {Navigate, useSearchParams} from 'react-router';
 
 import {HttpError, errorMessage} from '@/api/errors';
 import {PageMain} from '@/components/layout/page-main';
+import {useDocumentTitle} from '@/components/layout/use-document-title';
 import {Alert, AlertDescription} from '@/components/ui/alert';
 import {Button} from '@/components/ui/button';
 import {Card, CardContent, CardHeader} from '@/components/ui/card';
@@ -32,6 +33,7 @@ function isWrongCredentials(error: unknown): boolean {
 /** `/login`: username and password; afterwards, back to `?next=`. */
 export function LoginPage() {
   const {status, login, retryRestore} = useSession();
+  useDocumentTitle('Log in');
   const [searchParams] = useSearchParams();
   const next = safeNextPath(searchParams.get('next'));
   const [username, setUsername] = useState('');

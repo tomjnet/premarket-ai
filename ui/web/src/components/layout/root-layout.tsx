@@ -4,6 +4,7 @@ import {AppFooter} from './app-footer';
 import {AppHeader} from './app-header';
 import {ComplianceNotices} from './compliance-notices';
 import {PageMain} from './page-main';
+import {RouteAnnouncer} from './route-announcer';
 
 /**
  * Every page: skip link, compliance notices and footer. Each page (or the
@@ -19,6 +20,7 @@ export function RootLayout() {
         Skip to main content
       </a>
       <ComplianceNotices />
+      <RouteAnnouncer />
       <div className="flex flex-1 flex-col">
         <Outlet />
       </div>

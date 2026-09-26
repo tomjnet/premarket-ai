@@ -2,6 +2,7 @@ import {Navigate, Outlet, useLocation} from 'react-router';
 
 import type {Role} from '@/api/schemas/auth';
 import {PageMain} from '@/components/layout/page-main';
+import {useDocumentTitle} from '@/components/layout/use-document-title';
 import {ForbiddenPage} from '@/components/pages/status-page';
 
 import {useSession} from './session-context';
@@ -14,19 +15,24 @@ export function RequireAuth() {
   const {status} = useSession();
   const location = useLocation();
   if (status.kind === 'restoring') {
-    return (
-      <PageMain className="px-4 py-12">
-        <p role="status" className="text-center text-muted-foreground">
-          Restoring your session…
-        </p>
-      </PageMain>
-    );
+    return <RestoringSession />;
   }
   if (status.kind === 'anonymous') {
     const next = encodeURIComponent(location.pathname + location.search);
     return <Navigate to={`/login?next=${next}`} replace />;
   }
   return <Outlet />;
+}
+
+function RestoringSession() {
+  useDocumentTitle('Restoring your session');
+  return (
+    <PageMain className="px-4 py-12">
+      <p role="status" className="text-center text-muted-foreground">
+        Restoring your session…
+      </p>
+    </PageMain>
+  );
 }
 
 interface RequireRoleProps {

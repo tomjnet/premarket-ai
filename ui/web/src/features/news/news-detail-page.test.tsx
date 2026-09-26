@@ -55,6 +55,7 @@ describe('NewsDetailPage: content', () => {
     expect(
       screen.getByRole('heading', {level: 1, name: item.headline}),
     ).toBeInTheDocument();
+    expect(document.title).toBe(`${item.headline} · premarket-ai`);
     // Expected values built independently of the app's formatters.
     const published = new Date(item.published_at);
     const et = new Intl.DateTimeFormat('en-US', {

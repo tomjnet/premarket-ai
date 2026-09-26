@@ -30,7 +30,7 @@ function rows(): HTMLElement[] {
 
 async function openFeed(path = '/news') {
   const view = renderApp(path);
-  await screen.findByRole('list', {name: 'News items'});
+  await screen.findByRole('list', {name: 'News items'}, SLOW_DOM);
   return view;
 }
 

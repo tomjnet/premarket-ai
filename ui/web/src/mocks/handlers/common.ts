@@ -45,7 +45,14 @@ export function serverError(): Response {
 export function rejectUnauthenticated(request: Request): Response | undefined {
   const header = request.headers.get('Authorization') ?? '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (takeForcedExpiry() || db.userForToken(token) === undefined) {
+  if (takeForcedExpiry()) {
+    // Revoke the token rather than failing one call: the app may cancel
+    // that call (StrictMode, a quick filter change), and the next call
+    // with the same token must still see the expired session.
+    db.revokeToken(token);
+    return unauthorized();
+  }
+  if (db.userForToken(token) === undefined) {
     return unauthorized();
   }
   return undefined;

@@ -1,6 +1,7 @@
 import {useCallback, useMemo, useRef} from 'react';
 import {useLocation, useNavigate, useSearchParams} from 'react-router';
 
+import {useDocumentTitle} from '@/components/layout/use-document-title';
 import {LoadError} from '@/components/load-error';
 import {formatLongDate, todayInNewYork} from '@/lib/time';
 
@@ -30,6 +31,7 @@ export function FeedPage() {
     [query, today],
   );
   const feed = useNewsFeed(filters);
+  useDocumentTitle(`News feed, ${formatLongDate(filters.date)}`);
   const listRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const shortcuts = useShortcutsPreference();
