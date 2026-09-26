@@ -3,10 +3,13 @@
 The website that replaces the daily premarket news PDF: login, a filterable
 news feed for a trading date and a news detail page.
 
-The backend is built in parallel and isn't available yet. So the UI runs
-against a **mock backend** in the browser (MSW, Mock Service Worker) that
-serves the agreed JSON contract. Setting one environment variable,
-`VITE_API_MODE=live`, switches to the real backend without a code change.
+The UI was built contract-first against a **mock backend** in the browser
+(MSW, Mock Service Worker) that serves the agreed JSON contract, and it still
+runs that way in `make dev`. The real backend (`python/ai-api`) now exists:
+setting one environment variable, `VITE_API_MODE=live`, switches to it
+without a code change. In the stack, the production build is served by two
+nginx replicas behind the `edge` proxy (rate limits, CSP and the other
+security headers, load balancing) at http://localhost:8080.
 
 > Status: **increment 1 web UI complete (milestones M0–M5)**. Log in, read
 > a trading date's news (filters in the URL, duplicates, running or failed
@@ -156,7 +159,7 @@ Open http://localhost:5173 and go through these steps in order:
 | 10 | Dark mode (OS setting, or DevTools > Rendering > prefers-color-scheme) | The page turns dark; ribbon and banner stay readable. |
 | 11 | DevTools device toolbar at 360 px wide | Nothing overflows horizontally; the header wraps. |
 | 12 | Short tokens: `make -C ui dev VITE_MOCK_TOKEN_TTL_S=60`, log in, wait | Network tab: `POST /api/auth/refresh` about every 30 s; you stay logged in. |
-| 13 | Live mode: `make -C ui dev VITE_API_MODE=live` (no backend running) | No mock hint or MOCK API tag; "Backend: unreachable"; logging in says "The server had a problem. Try again." |
+| 13 | Live mode: `make -C python up`, then `make -C ui dev VITE_API_MODE=live`, and log in with `DEMO_USER_PASSWORD` from `.env` | No mock hint or MOCK API tag; "Backend: ok"; the feed comes from PostgreSQL through the edge (run `make -C python demo DATE=…` first to have a feed). |
 
 Then the news feed (logged in as `trader1`, mock mode, scenario `default`):
 
@@ -287,14 +290,41 @@ command line.
 | `VITE_API_MODE` | `mock` in `make dev` | `mock`: MSW answers every API call in the browser. `live`: real HTTP calls. A production build is always live, whatever this says. |
 | `VITE_API_BASE_URL` | `/api` | Base URL of the backend. |
 | `VITE_MOCK_TOKEN_TTL_S` | `900` | Mock mode only: access-token lifetime in seconds. Set it low (for example `60`) to exercise the session refresh. |
-| `API_PROXY_TARGET` | `http://host.containers.internal:8000` | Live dev mode only: where the Vite dev server forwards `/api/*`, with the `/api` prefix removed. |
+| `API_PROXY_TARGET` | `http://edge:8080/api` | Live dev mode only: where the Vite dev server forwards `/api/*` (the prefix is removed, then the target's `/api` is put back). The edge applies the same rate limits and checks as for the website. |
+| `COMPOSE_NETWORK` | `premarket-ai_default` | Live dev mode only: the stack's network the dev server joins, so `edge` resolves. ai-api itself is never published. |
 
 Examples:
 ```bash
 make -C ui dev VITE_API_MODE=live
-make -C ui dev VITE_API_MODE=live API_PROXY_TARGET=http://host.containers.internal:9000
+make -C ui dev VITE_API_MODE=live COMPOSE_NETWORK=myproject_default
 make -C ui dev PORT=5174
 ```
+
+## Production and security
+`podman/web/Containerfile` builds the bundle (`npm ci --ignore-scripts`,
+live mode, the build fails on any MSW code) into an unprivileged nginx image.
+The stack runs two replicas behind the `edge` proxy, which sends these
+headers on every page:
+- **Content-Security-Policy:** `default-src 'none'`; scripts, styles, fonts
+  and API calls from this site only; no inline code, no `eval`;
+  `frame-ancestors 'none'`; **Trusted Types** (`require-trusted-types-for
+  'script'`).
+- `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`,
+  `Permissions-Policy`, COOP/COEP/CORP `same-origin`.
+
+The CSP forbids these in the code:
+- inline `<script>` or `<style>` in `index.html`
+- `style="..."` strings in HTML (React's `style={{…}}` prop is fine)
+- `eval` / `new Function`
+- `innerHTML` and `dangerouslySetInnerHTML` (already banned by lint)
+- scripts, fonts or images from another origin
+
+zod 4 would probe `new Function` for its fast parsers.
+`src/lib/zod-setup.ts` sets `z.config({jitless: true})` first, so no CSP
+violation is logged.
+
+A `429` (the edge's rate limit, or a username locked after 5 failed logins)
+shows "Too many attempts. Wait a few minutes and try again."
 
 ## Project structure
 ```
@@ -335,7 +365,7 @@ ui/
         ├── features/
         │   ├── auth/         #   session context, login page, route guards
         │   └── news/         #   feed and detail pages, their components, hooks and pure logic
-        ├── lib/              # env.ts, time.ts, url.ts, storage.ts, mock-scenarios.ts, utils.ts
+        ├── lib/              # env.ts, time.ts, url.ts, storage.ts, mock-scenarios.ts, utils.ts, zod-setup.ts
         ├── mocks/            # the mock backend (never in the production build)
         │   ├── data/         #   seeded generator, companies, users, in-memory db
         │   ├── handlers/     #   MSW handlers per endpoint
@@ -381,9 +411,9 @@ gts. On top of what gts checks:
 |---|---|
 | Page says "The mock backend didn't start" | The browser refused to register the service worker. Use Chrome, Edge or Firefox on `http://localhost:5173` (not a private window with service workers blocked, and not an embedded/IDE preview browser). Or run in live mode. |
 | Edits don't show up in the dev server or `test-watch` | File watching doesn't cross from Windows drives (`/mnt/c`, `/mnt/d`) into the container. Run from the WSL copy (`~/src/premarket-ai`), or restart the task. |
-| `port 5173 already in use` | Another dev server is still running: `podman ps`, then `podman stop <id>`. Or use `make -C ui dev PORT=5174`. |
+| `make -C ui dev` fails with `rootlessport listen tcp 0.0.0.0:5173: bind: address already in use` | An earlier dev server still holds the port (often a terminal closed without Ctrl+C). Find it with `podman ps` and stop it with `podman stop <id>`. If no container shows port 5173, `ss -ltnp 'sport = :5173'` shows which process has it. Or use another port: `make -C ui dev PORT=5174`. |
 | Strange dependency errors | Reset the node_modules volume: `make -C ui clean && make -C ui install`. |
-| `make -C ui dev` can't reach the backend in live mode | Check `API_PROXY_TARGET`. From inside the container the host is `host.containers.internal`, not `localhost`. |
+| `make -C ui dev` can't reach the backend in live mode | Start the stack first (`make -C python up`); "network not found" means it isn't running. The dev server reaches it as `http://edge:8080/api` on `COMPOSE_NETWORK`. A 429 means the edge's rate limit (wait a minute) or a locked username (15 minutes). |
 | `make -C ui e2e` is slow the first time | It pulls `mcr.microsoft.com/playwright:v1.63.0-noble` (~2.5 GB) once. |
 | An e2e test fails | Open `ui/web/coverage/e2e/report/index.html` in a browser: it shows the failing step, a screenshot and the trace. |
 | The e2e report is gone | `make -C ui test` cleans `web/coverage/` (unit coverage lives there too). Run `make -C ui e2e` again. |

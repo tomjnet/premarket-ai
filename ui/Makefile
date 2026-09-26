@@ -15,12 +15,16 @@ PLAYWRIGHT_IMAGE ?= mcr.microsoft.com/playwright:v1.63.0-noble
 PORT ?= 5173
 
 # Dev server settings (see web/.env.example). `make dev` is mock mode;
-# `make dev VITE_API_MODE=live` talks to the real backend through the /api
-# proxy, which forwards to API_PROXY_TARGET.
+# `make dev VITE_API_MODE=live` talks to the real backend: the dev server
+# joins the compose network and its /api proxy forwards to the edge proxy
+# (API_PROXY_TARGET), so live dev gets the same rate limits and checks as
+# the website. Start the stack first: `make -C python up`.
 VITE_API_MODE ?= mock
 VITE_API_BASE_URL ?= /api
 VITE_MOCK_TOKEN_TTL_S ?= 900
-API_PROXY_TARGET ?= http://host.containers.internal:8000
+API_PROXY_TARGET ?= http://edge:8080/api
+COMPOSE_NETWORK ?= premarket-ai_default
+DEV_NETWORK = $(if $(filter live,$(VITE_API_MODE)),--network $(COMPOSE_NETWORK))
 
 # node_modules lives in a named volume, so the checkout stays clean and
 # installs are cached between runs. --init lets Ctrl+C stop the dev server.
@@ -65,7 +69,7 @@ npm: web-check ## Any npm command: make npm ARGS="install -E zod"
 
 # --- run --------------------------------------------------------------------
 dev: web-check ## Vite dev server on http://localhost:$PORT (mock API)
-	$(ENGINE) run --rm --init -p $(PORT):5173 \
+	$(ENGINE) run --rm --init -p $(PORT):5173 $(DEV_NETWORK) \
 	  -e VITE_API_MODE=$(VITE_API_MODE) \
 	  -e VITE_API_BASE_URL=$(VITE_API_BASE_URL) \
 	  -e VITE_MOCK_TOKEN_TTL_S=$(VITE_MOCK_TOKEN_TTL_S) \

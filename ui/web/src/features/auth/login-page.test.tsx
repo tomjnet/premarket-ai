@@ -127,6 +127,24 @@ describe('LoginPage', () => {
     );
   });
 
+  it('asks to wait when logins are rate limited or locked', async () => {
+    server.use(
+      http.post(apiUrl('/auth/login'), () =>
+        HttpResponse.json(
+          {detail: 'Too many failed attempts. Try again later.'},
+          {status: 429, headers: {'Retry-After': '600'}},
+        ),
+      ),
+    );
+    const {user} = renderApp('/login');
+
+    await logIn(user, 'trader1', 'demo');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Too many attempts. Wait a few minutes and try again.',
+    );
+  });
+
   it('skips the form for a user who is already logged in', async () => {
     withMockSession();
     const {router} = renderApp('/login?next=%2Fnews');

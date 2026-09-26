@@ -25,106 +25,149 @@ Each increment is developed on its own branch, merged to `main` through a PR onc
 | 6 | `inc-6-production` | A reliable brief **before 07:30 ET** every trading day, alerts, and the vendor scorecard |
 | 7 | `inc-7-enterprise-cloud-theory` | *(Theory only)* How a large enterprise would build the same platform on **Azure, AWS and GCP** |
 
-## This branch: increment 0, legacy baseline
-The "before" system, running for real:
-- **vendor-sim** (Python, FastAPI) serves 100 synthetic, labeled news items per day: 60 real, 15 FAKE (2 carry prompt-injection text), 10 MISLEADING and 15 duplicates (exact, tracking-URL, near, paraphrase and stale copies). The same seed and date always give the same feed. The ground-truth labels go to a volume and are never served.
-- **legacy** (C++11) has two commands:
-  - `ingest` fetches the feed with libcurl. A `std::thread` pool (mutex + condition-variable queue) parses each item with RapidJSON and hashes the normalized text with SHA-256. It then flags exact duplicates (same feed, or any feed in the last 7 days) and COPYs **all** rows into PostgreSQL through libpq. Every run is recorded in `legacy.ingest_run` with p50/p99/p99.9 per-item latency.
-  - `report` renders the day's non-duplicate stories to `/nfs/reports/<date>.pdf` with libharu.
-- **supercronic** runs both commands at 05:30 ET on weekdays, inside the legacy container.
+## This branch: increment 1, web instead of PDF
+Traders read the day's news on a **website** instead of the PDF. There's no AI yet. The legacy pipeline from increment 0 keeps running unchanged, and the PDF is still produced every day (a parallel run), so traders can compare.
+- **web** (React + Vite + TypeScript, TanStack Query, Tailwind + shadcn/ui): login, a News Feed per trading date (filters for date, ticker, text search and duplicates, all in the URL, plus keyboard navigation) and a News detail page with the source link. The **SIMULATION** ribbon and the "Decision support only, not investment advice" banner are on every page. It's built as static files and served by **two nginx replicas** (`web-1`, `web-2`).
+- **ai-api** (Python 3.13, FastAPI) reads the legacy tables read-only and serves `/auth/login`, `/auth/refresh`, `/auth/logout`, `/news`, `/news/{id}` and `/health`. Users have one of three roles (TRADER, ANALYST, ADMIN) and argon2id password hashes, and the demo users are seeded at start-up.
+- **edge** (nginx) is the only published port. It load balances the two web replicas, proxies `/api/*` to ai-api, and applies the rate limits and security headers.
+- **redis** holds login sessions and failed-login counters: temporary state only, never persisted.
+- The feed shows the same stories as the PDF: duplicates are hidden by default, and a "Show duplicates" switch brings them back, marked.
 
-Exact hashing is the legacy system's whole duplicate check. On any date it flags the 3 exact, 3 tracking-URL and 3 stale copies (9 in total) and misses the 3 near and 3 paraphrase copies. Increment 2 fixes that.
+### Security
+Even though this is a demo, the website is built the way a production internal site should be. Each layer assumes the one in front of it can fail.
+
+| Layer | Protection |
+|---|---|
+| **Edge proxy** (nginx) | The only published port, bound to `127.0.0.1` by default. Rate limits per client: login 10/min (burst 5), other auth calls 30/min, API 20/s, pages 30/s, plus 50 connections. Bodies are capped at 4 KB, and slow clients are cut off after 10 s. Only `GET`, `HEAD` and `POST` are allowed, and API docs and dotfiles return 404. Errors (405, 413, 429) are JSON. The API isn't gzip-compressed (BREACH). Every cookie leaves the edge `Secure; HttpOnly; SameSite=Strict`. |
+| **Browser headers** | A strict **Content-Security-Policy**: only this site's scripts, styles and fonts, no inline code, no `eval`, `frame-ancestors 'none'`, `object-src 'none'`, `base-uri 'none'` and **Trusted Types** (the DOM refuses HTML strings). Also `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, a restrictive `Permissions-Policy`, COOP/COEP/CORP `same-origin` and `Origin-Agent-Cluster`. |
+| **Load balancing** | `least_conn` over `web-1` and `web-2`. A replica that fails is skipped for 10 s, and its GET requests are retried on the other one. Upstream names are re-resolved every 10 s, so a recreated container is picked up without restarting the edge. |
+| **Login and sessions** | OAuth2 password flow. The 15-minute JWT access token (HS256, issuer, audience and expiry checked, `none` refused) is kept **in browser memory only**. The refresh token is an `httpOnly`, `Secure`, `SameSite=Strict` **`__Host-`** cookie. It is **rotated on every refresh**, and a stolen, reused token revokes the whole session. Logout revokes every access token of the session at once (they name a session that must still exist in Redis). A session lasts at most 12 hours. |
+| **Brute force** | Five failed logins lock that username for 15 minutes (429 with `Retry-After`), on top of the edge's per-client limit. Wrong usernames and wrong passwords get the same answer in the same time (a dummy argon2 check), so user names can't be discovered. |
+| **CSRF** | SameSite=Strict, plus a server-side `Origin` / `Sec-Fetch-Site` check on every `/auth/*` call: a page on another site gets 403. |
+| **API** | Every input is validated (dates, tickers, text length, ids, password length before hashing). Responses are `no-store`, `nosniff` and CSP `default-src 'none'`. Queries time out after 5 s. There's no `/docs` or `/openapi.json` in the stack. |
+| **Database** | ai-api connects as `premarket_ai`, which can only read the legacy tables and the users and append audit rows. The migrations and seed run once, as the owner, in a separate short-lived container (`ai-api-init`). |
+| **Audit** | Logins, failures, lockouts, token reuse and logouts go to `ai.audit_log` (`make -C python audit`). No password or token is ever logged. |
+| **Containers** | Non-root users, **read-only root filesystems**, all Linux capabilities dropped, `no-new-privileges`, memory and process limits. Only the edge publishes a port; postgres, redis, ai-api and the web replicas aren't reachable from the host. Image tags are pinned. The web build runs `npm ci --ignore-scripts` and fails if any mock code reaches the bundle. |
+| **Secrets** | `make -C python env` generates `JWT_SECRET`, `REDIS_PASSWORD` and `AI_DB_PASSWORD` (256-bit random values) into `.env` (mode 600, gitignored). ai-api refuses to start with a missing or placeholder secret. |
+| **Untrusted news text** | Vendor text is rendered as text only (never as HTML or Markdown), and only `http(s)` source links become links, showing the host they really open. |
+
+Next steps, not in this increment:
+- **HTTPS on the edge** with HSTS: a local CA (mkcert) or Caddy's internal CA, for access from other machines.
+- **A WAF**: ModSecurity with the OWASP Core Rule Set, or Coraza, in front of the API.
+- **SSO**: Keycloak (OIDC) with MFA.
+- **Automatic IP bans**: fail2ban or CrowdSec reading the edge log.
+- **Image signing and SBOMs**.
 
 ### Project structure
 ```
 premarket-ai/
-├── compose.yaml              # the stack: postgres, vendor-sim, legacy (profile "legacy")
-├── .env.example              # settings; copy to .env
-├── .github/workflows/        # CI: every Containerfile stage, on GitHub-hosted runners
-├── cpp/legacy/               # C++11 legacy app (CMake + CMakePresets, GoogleTest, Google Benchmark)
-│   ├── src/common/           #   Status/StatusOr, logging, env config, latency percentiles
-│   ├── src/ingest/           #   feed client, RapidJSON parser, bounded queue, thread pool, hashing, dedup
-│   ├── src/db/               #   libpq RAII wrapper, COPY row formatting, all SQL
-│   ├── src/report/           #   libharu PDF writer, word wrap
-│   ├── tests/                #   GoogleTest unit tests (also run under ASan/UBSan and TSan)
-│   └── bench/                #   Google Benchmark micro-benchmarks (the baseline for increment 2)
+├── compose.yaml              # the stack: legacy (profile "legacy") + website (profile "ai")
+├── .env.example              # settings; `make -C python env` creates .env with random secrets
+├── .github/workflows/        # CI: every Containerfile stage, the UI checks, nginx config tests
+├── cpp/legacy/               # C++11 legacy app: ingest + PDF report (unchanged, still running)
 ├── python/
-│   ├── Makefile              # task runner: build, up, test, lint, demo, ...
-│   └── vendor-sim/           # the synthetic news vendor (FastAPI) + pytest tests
+│   ├── Makefile              # task runner: build, up, test, lint, demo, smoke, audit, ...
+│   ├── vendor-sim/           # the synthetic news vendor (FastAPI) + pytest tests
+│   └── ai-api/               # the new backend (FastAPI): auth, sessions, news feed
+│       ├── src/ai_api/       #   routes/, config, tokens, sessions, passwords, news, users,
+│       │                     #   bootstrap (init), migrations/ (Alembic), cli (init, smoke, openapi)
+│       └── tests/            #   pytest: auth, rotation, lockout, CSRF, news contract
+├── ui/
+│   ├── Makefile              # UI task runner: install, dev, test, lint, build, check, e2e
+│   └── web/                  # React + Vite + TypeScript website, with an in-browser mock backend
 ├── sql/                      # legacy schema and company seed (PostgreSQL init scripts)
 ├── podman/
 │   ├── legacy/Containerfile      # stages: build, test, lint, asan, tsan, bench, runtime
 │   ├── vendor-sim/Containerfile  # stages: test, lint, runtime
-│   └── config/legacy/crontab     # supercronic schedule (mounted read-only)
+│   ├── ai-api/Containerfile      # stages: test, lint, runtime
+│   ├── web/Containerfile         # Node build of the UI -> unprivileged nginx with the static files
+│   └── config/
+│       ├── legacy/crontab        # supercronic schedule (mounted read-only)
+│       ├── web/default.conf      # nginx of the two web replicas (static files only)
+│       └── edge/                 # the edge proxy: nginx.conf, templates/ (site), snippets/
 ├── scripts/                  # one-time setup for the GPU host and Ubuntu WSL
 └── docs/                     # project documents, including the Google C++ Style Guide
 ```
 
 ### Setup dependencies
-Increment 0 doesn't need the GPU host or any model.
+Increment 1 still doesn't need the GPU host or any model.
 
-On the host you need only **Podman with `podman compose`, git and make**. No C++, Python or Node toolchain is used on the host: everything builds and runs in containers.
-1. One-time setup: run the scripts in `scripts/` in file-name order. Increment 0 needs only the WSL configuration and `scripts/wsl/00_setup-wsl.sh`, `01_move-repo.sh` and `02_setup-podman.sh`. The Ollama and model scripts for the GPU host can wait until increment 3.
-2. Install make: `sudo apt install -y make`.
-3. From `~/src/premarket-ai`, create your settings: `cp .env.example .env` (or `make -C python env`). Set any local `POSTGRES_PASSWORD`.
+On the host you need only **Podman with `podman compose`, git and make**. There's no Node or Python on the host: the UI is built in a Node 22 container, and the backend in a Python 3.13 container.
+1. One-time setup as in increment 0: the WSL configuration and `scripts/wsl/00_setup-wsl.sh`, `01_move-repo.sh` and `02_setup-podman.sh`, then `sudo apt install -y make`.
+2. Create or update your settings: `make -C python env`. It copies `.env.example` to `.env` if needed, adds the increment 1 settings to an older `.env`, and fills `JWT_SECRET`, `REDIS_PASSWORD` and `AI_DB_PASSWORD` with random values. Change `DEMO_USER_PASSWORD` if you like (at least 12 characters).
 
-The first build downloads Ubuntu 24.04, Python 3.13 and PostgreSQL 17 images, plus GoogleTest, Google Benchmark and supercronic from GitHub.
+The first build also downloads the Node 22, nginx-unprivileged and Redis 8 images.
 
 ### Build
 ```bash
-make -C python build        # builds both images below (layers are cached)
+make -C python build        # all four images (layers are cached)
 ```
 This runs:
 ```bash
 podman build -f podman/vendor-sim/Containerfile --target runtime -t localhost/premarket-ai/vendor-sim:dev python/vendor-sim
 podman build -f podman/legacy/Containerfile     --target runtime -t localhost/premarket-ai/legacy:dev     cpp/legacy
+podman build -f podman/ai-api/Containerfile     --target runtime -t localhost/premarket-ai/ai-api:dev     python/ai-api
+podman build -f podman/web/Containerfile        --target runtime -t localhost/premarket-ai/web:dev        ui/web
 ```
-Inside the legacy image, the C++ is built with CMake presets (`debug`, `release`, `asan`, `tsan`):
-```bash
-cmake --preset release -DPREMARKET_BUILD_TESTS=OFF && cmake --build --preset release
-```
-`make -C python help` lists every task. Add `ENGINE=docker` to any task to use Docker instead of Podman.
+`make -C python help` and `make -C ui help` list every task. Add `ENGINE=docker` to any task to use Docker instead of Podman.
 
 ### Run
 ```bash
-make -C python up                         # postgres + vendor-sim + legacy (cron), waits until healthy
-make -C python demo DATE=2026-09-24       # a whole legacy day, right now
+make -C python up                         # everything: legacy + website; waits until healthy
+make -C python demo DATE=2026-09-24       # a whole day now: ingest, PDF, then the website check
 ```
-`demo` ingests the 5 days before `DATE` (so stale copies can be recognized), then ingests `DATE`, renders its PDF, prints `legacy.ingest_run` and copies the PDF to `out/<DATE>.pdf` (gitignored).
+Open **http://localhost:8080** and log in as `trader1`, `analyst1` or `admin1` with the `DEMO_USER_PASSWORD` from `.env`. Pick the date you ran the demo for (the feed opens on today in New York).
 
-Single steps (the date defaults to today in New York):
+`demo` ingests the 5 days before `DATE`, then `DATE`, renders its PDF to `out/<DATE>.pdf`, and runs `smoke`, which checks the website end to end.
+
+More tasks (the date defaults to today in New York; `up` must have run first):
 ```bash
-podman compose run --rm legacy ingest --date 2026-09-24
-podman compose run --rm legacy report --date 2026-09-24
-make -C python runs                        # last 10 ingest runs with latencies
-make -C python feed-summary DATE=2026-09-24  # what the vendor sent, by label kind
-make -C python pdf DATE=2026-09-24         # copy the PDF from the NFS volume to out/
-make -C python psql                        # SQL shell on the premarket database
-make -C python logs | down | reset         # logs; stop; stop and delete all volumes
+make -C python smoke DATE=2026-09-24      # website check through the edge (see Test)
+make -C python audit                      # last 20 logins, failures, lockouts, logouts
+make -C python openapi                    # ai-api's OpenAPI document -> out/openapi.json
+make -C python ingest | report | runs | pdf | feed-summary DATE=2026-09-24
+make -C python psql | logs | ps | down | reset
+make -C ui dev                            # UI dev server with the mock backend: http://localhost:5173
+make -C ui dev VITE_API_MODE=live         # UI dev server against the running stack (through the edge)
 ```
+
 | Service | Address (inside the compose network) | Published port |
 |---|---|---|
-| postgres | `postgres:5432`, database `premarket`, user `premarket` | none |
-| vendor-sim | `http://vendor-sim:8080/feed?date=YYYY-MM-DD`, `/health` | none |
-| legacy | runs supercronic (05:30 ET, Mon–Fri) | none |
+| edge | `http://edge:8080`: `/` → web-1/web-2, `/api/*` → ai-api | **`127.0.0.1:8080`** (`WEB_BIND`, `WEB_PORT`) |
+| web-1, web-2 | `http://web-1:8080`, `http://web-2:8080` (static UI) | none |
+| ai-api | `http://ai-api:8000` (`/auth/*`, `/news`, `/news/{id}`, `/health`) | none |
+| ai-api-init | one-shot: migrations, database role, demo users | none |
+| redis | `redis:6379` (password) | none |
+| postgres | `postgres:5432`, database `premarket` | none |
+| vendor-sim | `http://vendor-sim:8080/feed?date=YYYY-MM-DD` | none |
+| legacy | supercronic (05:30 ET, Mon–Fri): ingest + PDF | none |
 
-There's no web UI and no login in this increment. The PDF is the product.
+| Demo login | Role |
+|---|---|
+| `trader1` | TRADER |
+| `analyst1` | ANALYST (same pages as TRADER for now) |
+| `admin1` | ADMIN (same pages as TRADER for now) |
 
 ### Test
 ```bash
-make -C python test         # pytest (vendor-sim) + GoogleTest via ctest (legacy, debug build)
-make -C python lint         # ruff + clang-format --dry-run --Werror, cpplint, clang-tidy (LLVM 18)
+make -C python test         # pytest (vendor-sim, ai-api) + GoogleTest via ctest (legacy)
+make -C python lint         # ruff (vendor-sim, ai-api) + clang-format, cpplint, clang-tidy
 make -C python sanitizers   # GoogleTest under ASan + UBSan, and under TSan
-make -C python cpp-bench    # Google Benchmark: parse, hash, queue, whole feed by worker count
-make -C python check        # test + lint + sanitizers (what CI runs)
+make -C python check        # test + lint + sanitizers
+make -C ui check            # UI: ESLint (gts, zero warnings), tsc, Vitest with coverage, production build without mocks
+make -C ui e2e              # UI in Chromium (Playwright): every mock scenario, axe (WCAG 2.2 AA), keyboard, 360 px
 ```
-Each target builds one Containerfile stage, for example `podman build -f podman/legacy/Containerfile --target tsan cpp/legacy`. If TSan stops with "unexpected memory mapping", run `sudo sysctl -w vm.mmap_rnd_bits=28` and retry.
+`make -C python api-test` and `api-lint` run only the ai-api stages. CI also validates both nginx configs with `nginx -t` on a read-only root filesystem.
 
-**Done when** (increment 0):
-1. `make -C python demo DATE=2026-09-24` ends by printing `PDF: .../out/2026-09-24.pdf`, and the PDF lists **91 stories** (100 received, 9 duplicates removed), with the "SIMULATION" disclaimer.
-2. `make -C python runs` shows the 2026-09-24 run with `status = DONE`, `received = 100` and `dups = 9`, plus its p50/p99/p99.9 latencies.
-3. `podman compose exec legacy ls -l /nfs/reports` shows `2026-09-24.pdf` on the NFS volume.
-4. `make -C python lint sanitizers` passes with zero warnings (clang-format, cpplint, clang-tidy, ASan/UBSan and TSan).
+**Done when** (increment 1):
+1. `make -C python demo DATE=2026-09-24` ends with **`17/17 checks passed`** from `smoke`, which covers:
+   - the security headers, and 401 for the API without a login
+   - a wrong password (401), then a login, with the refresh cookie `__Host-`, `HttpOnly`, `Secure` and `SameSite=Strict`
+   - the feed for the date, whose run is `DONE` and which shows **the same number of stories as the PDF** (`web 91 vs PDF 91`)
+   - a news detail, and a 404 for an unknown item
+   - a cross-site refresh refused (403), cookie rotation, and logout revoking the access token
+2. A trader logs in at http://localhost:8080, reads 2026-09-24's news, filters by ticker, opens an item and follows its source link, without opening the PDF. The PDF is still written to `/nfs/reports` (parallel run).
+3. `make -C python lint test` and `make -C ui check` pass with zero warnings.
 
 ## Architecture by increment
 **Legend:** 🟩 green = new in this increment · ⬜ grey = already there · 🟥 red dashed = retired
@@ -152,7 +195,7 @@ flowchart LR
 ```
 
 ### Increment 1: Web instead of PDF (no AI)
-A website over the same legacy tables. The PDF keeps running in parallel.
+A website over the same legacy tables, behind one hardened nginx edge that load balances two UI replicas. The PDF keeps running in parallel.
 
 ```mermaid
 flowchart LR
@@ -161,18 +204,23 @@ flowchart LR
 
   VS["vendor-sim"]:::old
   ING["legacy ingest (C++11)"]:::old
-  PG[("PostgreSQL<br/>legacy tables")]:::old
+  PG[("PostgreSQL<br/>legacy tables (read-only for ai-api)<br/>ai.app_user · ai.audit_log")]:::old
   REP["legacy report → PDF<br/>(parallel run)"]:::old
-  API["ai-api (FastAPI)<br/>/news · /auth"]:::new
-  R[("Redis<br/>sessions")]:::new
-  WEB["web (React + Vite + TS)<br/>login · news feed"]:::new
-  T(["Trader"])
+  EDGE["edge (nginx)<br/>rate limits · CSP + security headers<br/>load balancer · only published port"]:::new
+  W1["web-1 (nginx)<br/>static React UI"]:::new
+  W2["web-2 (nginx)<br/>static React UI"]:::new
+  API["ai-api (FastAPI)<br/>/auth · /news · /health"]:::new
+  R[("Redis<br/>sessions · login lockout")]:::new
+  T(["Trader<br/>browser"])
 
   VS --> ING --> PG
   PG --> REP
-  PG --> API
+  T -- "http://localhost:8080" --> EDGE
+  EDGE -- "/ (least_conn)" --> W1
+  EDGE -- "/" --> W2
+  EDGE -- "/api/*" --> API
+  API --> PG
   API <--> R
-  API --> WEB --> T
   REP -. "PDF still delivered" .-> T
 ```
 
@@ -358,10 +406,10 @@ No code or deployment. It maps every component above to managed cloud services, 
 |---|---|
 | Legacy C++ | **C++11** (Google style), CMake, libpq, libcurl, RapidJSON, libharu, GoogleTest |
 | Modern C++ | **C++20** (Google style + low-latency rules), CMake, Abseil, simdjson, libpq, nanobind (Python module), GoogleTest, Google Benchmark |
-| AI backend | Python 3.13, FastAPI, LangChain, LangGraph, LiteLLM, MCP (FastMCP), Agent Skills, arq |
+| AI backend | Python 3.13, FastAPI (JWT + argon2id, Alembic, psycopg 3), LangChain, LangGraph, LiteLLM, MCP (FastMCP), Agent Skills, arq |
 | Models | Ollama on a GPU host (local 3–4B models, Llama Guard 3), OpenAI (default cloud), Claude / Gemini switchable |
 | Data | PostgreSQL 17 (+ pgvector), ChromaDB (increments 3–5), Redis 8 |
-| Web | React, Vite, TypeScript, TanStack Query, Tailwind, shadcn/ui |
+| Web | React, Vite, TypeScript, TanStack Query, Tailwind, shadcn/ui, zod, MSW (mock backend), Playwright · nginx (edge proxy + load balancer) |
 | Quality | RAGAS, promptfoo, pytest, Vitest, clang-format / cpplint / clang-tidy |
 | Observability | Langfuse, OpenTelemetry, Prometheus, Grafana |
 | Runtime | Podman (rootless) in Ubuntu 24.04 on WSL2 · Ollama on a host with an NVIDIA GPU |

@@ -1,0 +1,42 @@
+# premarket-ai ai-api (Python 3.13, FastAPI).
+# Build context: python/ai-api
+#   podman build -f podman/ai-api/Containerfile --target runtime python/ai-api
+# Stages: base -> test (pytest), lint (ruff), runtime (default).
+
+FROM docker.io/library/python:3.13-slim-bookworm AS base
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+FROM base AS dev
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install -e ".[dev]"
+COPY tests ./tests
+
+FROM dev AS test
+RUN pytest -q
+
+FROM dev AS lint
+RUN ruff check src tests && ruff format --check src tests
+
+# ---------------------------------------------------------------------------
+FROM base AS runtime
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install . && rm -rf src pyproject.toml \
+ && useradd --system --uid 10002 --no-create-home --home-dir /app api
+# Runs as an unprivileged user; compose also sets a read-only root
+# filesystem, drops every capability and forbids privilege escalation.
+USER api
+EXPOSE 8000
+# The healthcheck lives in compose.yaml (OCI images drop HEALTHCHECK).
+# --proxy-headers is off on purpose: the client IP for the audit log comes
+# from X-Real-IP, which the edge proxy always overwrites.
+CMD ["uvicorn", "ai_api.app:create_app", "--factory", \
+     "--host", "0.0.0.0", "--port", "8000", \
+     "--no-server-header", "--no-proxy-headers", \
+     "--timeout-keep-alive", "15", "--limit-concurrency", "200"]

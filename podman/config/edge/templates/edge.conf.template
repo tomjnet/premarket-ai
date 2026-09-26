@@ -1,0 +1,150 @@
+# premarket-ai edge: the only published port of the stack.
+# A template: the entrypoint renders it to /tmp/edge.conf (included inside
+# `http {}` by nginx.conf) and replaces only ${NGINX_LOCAL_RESOLVERS}.
+# Snippets are mounted at /etc/nginx/snippets/.
+#
+#   /api/*  -> ai-api (prefix stripped), rate limited per client IP
+#   /*      -> web-1 / web-2 (static UI), least-connections load balancing
+#
+# Every browser-facing response gets the site's security headers here, in
+# one place. Rootless Podman may show every client with the same address
+# (the port forwarder's); the limits then act per host instead of per
+# client, which is still a ceiling. ai-api also locks a username after
+# repeated failed logins, whatever the address.
+
+# The container network's DNS (Podman's aardvark). Upstream names are
+# re-resolved every 10 s, so a replica that is recreated with a new address,
+# or is down while the edge starts, is picked up without a restart.
+resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+resolver_timeout 2s;
+
+# --- rate limits ------------------------------------------------------------
+limit_req_zone $binary_remote_addr zone=pm_login:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=pm_auth:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=pm_api:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=pm_site:10m rate=30r/s;
+limit_conn_zone $binary_remote_addr zone=pm_conn:10m;
+limit_req_status 429;
+limit_conn_status 429;
+
+# Only what the site uses; everything else (PUT, DELETE, TRACE...) is 405.
+map $request_method $pm_bad_method {
+    GET 0;
+    HEAD 0;
+    POST 0;
+    default 1;
+}
+
+# $uri, not $request: query strings stay out of the log.
+log_format pm_edge '$remote_addr [$time_iso8601] "$request_method $uri" '
+                   '$status $body_bytes_sent rt=$request_time '
+                   'upstream=$upstream_addr us=$upstream_status '
+                   'ut=$upstream_response_time';
+
+# --- upstreams --------------------------------------------------------------
+# Two UI replicas. A replica that fails 3 times is skipped for 10 s, and a
+# failed GET is retried on the other one (see snippets/proxy.conf).
+# `zone` + `resolve`: shared state and runtime DNS (nginx 1.27.3+).
+upstream pm_web {
+    zone upstream_web 64k;
+    least_conn;
+    server web-1:8080 resolve max_fails=3 fail_timeout=10s;
+    server web-2:8080 resolve max_fails=3 fail_timeout=10s;
+    keepalive 16;
+}
+
+upstream pm_api {
+    zone upstream_api 64k;
+    server ai-api:8000 resolve max_fails=3 fail_timeout=10s;
+    keepalive 16;
+}
+
+server {
+    listen 8080 default_server;
+    server_name _;
+    access_log /var/log/nginx/access.log pm_edge;
+
+    # Small requests only (the largest is the login form), and no
+    # slow-loris: clients that stall are cut off.
+    client_max_body_size 4k;
+    client_body_buffer_size 4k;
+    client_header_buffer_size 1k;
+    large_client_header_buffers 4 8k;
+    client_body_timeout 10s;
+    client_header_timeout 10s;
+    keepalive_timeout 15s;
+    send_timeout 15s;
+    reset_timedout_connection on;
+    limit_conn pm_conn 50;
+
+    if ($pm_bad_method) {
+        return 405;
+    }
+
+    error_page 405 = @method_not_allowed;
+    error_page 413 = @too_large;
+    error_page 429 = @too_many;
+
+    # --- API ------------------------------------------------------------------
+    # Login: 10 per minute per client (burst 5), on top of the per-user
+    # lockout in ai-api.
+    location = /api/auth/login {
+        limit_req zone=pm_login burst=5 nodelay;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://pm_api/auth/login;
+    }
+
+    location ^~ /api/auth/ {
+        limit_req zone=pm_auth burst=10 nodelay;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://pm_api/auth/;
+    }
+
+    # API docs are never public, even if EXPOSE_DOCS were switched on.
+    location ~ ^/api/(docs|redoc|openapi\.json)(/|$) {
+        return 404;
+    }
+
+    location /api/ {
+        limit_req zone=pm_api burst=40 nodelay;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://pm_api/;
+    }
+
+    # --- site -----------------------------------------------------------------
+    location ~ /\. {
+        return 404;
+    }
+
+    location = /edge-health {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        limit_req zone=pm_site burst=100 nodelay;
+        include /etc/nginx/snippets/security-headers.conf;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://pm_web;
+    }
+
+    # --- JSON errors (the UI reads `detail`) ----------------------------------
+    location @too_many {
+        default_type application/json;
+        add_header Retry-After 60 always;
+        add_header Cache-Control no-store always;
+        return 429 '{"detail":"Too many requests"}\n';
+    }
+
+    location @too_large {
+        default_type application/json;
+        return 413 '{"detail":"Request too large"}\n';
+    }
+
+    location @method_not_allowed {
+        default_type application/json;
+        add_header Allow "GET, HEAD, POST" always;
+        return 405 '{"detail":"Method not allowed"}\n';
+    }
+}

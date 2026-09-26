@@ -4,9 +4,12 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import {defineConfig} from 'vitest/config';
 
-// Where `make dev VITE_API_MODE=live` sends /api calls. The backend serves
-// its routes at the root, so the /api prefix is stripped.
-const apiProxyTarget = process.env.API_PROXY_TARGET ?? 'http://localhost:8000';
+// Where `make dev VITE_API_MODE=live` sends /api calls: the stack's edge
+// proxy (`http://edge:8080/api`, set by the Makefile). The /api prefix is
+// stripped here and the target's own /api path is put back, so the edge
+// sees the same URLs as from the website.
+const apiProxyTarget =
+  process.env.API_PROXY_TARGET ?? 'http://localhost:8080/api';
 
 // Vite and Vitest require a default export from their config file.
 export default defineConfig({

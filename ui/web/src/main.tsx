@@ -1,3 +1,6 @@
+// First: global zod settings, before any schema module is evaluated.
+import '@/lib/zod-setup';
+
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 

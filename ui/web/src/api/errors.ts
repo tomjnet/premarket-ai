@@ -53,6 +53,10 @@ export function errorMessage(error: unknown): string {
   if (error instanceof SessionExpiredError) {
     return error.message;
   }
+  if (error instanceof HttpError && error.status === 429) {
+    // The edge's rate limit, or ai-api's lockout after failed logins.
+    return 'Too many attempts. Wait a few minutes and try again.';
+  }
   if (error instanceof HttpError && error.status >= 500) {
     return 'The server had a problem. Try again.';
   }

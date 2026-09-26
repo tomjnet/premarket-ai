@@ -45,11 +45,56 @@ jobs:
           podman build -f podman/legacy/Containerfile
           --target ${{ matrix.stage }} cpp/legacy
 
+  ai-api:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [test, lint, runtime]
+    steps:
+      - uses: actions/checkout@v4
+      - name: ai-api ${{ matrix.stage }}
+        run: >
+          podman build -f podman/ai-api/Containerfile
+          --target ${{ matrix.stage }} python/ai-api
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: UI lint, typecheck, tests, build (no MSW in dist)
+        run: make -C ui check
+      - name: Web image (production bundle + nginx)
+        run: >
+          podman build -f podman/web/Containerfile --target runtime
+          -t localhost/premarket-ai/web:ci ui/web
+      - name: Web replica nginx config
+        run: >
+          podman run --rm --read-only --tmpfs /tmp
+          -v $PWD/podman/config/web/default.conf:/etc/nginx/conf.d/default.conf:ro
+          localhost/premarket-ai/web:ci nginx -t
+
+  edge-config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Edge nginx config (rendered template, read-only root)
+        run: >
+          podman run --rm --read-only --tmpfs /tmp
+          -e NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
+          -e NGINX_ENVSUBST_OUTPUT_DIR=/tmp
+          -e 'NGINX_ENVSUBST_FILTER=^NGINX_LOCAL_RESOLVERS$'
+          -v $PWD/podman/config/edge/nginx.conf:/etc/nginx/nginx.conf:ro
+          -v $PWD/podman/config/edge/templates:/etc/nginx/templates:ro
+          -v $PWD/podman/config/edge/snippets:/etc/nginx/snippets:ro
+          docker.io/nginxinc/nginx-unprivileged:1.30.5-alpine nginx -t
+
   compose-config:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Validate compose.yaml
         run: |
-          cp .env.example .env
+          # .env.example leaves the secrets empty; `env` generates them.
+          make -C python env
           docker compose --profile full config --quiet

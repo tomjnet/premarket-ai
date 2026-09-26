@@ -1,0 +1,30 @@
+# premarket-ai web: the React UI as static files served by unprivileged nginx.
+# Build context: ui/web
+#   podman build -f podman/web/Containerfile --target runtime ui/web
+# Stages: build (Node 22: npm ci + production build, no MSW), runtime.
+#
+# Two replicas (web-1, web-2) run behind the edge proxy, which does the load
+# balancing, rate limiting and security headers. The server config is
+# mounted read-only from podman/config/web/ by compose.yaml.
+
+FROM docker.io/library/node:22.23.3-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json .npmrc ./
+# --ignore-scripts: no dependency runs install scripts in the build (supply
+# chain); the app needs none.
+RUN npm ci --no-audit --no-fund --loglevel=error --ignore-scripts
+COPY . .
+# The production bundle always talks to the real backend through /api.
+ENV VITE_API_MODE=live \
+    VITE_API_BASE_URL=/api
+RUN npm run build \
+ && if grep -rlE "mockServiceWorker|setupWorker|\[MSW\]" dist; then \
+      echo "MSW code found in dist/" >&2; exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+FROM docker.io/nginxinc/nginx-unprivileged:1.30.5-alpine AS runtime
+# Owned by root and read-only for the nginx user (uid 101): a compromised
+# worker can't change the site.
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 8080
