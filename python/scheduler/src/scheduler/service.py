@@ -20,6 +20,7 @@ import time
 
 from apscheduler.schedulers import asyncio as aps_asyncio
 from apscheduler.triggers import cron
+import redis
 from redis import asyncio as aioredis
 
 from scheduler import config
@@ -120,7 +121,7 @@ async def serve(settings: config.Settings) -> None:
     Args:
         settings: The settings.
     """
-    redis = aioredis.Redis(
+    client = aioredis.Redis(
         host=settings.redis_host,
         password=settings.redis_password,
         decode_responses=True,
@@ -129,7 +130,7 @@ async def serve(settings: config.Settings) -> None:
     store = store_lib.PostgresStore(settings.owner.dsn(application="scheduler"))
     calendar = market.Calendar()
     service = Service(
-        settings, jobs_lib.Jobs(settings, store, redis), store, calendar
+        settings, jobs_lib.Jobs(settings, store, client), store, calendar
     )
     metrics.REGISTRY.register(
         ops.OpsCollector(
@@ -169,5 +170,5 @@ async def serve(settings: config.Settings) -> None:
                 await asyncio.wait_for(stop.wait(), _HEARTBEAT_S)
     finally:
         scheduler.shutdown(wait=False)
-        await redis.aclose()
+        await client.aclose()
         _log.info("scheduler stopped")
