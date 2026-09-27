@@ -1,4 +1,4 @@
-# premarket-ai: run with `podman compose` in Ubuntu WSL.
+# premarket-ai: run with `podman compose` in GN/Linux or Ubuntu WSL.
 # Increment 0 (legacy baseline): postgres, vendor-sim and the C++11 legacy
 # ingester/report. Increment 1 (web instead of PDF): redis, ai-api, two web
 # replicas and the edge proxy in front of them. Increment 2 (rule checks): the
@@ -133,6 +133,8 @@ x-web: &web
   restart: unless-stopped
 
 services:
+  # postgres | PostgreSQL 17 + pgvector 0.8
+  # Main database: raw news, ingest.* and ai.* schemas, users, RAG vectors.
   postgres:
     image: docker.io/pgvector/pgvector:0.8.0-pg17
     environment:
@@ -151,6 +153,8 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # vendor-sim | Python 3, FastAPI, Uvicorn
+  # Simulated news vendor: serves the daily feed and its ground-truth labels.
   vendor-sim:
     build:
       context: ./python/vendor-sim
@@ -174,6 +178,9 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # legacy | C++11, RapidJSON, libpq, libcurl, cron
+  # Legacy ingester + PDF report (the measured baseline; retired in inc 6).
+  #
   # Retired in increment 6: the AI reads the C++20 ingester's tables. Kept
   # under the opt-in profile `legacy` (not in `full`) for before/after
   # videos: with it, both ingesters run at 05:30 and `make -C python parity`
@@ -207,6 +214,9 @@ services:
     restart: unless-stopped
 
   # --- increment 2: the modern C++20 ingester ---------------------------------
+  # ingest | C++20, Abseil, simdjson, lock-free queue, libpq, cron
+  # Modern low-latency ingester: vendor feed -> Postgres schema `ingest`.
+  #
   # Same feed, same job as legacy, into the schema `ingest`: a shadow run
   # from increment 2, the only ingest from increment 6 (cron 05:30 ET). It
   # applies sql/03_ingest_schema.sql itself, so an existing database gets
@@ -237,6 +247,9 @@ services:
     restart: unless-stopped
 
   # --- increment 1: web instead of PDF ---------------------------------------
+  # redis | Redis 8 (in-memory only)
+  # Sessions, login throttling, dedup index, job streams, chat cache.
+  #
   # Sessions and login throttling. Temporary state only: no persistence, and
   # losing it just logs everyone out.
   redis:
@@ -278,6 +291,9 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # ai-api-init | Python 3, Alembic, SQLAlchemy (ai-api image)
+  # One-shot setup and batch jobs: migrations, roles, demo users, rules.
+  #
   # One-shot, as the database owner: Alembic migrations (ai schema), the
   # API's least-privilege role and the demo users. ai-api waits for it.
   # `make -C python rules` reuses it for the rule checks (`ai-api rules`),
@@ -304,6 +320,9 @@ services:
       - /tmp:size=16m
     restart: "no"
 
+  # ai-api | Python 3, FastAPI, LangChain/LangGraph, psycopg
+  # Backend API: auth, news, chat agents, runs, review, briefs, watchlists.
+  #
   # FastAPI: /auth/*, /news, /news/{id}, /chat, /runs, /review, /briefs,
   # /me/watchlist, /health.
   # Not published: only the edge proxy reaches it. Connects as
@@ -376,6 +395,9 @@ services:
     restart: unless-stopped
 
   # --- increment 3: first AI --------------------------------------------------
+  # llm-gateway | LiteLLM proxy
+  # One OpenAI-compatible LLM endpoint for Ollama and the cloud providers.
+  #
   # The LLM gateway: one OpenAI-compatible endpoint for Ollama on the GPU host
   # and the cloud providers. ai-api asks for task aliases (`main-gpu4gb`...)
   # pinned in podman/config/litellm/config.yaml.
@@ -404,6 +426,9 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # chroma | ChromaDB 1.5
+  # Vector store for RAG (inc 3-5); opt-in after the move to pgvector.
+  #
   # The RAG vector store in increments 3 to 5. Increment 6 moves the vectors
   # into Postgres (pgvector); ChromaDB stays under the opt-in profile chroma
   # (the Makefile adds it while VECTOR_STORE=chroma, and migrate-vectors
@@ -427,6 +452,9 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # reranker | Hugging Face text-embeddings-inference (CPU), bge-reranker
+  # Cross-encoder reranker that orders the RAG passages for the LLM.
+  #
   # The cross-encoder reranker on CPU, served by Hugging Face
   # text-embeddings-inference. Default bge-reranker-base: 20 passages in about
   # 10 s on 4 threads (bge-reranker-v2-m3 took 47 s, too slow for a chat
@@ -455,6 +483,9 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+  # ai-eval | Python 3 (ai-api eval image), PyTorch
+  # On-demand GPU evals, model benchmarks and the DistilBERT training.
+  #
   # The GPU evals (make -C python eval-ai / bench-models / eval-rag): run on
   # this network against the gateway, chroma and the reranker, and write
   # their reports to docs/benchmarks. `make -C python ml-train` trains the
@@ -476,6 +507,9 @@ services:
     restart: "no"
 
   # --- increment 4: AI verification -------------------------------------------
+  # searxng | SearXNG
+  # Self-hosted metasearch engine behind the MCP `web_search` tool.
+  #
   # Self-hosted web search for the MCP tool `web_search` (counted and linked,
   # never stored). Only mcp-server calls it.
   searxng:
@@ -499,6 +533,9 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # mcp-server | Python 3, FastMCP (MCP streamable HTTP), psycopg
+  # Read-only MCP tools for the verify graph and the chat agents.
+  #
   # The MCP server (FastMCP, streamable HTTP at /mcp): read-only tools for
   # the verify graph and, from increment 5, the agents. Every client needs
   # MCP_SERVICE_TOKEN. Published on loopback only, so Claude Desktop or the
@@ -552,6 +589,9 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # ai-worker | Python 3, taskiq on Redis Streams, LangGraph, PyTorch CPU
+  # Background worker: news verification graph and the pre-market brief.
+  #
   # The verification worker: taskiq on the Redis Stream `premarket:verify`
   # (consumer group ai-worker). It runs the coordinator of each verify run
   # (Llama Guard over every unique item, then one job per item), the
@@ -618,6 +658,9 @@ services:
     restart: unless-stopped
 
   # --- increment 6: production ------------------------------------------------
+  # scheduler | Python 3, APScheduler, exchange_calendars, Prometheus
+  # Runs the AI side's day on the NYSE calendar, SLA checks and retention.
+  #
   # The AI side's timeline on NYSE trading days (America/New_York): 05:00
   # corpus, 06:00 wait for the ingest run then rules -> AI -> verify, 07:15
   # brief, 09:00 refresh, 09:30 expire, 09:35 scorecard; SLA checks at
@@ -663,11 +706,18 @@ services:
     restart: unless-stopped
 
   # Two replicas of the static UI, load balanced by the edge.
+  # web-1 | React 19, TypeScript, Vite, served by nginx
+  # Static web UI, replica 1 (load balanced by the edge).
   web-1:
     <<: *web
+  # web-2 | React 19, TypeScript, Vite, served by nginx
+  # Static web UI, replica 2 (load balanced by the edge).
   web-2:
     <<: *web
 
+  # edge | nginx (unprivileged)
+  # Reverse proxy: the only public entry; rate limits, headers, balancing.
+  #
   # nginx in front of everything: rate limits, request limits, security
   # headers (CSP...), JSON errors, and the load balancer for web-1/web-2.
   edge:
@@ -711,6 +761,8 @@ services:
   # UI: http://localhost:${LANGFUSE_PORT:-3000} (LANGFUSE_INIT_USER_EMAIL /
   # LANGFUSE_INIT_USER_PASSWORD from .env). The project and its API keys are
   # created from .env on the first start (headless init).
+  # langfuse-db | PostgreSQL 17
+  # Langfuse's own metadata database.
   langfuse-db:
     profiles: [observability, full]
     image: docker.io/library/postgres:17.6
@@ -728,6 +780,8 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # langfuse-clickhouse | ClickHouse 25
+  # Langfuse's analytics store for traces and observations.
   langfuse-clickhouse:
     profiles: [observability, full]
     image: docker.io/clickhouse/clickhouse-server:25.12
@@ -745,6 +799,8 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # langfuse-minio | MinIO (S3-compatible)
+  # Langfuse's blob storage for raw events and media.
   langfuse-minio:
     profiles: [observability, full]
     image: cgr.dev/chainguard/minio:latest
@@ -763,6 +819,8 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # langfuse-redis | Redis 8
+  # Langfuse's queue and cache (BullMQ).
   langfuse-redis:
     profiles: [observability, full]
     image: docker.io/library/redis:8.10.2-alpine
@@ -778,6 +836,8 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # langfuse-worker | Langfuse 4 worker (Node.js)
+  # Processes Langfuse ingestion queues into ClickHouse.
   langfuse-worker:
     profiles: [observability, full]
     image: docker.io/langfuse/langfuse-worker:4.46.0
@@ -820,6 +880,8 @@ services:
       REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD}
     restart: unless-stopped
 
+  # langfuse-web | Langfuse 4 web (Next.js)
+  # LLM tracing UI and API: every LLM call, prompt and cost.
   langfuse-web:
     profiles: [observability, full]
     image: docker.io/langfuse/langfuse:4.46.0
@@ -849,6 +911,8 @@ services:
   #   make -C python obs-up
   # Grafana: http://localhost:${GRAFANA_PORT:-3001} (admin /
   # GRAFANA_ADMIN_PASSWORD from .env).
+  # otel-collector | OpenTelemetry Collector (contrib)
+  # Receives OTLP metrics from the Python services for Prometheus.
   otel-collector:
     profiles: [observability, full]
     image: docker.io/otel/opentelemetry-collector-contrib:0.160.0
@@ -859,6 +923,8 @@ services:
     mem_limit: 256m
     restart: unless-stopped
 
+  # prometheus | Prometheus 3
+  # Metrics store: scrapes the collector and the scheduler.
   prometheus:
     profiles: [observability, full]
     image: docker.io/prom/prometheus:v3.15.0
@@ -879,6 +945,8 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # grafana | Grafana 13
+  # Dashboard and alert rules; alerts go to ai-api's banner webhook.
   grafana:
     profiles: [observability, full]
     image: docker.io/grafana/grafana:13.2.2

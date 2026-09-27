@@ -25,7 +25,20 @@ Each increment is developed on its own branch, merged to `main` through a PR onc
 | 6 | `inc-6-production` | A reliable brief **before 07:30 ET** every trading day, alerts, and the vendor scorecard |
 | 7 | `inc-7-enterprise-cloud-theory` | *(Theory only)* How a large enterprise would build the same platform on **Azure, AWS and GCP** |
 
-## This branch: increment 6, production
+## This branch: increment 7, enterprise AI on Azure / AWS / GCP (theory)
+This increment adds **no code, no containers and no cloud resources**. It explains how a **large regulated firm** (a bank, broker-dealer or asset manager) would build the same platform on a hyperscaler, and compares every choice with what the lab does. The running system is increment 6, unchanged.
+
+The folder `docs/enterprise/` holds eleven date-stamped Markdown pages with Mermaid diagrams:
+- **A cloud-neutral reference architecture:** private by default, corporate identity and workload identities instead of keys, one AI gateway in front of every model, read-only agent tools behind a tool gateway, immutable (WORM) audit, everything as code.
+- **The same architecture on each cloud:** Azure (Microsoft Foundry, API Management AI gateway, Container Apps), AWS (Amazon Bedrock, Bedrock AgentCore, ECS on Fargate) and GCP (Gemini Enterprise Agent Platform, formerly Vertex AI; Apigee; Cloud Run).
+- **A service mapping:** every lab component (models, gateway, embeddings, pgvector, RAG, LangGraph agents, MCP tools, Llama Guard, Redis, queue, scheduler, C++ batch, web, auth, secrets, observability, evals, IaC, budget) and its Azure, AWS and GCP service, plus the product renames of 2025–2026. Names were checked against the providers' documentation on 2026-09-26.
+- **Security:** the OWASP Top 10 for LLM Applications and for Agentic Applications, identity, network, data, supply chain, audit and compliance frameworks (NIST AI RMF, ISO/IEC 42001, EU AI Act, US model risk guidance, SEC/FINRA recordkeeping). Each control is marked done, partly done or not done in the lab, with the reason, and the page ends with a production checklist.
+- **MLOps / LLMOps:** data, build, offline evals, model risk approval, safe release (shadow, canary), online monitoring, the feedback loop and FinOps, each mapped to the lab in the same way.
+- **Build vs buy:** which components a firm would buy as managed services, which it would keep from the lab (the verdict policy, rules, RAG logic, tools, prompts and evals), and how open standards (OpenAI-compatible APIs, MCP, A2A, OpenTelemetry, pgvector, LangGraph) limit lock-in.
+- **An AI glossary:** about 100 terms, each with where it shows up in this project.
+- **AI engineer vs ML engineer:** the two roles side by side, and which parts of this project each would build.
+
+## Increment 6, production (still running)
 The day now runs **by itself on the NYSE calendar** and is **measured**: the brief is published before 07:30 ET on every trading day, analysts see an alert when a deadline is missed, and the vendor scorecard shows what the vendor really delivered. Two more pieces of the old stack are replaced.
 
 - **The C++11 legacy ingester is retired.** The C++20 ingester (zero parity differences over every demo day) is now the only ingest. The strangler-fig views `ai.v_raw_news` / `ai.v_ingest_run` read its tables (`ingest.*`), and every AI result stays attached to its item. The legacy container stays under the opt-in compose profile `legacy` for before/after comparisons; `LEGACY_INGEST=true` runs it again in parallel with the parity check. The final legacy vs modern benchmark (`make -C python bench`): the C++20 ingester halves the per-item p99, processes a feed 4–15× faster, and its queue moves 29× more items per second.
@@ -208,6 +221,7 @@ premarket-ai/
 │       └── grafana/              # provisioning (data source, alert rules -> ai-api webhook) + the operations dashboard
 ├── scripts/                  # one-time setup for the GPU host and Ubuntu WSL
 └── docs/                     # project documents, the Google C++ Style Guide, benchmarks/ (models, RAG, legacy vs C++20 ingest, vector migration)
+    └── enterprise/           # increment 7 (theory): reference architecture, Azure / AWS / GCP, service mapping, security, MLOps, build vs buy, AI glossary, AI vs ML engineer
 ```
 
 ### Setup dependencies
@@ -222,6 +236,7 @@ Increment 3 and later need **the GPU host** with Ollama and the models. Incremen
 7. Increment 4: run `make -C python env` again. It adds the new settings and generates `WORKER_DB_PASSWORD`, `MCP_DB_PASSWORD`, `MCP_SERVICE_TOKEN` and `SEARXNG_SECRET`.
 8. Increment 5: run `make -C python env` once more. It adds `LEGACY_PDF_ENABLED=false`, `BRIEF_MODEL`, and the chat agent and cache settings; nothing new to install. The brief is written by OpenAI when `OPENAI_API_KEY` is set (about a tenth of a cent per edition), else by the local model; `BRIEF_MODEL=` (empty) keeps it local.
 9. Increment 6: run `make -C python env` again. It adds `LEGACY_INGEST=false`, `RUN_MODE=demo`, `RETENTION_DAYS`, the SLA and scheduler settings, `VENDOR_CONTRACT_ITEMS`, the observability settings, and generates `ALERT_WEBHOOK_TOKEN` and `GRAFANA_ADMIN_PASSWORD`. Then, once: `make -C python up` (migrations 0006–0009: the views read the C++20 tables, the pgvector column) and `make -C python migrate-vectors` (re-embeds the corpus into pgvector, about 20 minutes on the GTX 1650, and sets `VECTOR_STORE=pgvector` in `.env`), then `make -C python up` again. A new install from `.env.example` starts on pgvector directly. For metrics, set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` and run `make -C python obs-up`. For the unattended day, set `RUN_MODE=production` (the GPU host must be on from 05:00 to 09:35 ET).
+10. Increment 7: nothing to install or configure. The pages are plain Markdown with Mermaid diagrams, which GitHub renders.
 
 The first `up` downloads the gateway (about 2 GB), ChromaDB, text-embeddings-inference and the reranker model (about 1 GB, into the `hf-models` volume). Increment 4 adds SearXNG (about 200 MB) and builds the worker image with CPU-only PyTorch (about 1.5 GB); the worker downloads FinBERT (about 440 MB) into the `ml-models` volume the first time it runs, and `ml-train` downloads DistilBERT (about 260 MB). The first `corpus` downloads about 600 documents from SEC and the Fed (about 20 minutes, most of it embedding 5,000 chunks on the GPU host).
 
@@ -336,6 +351,12 @@ make -C ui e2e              # UI in Chromium (Playwright): every mock scenario, 
 `eval-ai` embeds the golden set's unique items (seed 42, 2026-09-17 to 25) and gates on 2026-09-24/25: paraphrase recall ≥ 0.85, L3 precision and link accuracy ≥ 0.95, INJECTION_ATTEMPT recall 1.0 and precision ≥ 0.95, no English item flagged as another language, and no metric more than 2 points below `python/ai-api/evals/ai_baseline.json`. First result: every gated metric 1.0. The GPU evals also run on the protected self-hosted runner (push to `main`, by hand, nightly).
 
 `eval` also runs the verdict eval without any model (rules only, on hosted CI) and `eval-ai` runs it with L3, the judge and the DistilBERT baseline. The verdict gates: FAKE recall ≥ 0.85 and precision ≥ 0.90, macro-F1 ≥ 0.75, every injection item flagged, no tool called with injected text, and nothing more than 2 points below `python/ai-api/evals/verify_baseline.json`. First result (rules only, 200 items): every verdict right; the report lists the rules-only, hybrid and DistilBERT scores side by side.
+
+**Done when** (increment 7): every lab component has its Azure, AWS and GCP equivalent explained, and the security and MLOps chapters map each enterprise control to what the lab does, or doesn't do.
+1. The service mapping in `docs/enterprise/` has a row for every service in the table under **Run** (and for the build, CI, identity, secrets and audit pieces), with a service on each of the three clouds.
+2. Every security and MLOps control is marked ✅ (the lab does it), 🟡 (partly) or ❌ (not in the lab, with the reason).
+3. Every page carries a "Last reviewed" date, and the cloud names were checked against the providers' documentation on that date.
+4. The Mermaid diagrams render on GitHub. Nothing to build or test: increment 6's checks below still pass unchanged.
 
 **Done when** (increment 6): `RUN_MODE=production` publishes the brief before 07:30 ET on trading days with every SLA green, and the vendor scorecard shows billable vs contracted items.
 1. `make -C python demo DATE=2026-09-25` ends with **`55/55 checks passed`** from `smoke`, which adds to the increment 5 checks:
@@ -622,7 +643,48 @@ flowchart LR
 ```
 
 ### Increment 7: Enterprise AI on Azure / AWS / GCP (theory)
-No code or deployment. It maps every component above to managed cloud services, and covers enterprise tools, services, security and MLOps.
+No code or deployment. It maps every component above to managed cloud services, and covers enterprise tools, services, security and MLOps. The business logic (verdict policy, rules, RAG, tools, prompts, evals) stays the same; managed services replace the containers that hold state, and corporate identity, private networking, an AI gateway and WORM audit are added around it.
+
+```mermaid
+flowchart LR
+  classDef lab fill:#f3f4f6,stroke:#9ca3af,color:#374151
+  classDef keep fill:#d1fae5,stroke:#059669,color:#064e3b
+  classDef cloud fill:#ede9fe,stroke:#7c3aed,color:#3b0764
+
+  subgraph LAB["The lab (increment 6)"]
+    L1["Ollama + cloud API keys"]:::lab
+    L2["LiteLLM gateway"]:::lab
+    L3["LangGraph agents + MCP server"]:::lab
+    L4["Llama Guard + rules"]:::lab
+    L5["PostgreSQL + pgvector · Redis"]:::lab
+    L6["taskiq · APScheduler · C++ jobs"]:::lab
+    L7["JWT users · .env secrets"]:::lab
+    L8["Langfuse · OTel · Grafana · 90-day audit"]:::lab
+  end
+
+  KEEP["Kept as is:<br/>verdict policy · rules · RAG logic ·<br/>prompts · tools · skills · evals"]:::keep
+
+  subgraph ENT["Enterprise (Azure / AWS / GCP)"]
+    E1["Managed models<br/>Foundry · Bedrock · Agent Platform"]:::cloud
+    E2["AI gateway<br/>APIM · LiteLLM/inference profiles · Apigee"]:::cloud
+    E3["Agent runtime + tool gateway<br/>Foundry Agent Service · AgentCore · Agent Runtime"]:::cloud
+    E4["Managed guardrails + rules<br/>Foundry Guardrails · Bedrock Guardrails · Model Armor"]:::cloud
+    E5["Managed PostgreSQL + pgvector · Redis/Valkey"]:::cloud
+    E6["Managed queue · workflow · container jobs"]:::cloud
+    E7["Corporate SSO · workload identity · vault + CMK"]:::cloud
+    E8["Cloud monitoring · SIEM · WORM audit"]:::cloud
+  end
+
+  L1 --> E1
+  L2 --> E2
+  L3 --> E3
+  L4 --> E4
+  L5 --> E5
+  L6 --> E6
+  L7 --> E7
+  L8 --> E8
+  LAB -.-> KEEP -.-> ENT
+```
 
 ## Tech stack
 | Area | Technologies |
