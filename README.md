@@ -275,7 +275,6 @@ Tested hardware: NVIDIA GTX 1650 (4 GB VRAM), 32 GB RAM. Run `scripts/hw-check.s
 ## C++ style guide
 All C++ code follows the Google C++ Style Guide:
 - [docs/Google_Cpp_Style_Guide_20260925.md](docs/Google_Cpp_Style_Guide_20260925.md): searchable Markdown copy with a table of contents
-- [docs/Google_Cpp_Style_Guide_20260925.pdf](docs/Google_Cpp_Style_Guide_20260925.pdf): original print (2026-09-25)
 
 ## License
 MIT © 2026 premarket-ai contributors. The Google C++ Style Guide copy in `docs/` is © Google; see its header for source and license.
