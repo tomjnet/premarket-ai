@@ -1,0 +1,257 @@
+<!doctype html>
+<!-- premarket-ai: how the language models used by the app work inside. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inside the models · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  kicker: 'concept across increments 3 to 6',
+  name: 'Inside the models',
+  title: 'How the models inside premarket-ai work',
+  intro: 'Every model in the app is a transformer. Decoders (Qwen3, Llama ' +
+      'Guard, the cloud models) generate text one token at a time; ' +
+      'encoders (nomic-embed-text, the reranker, FinBERT and DistilBERT) ' +
+      'read the whole text at once and output numbers: a vector, a score ' +
+      'or label probabilities. The steps follow one prompt through the ' +
+      'machinery, then show what each model does differently.',
+  width: 1240,
+  height: 800,
+  legend: {
+    old: 'shared by every transformer',
+    new: 'decoder: generates text',
+    cloud: 'encoder: outputs numbers',
+    actor: 'runtime and hardware'
+  },
+  groups: [
+    {id: 'DEC', label: 'Decoder LLMs', x: 8, y: 30, w: 620, h: 105},
+    {id: 'ENC', label: 'Encoder models', x: 624, y: 30, w: 608, h: 105},
+    {id: 'LAYERS', label: 'Transformer block × N (36 in Qwen3 4B)',
+     x: 290, y: 250, w: 400, h: 290}
+  ],
+  nodes: [
+    {id: 'QWEN', x: 115, y: 95, kind: 'new',
+     lines: ['Qwen3 4B (main)', 'summaries · chat · judge']},
+    {id: 'GUARD', x: 320, y: 95, kind: 'new',
+     lines: ['Llama Guard 3 1B', 'safe | unsafe + S1–S14']},
+    {id: 'CLOUD', x: 525, y: 95, kind: 'new', w: 180,
+     lines: ['gpt-5-mini (cloud)', 'brief · optional judge']},
+    {id: 'NOMIC', x: 730, y: 95, kind: 'cloud',
+     lines: ['nomic-embed-text', 'RAG · dedup L3 · cache']},
+    {id: 'BGE', x: 935, y: 95, kind: 'cloud',
+     lines: ['bge-reranker-base', 'cross-encoder (CPU)']},
+    {id: 'FIN', x: 1135, y: 95, kind: 'cloud',
+     lines: ['FinBERT · DistilBERT', 'CPU classifiers']},
+    {id: 'PROMPT', x: 135, y: 210, kind: 'old',
+     lines: ['Prompt text', 'chat template: system + user']},
+    {id: 'TOK', x: 135, y: 330, kind: 'old',
+     lines: ['Tokenizer (BPE)', 'text → token ids']},
+    {id: 'EMBL', x: 135, y: 450, kind: 'old',
+     lines: ['Embedding lookup', 'id → vector + position']},
+    {id: 'ATT', x: 490, y: 320, kind: 'old',
+     lines: ['Self-attention', 'tokens read each other', '(query · key → value)']},
+    {id: 'MLP', x: 490, y: 460, kind: 'old',
+     lines: ['Feed-forward (MLP)', 'per-token transform']},
+    {id: 'KV', x: 490, y: 630, kind: 'new',
+     lines: ['KV cache', 'past keys / values in VRAM']},
+    {id: 'HEAD', x: 840, y: 320, kind: 'new',
+     lines: ['LM head', 'hidden state → logits', '(151,936 token scores)']},
+    {id: 'SAMP', x: 1090, y: 320, kind: 'new',
+     lines: ['Decoding', 'temperature 0 → argmax']},
+    {id: 'OUT', x: 1090, y: 470, kind: 'new',
+     lines: ['Detokenize', 'tokens → text / JSON']},
+    {id: 'POOL', x: 840, y: 570, kind: 'cloud',
+     lines: ['Pooling', 'mean of token vectors → 768-d']},
+    {id: 'CLS', x: 840, y: 710, kind: 'cloud',
+     lines: ['Classification head', 'first token → score / softmax']},
+    {id: 'OLL', x: 135, y: 630, kind: 'actor',
+     lines: ['Ollama (llama.cpp)', 'Q4 GGUF weights · 4 GB GPU',
+       'one model loaded at a time']},
+    {id: 'CPU', x: 135, y: 745, kind: 'actor',
+     lines: ['CPU runtimes', 'TEI (reranker) · PyTorch (ML)']}
+  ],
+  edges: [
+    ['PROMPT', 'TOK'],
+    ['TOK', 'EMBL', 'token ids'],
+    ['EMBL', 'ATT', 'vectors'],
+    ['ATT', 'MLP'],
+    ['MLP', 'HEAD', 'last hidden state'],
+    ['HEAD', 'SAMP', 'logits'],
+    ['SAMP', 'OUT'],
+    ['SAMP', 'EMBL', 'next token (loop)', {dashed: true, via: [600, 20]}],
+    ['KV', 'ATT', 'reuse', {dashed: true, via: [730, 480]}],
+    ['MLP', 'POOL', 'all hidden states'],
+    ['MLP', 'CLS', 'first token'],
+    ['OLL', 'LAYERS', 'runs', {dashed: true}],
+    ['CPU', 'CLS', 'runs encoders', {dashed: true}]
+  ],
+  steps: [
+    {title: 'Six models, two families',
+     text: 'Decoders generate text: Qwen3 4B does extraction, summaries, ' +
+         'sentiment, the chat answer and the verify judge; Llama Guard ' +
+         'screens content; a cloud model writes the brief. Encoders turn ' +
+         'text into numbers: embeddings for search, reranking scores, and ' +
+         'classic sentiment and verdict labels.',
+     focus: ['QWEN', 'GUARD', 'CLOUD', 'NOMIC', 'BGE', 'FIN']},
+    {title: 'Where they run',
+     text: 'LiteLLM sends the local models to Ollama on the GPU host. ' +
+         'Ollama uses llama.cpp with weights quantized to about 4 bits, so ' +
+         'a 4-billion-parameter model (about 2.5 GB) fits the 4 GB GPU. ' +
+         'Only one model fits at a time; switching models means loading ' +
+         'another one, which is why the gateway waits up to 300 s.',
+     tag: 'Increment 3',
+     focus: ['QWEN', 'GUARD', 'NOMIC'],
+     flows: ['OLL>LAYERS:weights']},
+    {title: 'The prompt',
+     text: 'Example: summarising a news item. ai-api builds a chat prompt ' +
+         '(system rules + the item, fenced as data). The model\'s chat ' +
+         'template wraps each turn in special tokens such as ' +
+         '<|im_start|>system, because the model was trained on that ' +
+         'format.',
+     tag: 'Increment 3',
+     focus: ['QWEN'],
+     flows: ['PROMPT>TOK:chat template']},
+    {title: 'Tokenize',
+     text: 'Byte-pair encoding splits the text into sub-word tokens: ' +
+         'common words are one token, a rare ticker or name becomes ' +
+         'several. English is roughly 4 characters per token. The whole ' +
+         'prompt plus the answer must fit num_ctx = 8,192 tokens.',
+     tag: 'Increment 3',
+     focus: ['QWEN'],
+     flows: ['TOK>EMBL:token ids']},
+    {title: 'Embedding lookup',
+     text: 'Each token id selects a learned row of numbers (2,560 in ' +
+         'Qwen3 4B). Position is added by rotating those numbers (RoPE), ' +
+         'so the model knows word order.',
+     tag: 'Increment 3',
+     focus: ['QWEN'],
+     flows: ['EMBL>ATT:2,560 numbers per token']},
+    {title: 'Self-attention',
+     text: 'Every token makes a query, a key and a value. Its query is ' +
+         'compared with the keys of the other tokens; the best matches ' +
+         'pass their values on. Many heads do this in parallel. This is ' +
+         'how "it" finds "Apple", and how an answer finds the fact in ' +
+         'source [3]. In a decoder a token may only look backwards ' +
+         '(causal mask).',
+     tag: 'Increment 3',
+     focus: ['QWEN', 'ATT'],
+     flows: ['EMBL>ATT', 'ATT>MLP:mixed context']},
+    {title: 'Feed-forward, 36 times',
+     text: 'A small neural network then transforms each token on its own; ' +
+         'most of the parameters (and the model\'s knowledge) live here. ' +
+         'Attention + MLP is one block; Qwen3 4B stacks 36, each refining ' +
+         'the previous layer\'s result.',
+     tag: 'Increment 3',
+     focus: ['QWEN', 'LAYERS'],
+     flows: ['ATT>MLP', 'MLP>HEAD:last hidden state']},
+    {title: 'Scores for every possible next token',
+     text: 'The last token\'s final vector is multiplied by the vocabulary ' +
+         'matrix: one score (logit) for each of the 151,936 tokens Qwen3 ' +
+         'knows. A high score means "likely to come next".',
+     tag: 'Increment 3',
+     focus: ['QWEN'],
+     flows: ['HEAD>SAMP:151,936 logits']},
+    {title: 'Pick the token',
+     text: 'The gateway sets temperature 0, so the top-scoring token is ' +
+         'always chosen (greedy): the same input gives the same output, ' +
+         'which keeps evals repeatable. For enrich, the chain asks for a ' +
+         'JSON schema (with_structured_output), and Ollama only lets the ' +
+         'model pick tokens that keep the JSON valid.',
+     tag: 'Increment 3',
+     focus: ['QWEN'],
+     flows: ['SAMP>OUT:{"summary": …}']},
+    {title: 'One token at a time: the KV cache',
+     text: 'The chosen token is appended and the stack runs again for the ' +
+         'next one: one full pass per output token, which is why answers ' +
+         'stream. The keys and values of earlier tokens are kept in the KV ' +
+         'cache, so each pass only computes the new token. The cache grows ' +
+         'with the context and has to fit in VRAM next to the weights.',
+     tag: 'Increment 3',
+     focus: ['QWEN', 'KV'],
+     flows: ['SAMP>EMBL:next token', 'EMBL>ATT', 'KV>ATT:cached keys / values',
+       'ATT>MLP', 'MLP>HEAD', 'HEAD>SAMP']},
+    {title: 'Llama Guard: classification by generation',
+     text: 'Llama Guard 3 is a 1B Llama decoder fine-tuned for safety. Its ' +
+         'prompt lists the hazard categories and the conversation; it ' +
+         'generates "safe", or "unsafe" and the categories (for example ' +
+         '"S6", specialized advice). ai-api reads those tokens as a label. ' +
+         'Plain financial news is often flagged, so on news it is only ' +
+         'evidence.',
+     tag: 'Increment 4',
+     focus: ['GUARD'],
+     flows: ['PROMPT>TOK:categories + chat', 'TOK>EMBL', 'EMBL>ATT',
+       'ATT>MLP', 'MLP>HEAD', 'HEAD>SAMP', 'SAMP>OUT:unsafe S6']},
+    {title: 'Cloud models: same design, bigger',
+     text: 'gpt-5-mini (and the Claude Haiku 4.5 and Gemini 2.5 Flash ' +
+         'switches) are decoders too, much larger and run by the provider. ' +
+         'LiteLLM gives them the same API. The brief uses gpt-5-mini by ' +
+         'default and falls back to Qwen3 when the monthly budget is used ' +
+         'up or the call fails.',
+     tag: 'Increment 5',
+     focus: ['CLOUD', 'HEAD', 'SAMP']},
+    {title: 'Embedding model: meaning as a vector',
+     text: 'nomic-embed-text is an encoder: attention looks both ways and ' +
+         'nothing is generated. The final token vectors are averaged ' +
+         '(mean pooling) into one 768-number vector; texts with similar ' +
+         'meaning end up close. The prefix ("search_query:", ' +
+         '"search_document:", "clustering:") tells it the task. Used by ' +
+         'RAG, dedup L3 and the semantic cache.',
+     tag: 'Increment 3',
+     focus: ['NOMIC'],
+     flows: ['PROMPT>TOK:search_query: …', 'TOK>EMBL', 'EMBL>ATT',
+       'ATT>MLP', 'MLP>POOL:768-d vector']},
+    {title: 'Cross-encoder reranker',
+     text: 'bge-reranker-base reads the question and one passage together ' +
+         'in the same input, so attention links words across both. A head ' +
+         'on the first token outputs one relevance score. More accurate ' +
+         'than comparing two separate embeddings, but it costs one pass ' +
+         'per pair: 20 per question, on CPU in TEI.',
+     tag: 'Increment 3',
+     focus: ['BGE'],
+     flows: ['PROMPT>TOK:[question, passage]', 'TOK>EMBL', 'EMBL>ATT',
+       'ATT>MLP', ['MLP>CLS:relevance score', 'CPU>CLS']]},
+    {title: 'Classic classifiers',
+     text: 'FinBERT is BERT fine-tuned on financial text (positive, ' +
+         'negative, neutral). DistilBERT is a 6-layer BERT that ai-api ' +
+         'ml-train fine-tunes on vendor-sim labels to guess the 4 verdicts. ' +
+         'Both read the first 256 tokens and output probabilities from the ' +
+         'first-token head. They are evidence for the analyst, never the ' +
+         'verdict.',
+     tag: 'Increment 4',
+     focus: ['FIN'],
+     flows: ['TOK>EMBL:headline + story', 'EMBL>ATT', 'ATT>MLP',
+       ['MLP>CLS:label probabilities', 'CPU>CLS']]}
+  ],
+  notes: {
+    title: 'The models in this app',
+    items: [
+      ['Qwen3 4B Instruct', 'Decoder, 36 layers, run by Ollama at about 4 ' +
+          'bits (main-gpu4gb). Extract, summary, sentiment, "Ask the ' +
+          'News", the verify judge. Bigger profiles use Qwen3 8B / 14B.'],
+      ['Llama Guard 3 1B', 'Decoder fine-tuned to label content with the ' +
+          'MLCommons hazard categories S1–S14 (guard-gpu4gb; 8B on ' +
+          'gpu16gb).'],
+      ['gpt-5-mini', 'Cloud decoder (cloud-openai): the brief, and the ' +
+          'judge when JUDGE_CLOUD_MODEL is set. Claude Haiku 4.5 and ' +
+          'Gemini 2.5 Flash are the other switches.'],
+      ['nomic-embed-text', 'Encoder with mean pooling, 768 dimensions, ' +
+          'task prefixes (embed-gpu4gb; bge-m3 with 1,024 on bigger ' +
+          'profiles).'],
+      ['bge-reranker-base', 'Cross-encoder, one score per (question, ' +
+          'passage) pair, on CPU in Hugging Face TEI.'],
+      ['FinBERT / DistilBERT', 'BERT-family classifiers on CPU with ' +
+          'PyTorch and transformers, in the worker only.'],
+      ['LiteLLM', 'The gateway: one OpenAI-compatible API, task aliases ' +
+          'per hardware profile, temperature 0 for local models.']
+    ]
+  }
+});
+</script>
+</body>
+</html>

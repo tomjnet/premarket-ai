@@ -1,0 +1,127 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 2 (rule-based checks). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 2 · Rule-based checks · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 2,
+  title: 'Increment 2: Rule-based checks (no LLM)',
+  intro: 'Duplicates and obvious fakes are caught with cheap, deterministic ' +
+      'checks before any AI. The modern C++20 ingester starts running in ' +
+      'parallel with the C++11 one, and a C++20 native module speeds up the ' +
+      'Python checks.',
+  width: 1240,
+  height: 660,
+  groups: [
+    {id: 'RULES', label: 'rule engine (ai-api)', x: 300, y: 370, w: 700, h: 140}
+  ],
+  nodes: [
+    {id: 'VS', x: 90, y: 200, kind: 'old', lines: ['vendor-sim']},
+    {id: 'LING', x: 320, y: 110, kind: 'old', lines: ['legacy ingest (C++11)']},
+    {id: 'NING', x: 320, y: 280, kind: 'new',
+     lines: ['ingest (C++20)', 'lock-free · simdjson · Abseil']},
+    {id: 'PG', x: 620, y: 200, kind: 'old', shape: 'db',
+     lines: ['PostgreSQL', 'legacy + ingest + ai schemas']},
+    {id: 'PAR', x: 620, y: 55, kind: 'new',
+     lines: ['parity check', 'legacy = modern']},
+    {id: 'DD', x: 410, y: 450, kind: 'new',
+     lines: ['dedup L0–L2', 'URL · exact hash · SimHash']},
+    {id: 'EC', x: 650, y: 450, kind: 'new',
+     lines: ['entity check', 'FAKE_COMPANY / FAKE_TICKER']},
+    {id: 'SC', x: 885, y: 450, kind: 'new',
+     lines: ['source check', 'reputation · lookalike · stale']},
+    {id: 'R', x: 130, y: 450, kind: 'new', shape: 'db',
+     lines: ['Redis', 'dedup keys · caches']},
+    {id: 'FP', x: 410, y: 600, kind: 'new',
+     lines: ['fastpath (C++20)', 'nanobind module']},
+    {id: 'SEC', x: 650, y: 600, kind: 'new',
+     lines: ['SEC EDGAR', 'ticker registry']},
+    {id: 'EVAL', x: 1120, y: 600, kind: 'new',
+     lines: ['eval harness v1', 'golden set + CI']},
+    {id: 'API', x: 870, y: 200, kind: 'old', lines: ['ai-api']},
+    {id: 'WEB', x: 1070, y: 110, kind: 'new',
+     lines: ['web: badges', 'FAKE · DUPLICATE · STALE']},
+    {id: 'T', x: 1160, y: 260, kind: 'actor', lines: ['Trader']}
+  ],
+  edges: [
+    ['VS', 'LING'],
+    ['VS', 'NING'],
+    ['LING', 'PG', 'legacy.*'],
+    ['NING', 'PG', 'ingest.*'],
+    ['PG', 'PAR'],
+    ['PG', 'DD'],
+    ['DD', 'EC'],
+    ['EC', 'SC'],
+    ['SC', 'PG', 'ai.*'],
+    ['DD', 'R', '', {bidir: true}],
+    ['FP', 'DD', 'SimHash · hashing · normalize', {dashed: true}],
+    ['EC', 'SEC', '', {bidir: true}],
+    ['PG', 'API'],
+    ['API', 'WEB'],
+    ['WEB', 'T'],
+    ['EVAL', 'RULES', 'measures', {dashed: true}]
+  ],
+  steps: [
+    {title: 'Cheap checks first',
+     text: 'Before paying for any AI, deterministic rules catch the easy ' +
+         'cases: duplicates, companies and tickers that do not exist, ' +
+         'spoofed or stale sources. A second, modern ingester starts in ' +
+         'shadow mode.',
+     focus: 'new'},
+    {title: 'Two ingesters, one feed',
+     text: 'At 05:30 ET both ingesters read the same feed. The C++20 one ' +
+         'uses a lock-free queue, simdjson and preallocated pools, and ' +
+         'writes to its own shadow schema, ingest.*, so it cannot disturb ' +
+         'the legacy tables.',
+     clock: '05:30 ET',
+     flows: [['VS>LING:JSON', 'VS>NING:JSON'],
+       ['LING>PG:legacy.*', 'NING>PG:ingest.*']]},
+    {title: 'Parity check',
+     text: 'The parity check compares both schemas row by row. It must show ' +
+         'zero differences before the C++20 ingester may replace the ' +
+         'legacy one (that happens in increment 6).',
+     flows: ['PG>PAR:diff']},
+    {title: 'Dedup levels L0–L2',
+     text: 'L0 same URL, L1 same content hash, L2 SimHash near-duplicates ' +
+         '(a few words changed). Keys live in Redis for a 7-day window, so ' +
+         'a story re-sent days later is still caught: DUPLICATE.',
+     flows: ['PG>DD:items', 'DD>R:SimHash', 'R>DD:match?']},
+    {title: 'The C++20 fast path',
+     text: 'Hashing, SimHash and text normalisation run in fastpath, a ' +
+         'C++20 module loaded into Python with nanobind. The rule engine ' +
+         'stays in Python; only the hot loops are native.',
+     flows: ['FP>DD:native']},
+    {title: 'Entity check',
+     text: 'Every company and ticker is looked up in the SEC EDGAR registry ' +
+         '(refreshed every 7 days). A name or ticker that does not exist ' +
+         'gets FAKE_COMPANY or FAKE_TICKER.',
+     flows: ['DD>EC:unique items', 'EC>SEC:lookup', 'SEC>EC:exists?']},
+    {title: 'Source check',
+     text: 'Source reputation, lookalike domains (a spoofed source) and ' +
+         'story age (STALE after 30 days). All results are written to the ' +
+         'ai.* tables next to the raw news.',
+     flows: ['EC>SC', 'SC>PG:badges']},
+    {title: 'Badges on the website',
+     text: 'ai-api now returns each item with its badges, and the web shows ' +
+         'FAKE COMPANY, DUPLICATE, STALE and SPOOFED SOURCE next to the ' +
+         'headline.',
+     flows: ['PG>API:news + rules', 'API>WEB:JSON', 'WEB>T:badges']},
+    {title: 'Measured, not guessed',
+     text: 'vendor-sim writes the truth for every item (labels.jsonl). ' +
+         'Eval harness v1 scores the rules against this golden set, and CI ' +
+         'runs it on every change so a rule can only get better.',
+     focus: ['RULES', 'DD', 'EC', 'SC'],
+     flows: ['EVAL>RULES:precision / recall']}
+  ]
+});
+</script>
+</body>
+</html>

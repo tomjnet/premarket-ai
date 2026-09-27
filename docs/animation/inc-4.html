@@ -1,0 +1,114 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 4 (AI verification). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 4 · AI verification · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 4,
+  title: 'Increment 4: AI verification',
+  intro: 'A LangGraph pipeline gives every item one of 4 verdicts, with ' +
+      'evidence gathered through MCP tools, and asks a human when it is ' +
+      'unsure.',
+  width: 1200,
+  height: 760,
+  groups: [
+    {id: 'G', label: 'LangGraph verify_news', x: 600, y: 20, w: 300, h: 620}
+  ],
+  nodes: [
+    {id: 'API', x: 100, y: 110, kind: 'old', lines: ['ai-api /runs']},
+    {id: 'Q', x: 280, y: 110, kind: 'new', shape: 'db',
+     lines: ['Redis', 'taskiq queue · streams']},
+    {id: 'W', x: 480, y: 110, kind: 'new', lines: ['ai-worker']},
+    {id: 'S1', x: 750, y: 90, kind: 'new', lines: ['sanitize + Llama Guard']},
+    {id: 'S2', x: 750, y: 190, kind: 'new', lines: ['extract claims']},
+    {id: 'S3', x: 750, y: 310, kind: 'new',
+     lines: ['checks: entity · source ·', 'corroboration · claims ·',
+       'style · classic ML']},
+    {id: 'S4', x: 750, y: 445, kind: 'new',
+     lines: ['aggregate: hard rules +', 'LLM judge → verdict']},
+    {id: 'S5', x: 750, y: 570, kind: 'new', shape: 'diamond', w: 170,
+     lines: ['confident?']},
+    {id: 'MCP', x: 1060, y: 310, kind: 'new',
+     lines: ['mcp-server', 'web_search (SearXNG) · fetch_url ·',
+       'prices · lookup_company · search_news']},
+    {id: 'HITL', x: 1060, y: 570, kind: 'new',
+     lines: ['Review Queue', '(Analyst)']},
+    {id: 'PG', x: 750, y: 700, kind: 'old', shape: 'db',
+     lines: ['PostgreSQL', 'verdicts · evidence']},
+    {id: 'WEB', x: 460, y: 700, kind: 'new',
+     lines: ['web: verdict badges', 'evidence · live progress']},
+    {id: 'T', x: 200, y: 700, kind: 'actor', lines: ['Trader']}
+  ],
+  edges: [
+    ['API', 'Q'],
+    ['Q', 'W'],
+    ['W', 'S1'],
+    ['S1', 'S2'],
+    ['S2', 'S3'],
+    ['S3', 'S4'],
+    ['S4', 'S5'],
+    ['S3', 'MCP', '', {bidir: true}],
+    ['S5', 'PG', 'yes'],
+    ['S5', 'HITL', 'no'],
+    ['HITL', 'PG'],
+    ['PG', 'WEB'],
+    ['WEB', 'T']
+  ],
+  steps: [
+    {title: 'From badges to verdicts',
+     text: 'Rules catch the obvious fakes; this graph judges the rest. Each ' +
+         'item ends as VERIFIED, UNVERIFIED, MISLEADING or FAKE, with the ' +
+         'evidence that decided it.',
+     focus: 'new'},
+    {title: 'Start a verify run',
+     text: 'POST /runs puts a job on the Redis Stream premarket:verify ' +
+         '(taskiq). The API answers at once; the browser follows the ' +
+         'progress live.',
+     flows: ['API>Q:verify run']},
+    {title: 'The worker picks it up',
+     text: 'ai-worker reads the stream in its consumer group. The run ' +
+         'coordinator screens every unique item with Llama Guard, then ' +
+         'queues one job per item. More workers: --scale ai-worker=3.',
+     flows: ['Q>W:job', 'W>S1:item']},
+    {title: 'Sanitize, then extract claims',
+     text: 'The text is cleaned and fenced so it cannot give the model ' +
+         'instructions (prompt injection). The model then lists the ' +
+         'claims that can be checked: numbers, dates, deals, names.',
+     flows: ['S1>S2:safe text', 'S2>S3:claims']},
+    {title: 'Gather evidence through MCP',
+     text: 'The checks call read-only MCP tools: web_search through the ' +
+         'self-hosted SearXNG, fetch_url, market prices, lookup_company, ' +
+         'search_news. The classic ML baseline (FinBERT) and the style ' +
+         'check run next to them.',
+     flows: ['S3>MCP:tool calls', 'MCP>S3:evidence']},
+    {title: 'Aggregate into one verdict',
+     text: 'Hard rules decide first (a company that does not exist is ' +
+         'FAKE, whatever the model says). Otherwise an LLM judge weighs ' +
+         'the evidence and gives a verdict with a confidence.',
+     flows: ['S3>S4:check results', 'S4>S5:verdict + confidence']},
+    {title: 'Confident: save it',
+     text: 'With a confidence of 0.70 or more, the verdict and its evidence ' +
+         'are saved in Postgres.',
+     flows: ['S5>PG:verdict']},
+    {title: 'Unsure: ask a human',
+     text: 'Below 0.70 the graph pauses; its state is checkpointed in ' +
+         'Postgres (schema graph). An analyst decides in the Review Queue, ' +
+         'and the graph resumes from the checkpoint with that decision.',
+     flows: ['S5>HITL:review', 'HITL>PG:decision']},
+    {title: 'Verdicts on the website',
+     text: 'Traders see the verdict badge, the evidence behind it, and the ' +
+         'run progress live while it happens.',
+     flows: ['PG>WEB:verdicts', 'WEB>T']}
+  ]
+});
+</script>
+</body>
+</html>

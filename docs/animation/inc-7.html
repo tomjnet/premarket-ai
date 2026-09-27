@@ -1,0 +1,133 @@
+<!doctype html>
+<!-- premarket-ai: animated mapping of increment 7 (enterprise cloud theory). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 7 · Enterprise cloud (theory) · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 7,
+  title: 'Increment 7: Enterprise AI on Azure / AWS / GCP (theory)',
+  intro: 'No code or deployment. Every lab component is mapped to a ' +
+      'managed cloud service. The business logic stays the same; managed ' +
+      'services replace the containers that hold state, and corporate ' +
+      'identity, private networking, an AI gateway and WORM audit are ' +
+      'added around it.',
+  width: 1180,
+  height: 790,
+  legend: {old: 'the lab (increment 6)', new: 'kept as is',
+    cloud: 'managed cloud service'},
+  groups: [
+    {id: 'LAB', label: 'The lab (increment 6)', x: 20, y: 20, w: 330, h: 610},
+    {id: 'ENT', label: 'Enterprise (Azure / AWS / GCP)', x: 700, y: 20,
+     w: 460, h: 610}
+  ],
+  nodes: [
+    {id: 'L1', x: 185, y: 90, kind: 'old', lines: ['Ollama + cloud API keys']},
+    {id: 'L2', x: 185, y: 160, kind: 'old', lines: ['LiteLLM gateway']},
+    {id: 'L3', x: 185, y: 230, kind: 'old',
+     lines: ['LangGraph agents + MCP server']},
+    {id: 'L4', x: 185, y: 300, kind: 'old', lines: ['Llama Guard + rules']},
+    {id: 'L5', x: 185, y: 370, kind: 'old',
+     lines: ['PostgreSQL + pgvector · Redis']},
+    {id: 'L6', x: 185, y: 440, kind: 'old',
+     lines: ['taskiq · APScheduler · C++ jobs']},
+    {id: 'L7', x: 185, y: 510, kind: 'old', lines: ['JWT users · .env secrets']},
+    {id: 'L8', x: 185, y: 580, kind: 'old', w: 310,
+     lines: ['Langfuse · OTel · Grafana · audit']},
+    {id: 'E1', x: 930, y: 90, kind: 'cloud',
+     lines: ['Managed models', 'Foundry · Bedrock · Agent Platform']},
+    {id: 'E2', x: 930, y: 160, kind: 'cloud',
+     lines: ['AI gateway', 'APIM · LiteLLM/inference profiles · Apigee']},
+    {id: 'E3', x: 930, y: 230, kind: 'cloud', w: 420,
+     lines: ['Agent runtime + tool gateway',
+       'Foundry Agent Service · AgentCore · Agent Runtime']},
+    {id: 'E4', x: 930, y: 300, kind: 'cloud', w: 420,
+     lines: ['Managed guardrails + rules',
+       'Foundry Guardrails · Bedrock Guardrails · Model Armor']},
+    {id: 'E5', x: 930, y: 370, kind: 'cloud',
+     lines: ['Managed PostgreSQL + pgvector', 'Redis / Valkey']},
+    {id: 'E6', x: 930, y: 440, kind: 'cloud',
+     lines: ['Managed queue · workflow', 'container jobs']},
+    {id: 'E7', x: 930, y: 510, kind: 'cloud',
+     lines: ['Corporate SSO · workload identity', 'vault + CMK']},
+    {id: 'E8', x: 930, y: 580, kind: 'cloud',
+     lines: ['Cloud monitoring · SIEM', 'WORM audit']},
+    {id: 'KEEP', x: 590, y: 720, kind: 'new',
+     lines: ['Kept as is:', 'verdict policy · rules · RAG logic ·',
+       'prompts · tools · skills · evals']}
+  ],
+  edges: [
+    ['L1', 'E1'], ['L2', 'E2'], ['L3', 'E3'], ['L4', 'E4'],
+    ['L5', 'E5'], ['L6', 'E6'], ['L7', 'E7'], ['L8', 'E8'],
+    ['LAB', 'KEEP', '', {dashed: true, via: [185, 720]}],
+    ['KEEP', 'ENT', '', {dashed: true, via: [930, 720]}]
+  ],
+  steps: [
+    {title: 'Same platform, enterprise scale',
+     text: 'A large regulated firm (a bank, broker-dealer or asset manager) ' +
+         'would build the same platform on a hyperscaler. Left: what the ' +
+         'lab runs. Right: the managed service that takes its place.',
+     focus: ['KEEP']},
+    {title: 'What does not change',
+     text: 'The verdict policy, rules, RAG logic, prompts, tools, skills ' +
+         'and evals are the product. They move to the cloud unchanged; ' +
+         'open standards (OpenAI-compatible APIs, MCP, OpenTelemetry, ' +
+         'pgvector, LangGraph) limit lock-in.',
+     flows: ['LAB>KEEP:logic', 'KEEP>ENT:logic']},
+    {title: 'Models',
+     text: 'Local Ollama and API keys become managed models: Microsoft ' +
+         'Foundry, Amazon Bedrock or Google\'s Agent Platform (formerly ' +
+         'Vertex AI), reached privately and without keys.',
+     flows: ['L1>E1:models']},
+    {title: 'AI gateway',
+     text: 'One gateway in front of every model stays; it becomes Azure ' +
+         'API Management, LiteLLM or Bedrock inference profiles, or ' +
+         'Apigee, with quotas, logging and cost per team.',
+     flows: ['L2>E2:routing']},
+    {title: 'Agents and tools',
+     text: 'The LangGraph agents run on a managed agent runtime, and the ' +
+         'read-only MCP tools sit behind a tool gateway: Foundry Agent ' +
+         'Service, Bedrock AgentCore or Agent Runtime.',
+     flows: ['L3>E3:agents + MCP']},
+    {title: 'Guardrails',
+     text: 'Llama Guard is joined by managed guardrails (Foundry ' +
+         'Guardrails, Bedrock Guardrails, Model Armor); the rules ' +
+         'themselves stay the lab\'s.',
+     flows: ['L4>E4:guardrails']},
+    {title: 'Data and cache',
+     text: 'Postgres with pgvector and Redis become managed services with ' +
+         'backups, high availability and customer-managed keys; the ' +
+         'schema and queries stay.',
+     flows: ['L5>E5:data']},
+    {title: 'Jobs',
+     text: 'The taskiq queue, the scheduler and the C++ batch jobs become ' +
+         'a managed queue, a workflow service and container jobs.',
+     flows: ['L6>E6:jobs']},
+    {title: 'Identity and secrets',
+     text: 'Local JWT users and .env secrets are replaced by corporate SSO, ' +
+         'workload identities instead of keys, and a vault with ' +
+         'customer-managed keys (CMK).',
+     flows: ['L7>E7:identity']},
+    {title: 'Observability and audit',
+     text: 'Langfuse, OpenTelemetry and Grafana feed the cloud monitoring ' +
+         'and the SIEM; the 90-day audit becomes immutable WORM storage ' +
+         'kept for as long as the regulator requires.',
+     flows: ['L8>E8:telemetry + audit']},
+    {title: 'The whole mapping',
+     text: 'Eight swaps, one unchanged core. The pages in docs/enterprise ' +
+         'cover each cloud, security, MLOps / LLMOps and build vs buy in ' +
+         'detail.',
+     flows: [['L1>E1', 'L2>E2', 'L3>E3', 'L4>E4', 'L5>E5', 'L6>E6',
+       'L7>E7', 'L8>E8']]}
+  ]
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 1 (web instead of PDF). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 1 · Web instead of PDF · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 1,
+  title: 'Increment 1: Web instead of PDF (no AI)',
+  intro: 'A website over the same legacy tables, behind one hardened nginx ' +
+      'edge that load balances two UI replicas. The PDF keeps running in ' +
+      'parallel.',
+  width: 1200,
+  height: 620,
+  nodes: [
+    {id: 'VS', x: 100, y: 90, kind: 'old', lines: ['vendor-sim']},
+    {id: 'ING', x: 310, y: 90, kind: 'old', lines: ['legacy ingest (C++11)']},
+    {id: 'PG', x: 590, y: 90, kind: 'old', shape: 'db',
+     lines: ['PostgreSQL', 'legacy tables (read-only for ai-api)',
+       'ai.app_user · ai.audit_log']},
+    {id: 'REP', x: 880, y: 90, kind: 'old',
+     lines: ['legacy report → PDF', '(parallel run)']},
+    {id: 'API', x: 590, y: 280, kind: 'new',
+     lines: ['ai-api (FastAPI)', '/auth · /news · /health']},
+    {id: 'R', x: 300, y: 280, kind: 'new', shape: 'db',
+     lines: ['Redis', 'sessions · login lockout']},
+    {id: 'W1', x: 590, y: 430, kind: 'new',
+     lines: ['web-1 (nginx)', 'static React UI']},
+    {id: 'W2', x: 590, y: 550, kind: 'new',
+     lines: ['web-2 (nginx)', 'static React UI']},
+    {id: 'EDGE', x: 900, y: 450, kind: 'new',
+     lines: ['edge (nginx)', 'rate limits · CSP + security headers',
+       'load balancer · only published port']},
+    {id: 'T', x: 1110, y: 300, kind: 'actor', lines: ['Trader', 'browser']}
+  ],
+  edges: [
+    ['VS', 'ING'],
+    ['ING', 'PG'],
+    ['PG', 'REP'],
+    ['T', 'EDGE', 'localhost:8080'],
+    ['EDGE', 'W1', '/ (least_conn)'],
+    ['EDGE', 'W2', '/'],
+    ['EDGE', 'API', '/api/*'],
+    ['API', 'PG'],
+    ['API', 'R', '', {bidir: true}],
+    ['REP', 'T', 'PDF still delivered', {dashed: true}]
+  ],
+  steps: [
+    {title: 'A website next to the PDF',
+     text: 'Nothing in the legacy pipeline changes. A web front end, an API ' +
+         'and Redis are added beside it, all behind a single nginx edge. ' +
+         'Still no AI: the goal is to replace the PDF as the way traders ' +
+         'read the news.',
+     focus: 'new'},
+    {title: 'Legacy ingest, unchanged',
+     text: 'At 05:30 ET the C++11 ingester loads the vendor feed into the ' +
+         'legacy tables, exactly as in increment 0.',
+     clock: '05:30 ET',
+     flows: ['VS>ING:JSON', 'ING>PG:COPY']},
+    {title: 'Parallel run: the PDF still ships',
+     text: 'The PDF is still printed and delivered, so traders can compare ' +
+         'the website with what they know. It is only switched off once ' +
+         'the web replaces it (increment 5).',
+     clock: '05:32 ET',
+     flows: ['PG>REP:rows', 'REP>T:PDF']},
+    {title: 'Open the website',
+     text: 'The browser talks only to the edge, the one published port ' +
+         '(127.0.0.1:8080 by default). The edge adds CSP and security ' +
+         'headers, applies rate limits and sends / to the replica with the ' +
+         'fewest connections; either replica can die without an outage.',
+     flows: ['T>EDGE:GET /', ['EDGE>W1:HTML/JS', 'EDGE>W2:(standby)'],
+       'W1>EDGE:UI', 'EDGE>T:UI']},
+    {title: 'Log in',
+     text: 'POST /api/auth/login goes through the edge to ai-api. It checks ' +
+         'the password, counts failures in Redis (lockout after 5 for 15 ' +
+         'minutes) and returns a 15-minute access token plus a refresh ' +
+         'token; the refresh session lives in Redis.',
+     flows: ['T>EDGE:login', 'EDGE>API:/api/auth', 'API>R:session',
+       'R>API:ok', 'API>EDGE:tokens', 'EDGE>T:tokens']},
+    {title: 'Read the news feed',
+     text: 'GET /api/news: ai-api connects as a least-privilege role that ' +
+         'can only read the legacy tables and append audit rows. The same ' +
+         '100 items as the PDF, now searchable in the browser.',
+     flows: ['T>EDGE:GET /api/news', 'EDGE>API', 'API>PG:SELECT',
+       'PG>API:rows', 'API>EDGE:JSON', 'EDGE>T:news']}
+  ]
+});
+</script>
+</body>
+</html>

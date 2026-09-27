@@ -1,0 +1,136 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 6 (production). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 6 · Production · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 6,
+  title: 'Increment 6: Production',
+  intro: 'Scheduled, monitored and measured: the C++20 ingester replaces ' +
+      'the C++11 legacy one, pgvector replaces ChromaDB, the NYSE-calendar ' +
+      'scheduler meets the 07:30 deadline, and the vendor scorecard shows ' +
+      'what the vendor really delivered.',
+  width: 1220,
+  height: 700,
+  groups: [
+    {id: 'OBS', label: 'observability profile', x: 960, y: 30, w: 240, h: 440}
+  ],
+  nodes: [
+    {id: 'LEG', x: 140, y: 90, kind: 'retired',
+     lines: ['legacy ingest (C++11)']},
+    {id: 'ING', x: 140, y: 290, kind: 'old',
+     lines: ['ingest (C++20)', 'own cron 05:30 ET', 'the only ingester']},
+    {id: 'SCH', x: 470, y: 100, kind: 'new',
+     lines: ['scheduler', 'NYSE calendar · Redis lock',
+       '06:00 rules → AI → verify', '07:15 brief · SLA checks']},
+    {id: 'PGV', x: 470, y: 330, kind: 'new', shape: 'db',
+     lines: ['PostgreSQL + pgvector', 'ai.v_raw_news → ingest.*',
+       'hybrid search · scorecard']},
+    {id: 'CH', x: 470, y: 530, kind: 'retired', shape: 'db',
+     lines: ['ChromaDB']},
+    {id: 'AI', x: 790, y: 330, kind: 'old',
+     lines: ['ai-api + ai-worker', '+ agents']},
+    {id: 'AL', x: 790, y: 500, kind: 'new', shape: 'db',
+     lines: ['Redis Stream', 'alerts']},
+    {id: 'OT', x: 1080, y: 110, kind: 'new',
+     lines: ['OpenTelemetry', 'Collector', 'GenAI metrics']},
+    {id: 'PR', x: 1080, y: 260, kind: 'new', lines: ['Prometheus']},
+    {id: 'GR', x: 1080, y: 400, kind: 'new',
+     lines: ['Grafana', 'dashboard · alert rules']},
+    {id: 'CI', x: 1080, y: 540, kind: 'new',
+     lines: ['CI: evals, gitleaks,', 'self-hosted GPU runner']},
+    {id: 'WEB', x: 700, y: 640, kind: 'new',
+     lines: ['web: brief by 07:30 ET · scorecard ·',
+       'admin · alert + budget banners']},
+    {id: 'T', x: 1080, y: 650, kind: 'actor',
+     lines: ['Trader / Analyst / Admin']}
+  ],
+  edges: [
+    ['ING', 'PGV'],
+    ['LEG', 'ING', 'replaced', {dashed: true}],
+    ['SCH', 'PGV', 'waits for ingest'],
+    ['SCH', 'AI'],
+    ['AI', 'PGV', '', {bidir: true}],
+    ['CH', 'PGV', 'migrated', {dashed: true}],
+    ['SCH', 'AL', 'SLA breaches'],
+    ['AI', 'OT', 'metrics', {dashed: true}],
+    ['SCH', 'PR', 'metrics', {dashed: true, via: [760, 170]}],
+    ['OT', 'PR'],
+    ['PR', 'GR'],
+    ['GR', 'AI', 'webhook'],
+    ['AI', 'AL'],
+    ['AL', 'WEB'],
+    ['PGV', 'WEB'],
+    ['WEB', 'T'],
+    ['CI', 'AI', 'blocks regressions', {dashed: true}]
+  ],
+  steps: [
+    {title: 'Scheduled, monitored, measured',
+     text: 'Same features, now run like a production service: a scheduler ' +
+         'on the NYSE calendar, deadlines with alerts, metrics and ' +
+         'dashboards, and two legacy parts retired.',
+     focus: 'new'},
+    {title: 'The C++11 ingester is retired',
+     text: 'The parity check showed zero differences, so the C++20 ingester ' +
+         'becomes the only ingest. The legacy container stays behind an ' +
+         'opt-in profile for before/after comparisons.',
+     flows: ['LEG>ING:handover']},
+    {title: 'Ingest into the one database',
+     text: 'At 05:30 ET the C++20 ingester loads the feed into ingest.*. ' +
+         'The AI side reads it through the view ai.v_raw_news.',
+     clock: '05:30 ET',
+     flows: ['ING>PGV:ingest.*']},
+    {title: 'Vectors move to pgvector',
+     text: 'make -C python migrate-vectors copies the RAG vectors into ' +
+         'ai.chunk.embedding and compares the results. One database now ' +
+         'does vector and full-text (hybrid) search; ChromaDB is opt-in.',
+     flows: ['CH>PGV:vectors']},
+    {title: 'The scheduler runs the morning',
+     text: 'Only on NYSE trading days. A Redis lock (run:premarket:{date}) ' +
+         'stops a job from running twice. At 06:00 it waits for the ingest ' +
+         'run, then starts rules → AI → verify.',
+     clock: '06:00 ET',
+     flows: ['SCH>PGV:ingest done?', 'SCH>AI:rules → AI → verify',
+       'AI>PGV:results']},
+    {title: 'The brief before the deadline',
+     text: 'At 07:15 the briefing agent writes Today\'s brief from the ' +
+         'verified items. It has to be ready before 07:30 ET.',
+     clock: '07:15 ET',
+     flows: ['SCH>AI:brief', 'AI>PGV:ai.brief']},
+    {title: 'SLA checks raise alerts',
+     text: 'At 06:15, 06:30, 07:00 and 07:30 the scheduler checks each ' +
+         'deadline. A breach goes to the alerts stream, and the web shows ' +
+         'a banner at once.',
+     clock: '07:30 ET',
+     flows: ['SCH>AL:SLA breach', 'AL>WEB:banner']},
+    {title: 'Metrics, dashboard, alert rules',
+     text: 'ai-api and ai-worker push OpenTelemetry metrics (GenAI tokens, ' +
+         'latency, cost; HTTP; workers) to the collector; Prometheus ' +
+         'scrapes it and the scheduler. Grafana alert rules call ai-api\'s ' +
+         'webhook, which also becomes a banner.',
+     flows: [['AI>OT:OTLP', 'SCH>PR:scrape'], 'OT>PR', 'PR>GR',
+       'GR>AI:alert webhook', 'AI>AL', 'AL>WEB:banner']},
+    {title: 'CI guards quality',
+     text: 'Every change runs the evals, gitleaks and the GPU tests on a ' +
+         'self-hosted runner. A change that makes the verdicts worse cannot ' +
+         'be merged.',
+     flows: ['CI>AI:gate']},
+    {title: 'What traders get',
+     text: 'A reliable brief by 07:30 ET every trading day. At 09:35 the ' +
+         'vendor scorecard compares what the vendor delivered with the 100 ' +
+         'items a day it is paid for.',
+     clock: '09:35 ET',
+     flows: ['PGV>WEB:brief + scorecard', 'WEB>T']}
+  ]
+});
+</script>
+</body>
+</html>

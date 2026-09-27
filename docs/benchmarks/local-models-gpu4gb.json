@@ -1,0 +1,62 @@
+{
+  "meta": {
+    "profile": "gpu4gb",
+    "date": "2026-09-26",
+    "items": 50,
+    "winner": "bench-qwen3-4b"
+  },
+  "results": [
+    {
+      "alias": "bench-qwen3-4b",
+      "ollama_tag": "qwen3:4b-instruct",
+      "verdict_accuracy": 0.78,
+      "verdict_macro_f1": 0.793,
+      "ticker_recall": 1.0,
+      "structured_success": 1.0,
+      "tool_call_success": 1.0,
+      "tokens_per_s": 11.5,
+      "vram_mib": 2200,
+      "seconds_per_item": 11.86,
+      "minutes_per_100_items": 19.8
+    },
+    {
+      "alias": "bench-llama3.2-3b",
+      "ollama_tag": "llama3.2:3b",
+      "verdict_accuracy": 0.44,
+      "verdict_macro_f1": 0.1618,
+      "ticker_recall": 1.0,
+      "structured_success": 1.0,
+      "tool_call_success": 1.0,
+      "tokens_per_s": 20.0,
+      "vram_mib": 2200,
+      "seconds_per_item": 7.1,
+      "minutes_per_100_items": 11.8
+    },
+    {
+      "alias": "bench-phi4-mini",
+      "ollama_tag": "phi4-mini",
+      "verdict_accuracy": 0.4,
+      "verdict_macro_f1": 0.2144,
+      "ticker_recall": 0.9623,
+      "structured_success": 1.0,
+      "tool_call_success": 0.0,
+      "tokens_per_s": 13.1,
+      "vram_mib": 2212,
+      "seconds_per_item": 10.15,
+      "minutes_per_100_items": 16.9
+    },
+    {
+      "alias": "bench-gemma3-4b",
+      "ollama_tag": "gemma3:4b",
+      "verdict_accuracy": 0.48,
+      "verdict_macro_f1": 0.2548,
+      "ticker_recall": 0.9623,
+      "structured_success": 1.0,
+      "tool_call_success": 0.0,
+      "tokens_per_s": 8.9,
+      "vram_mib": 1495,
+      "seconds_per_item": 15.32,
+      "minutes_per_100_items": 25.5
+    }
+  ]
+}

@@ -1,0 +1,206 @@
+/* premarket-ai: styles of the animated data-flow pages (docs/animation). */
+
+:root {
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --ink: #0f172a;
+  --muted: #475569;
+  --line: #cbd5e1;
+  --edge: #94a3b8;
+  --flow: #2563eb;
+  --flow-soft: #dbeafe;
+  --new-fill: #d1fae5;
+  --new-stroke: #059669;
+  --new-ink: #064e3b;
+  --old-fill: #f3f4f6;
+  --old-stroke: #9ca3af;
+  --old-ink: #374151;
+  --ret-fill: #fee2e2;
+  --ret-stroke: #dc2626;
+  --ret-ink: #7f1d1d;
+  --cloud-fill: #ede9fe;
+  --cloud-stroke: #7c3aed;
+  --cloud-ink: #3b0764;
+  --actor-fill: #dbeafe;
+  --actor-stroke: #2563eb;
+  --actor-ink: #1e3a8a;
+  --group: #94a3b8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1020;
+    --panel: #111827;
+    --ink: #e5e7eb;
+    --muted: #9ca3af;
+    --line: #334155;
+    --edge: #64748b;
+    --flow: #60a5fa;
+    --flow-soft: #1e3a8a;
+    --new-fill: #064e3b;
+    --new-stroke: #34d399;
+    --new-ink: #d1fae5;
+    --old-fill: #1f2937;
+    --old-stroke: #6b7280;
+    --old-ink: #e5e7eb;
+    --ret-fill: #450a0a;
+    --ret-stroke: #f87171;
+    --ret-ink: #fecaca;
+    --cloud-fill: #2e1065;
+    --cloud-stroke: #a78bfa;
+    --cloud-ink: #ede9fe;
+    --actor-fill: #172554;
+    --actor-stroke: #60a5fa;
+    --actor-ink: #dbeafe;
+    --group: #475569;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: var(--flow); }
+
+.page { max-width: 1320px; margin: 0 auto; padding: 16px; }
+
+/* Header and increment navigation. */
+.top { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline;
+  justify-content: space-between; }
+.kicker { color: var(--muted); font-size: 13px; letter-spacing: .04em;
+  text-transform: uppercase; }
+h1 { margin: 2px 0 4px; font-size: 24px; line-height: 1.25; }
+.intro { margin: 0 0 12px; color: var(--muted); max-width: 900px; }
+.incnav { display: flex; flex-wrap: wrap; gap: 6px; }
+.incnav a { padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
+  text-decoration: none; font-size: 13px; color: var(--ink); background: var(--panel); }
+.incnav a.here { background: var(--flow); border-color: var(--flow); color: #fff; }
+
+/* Diagram stage. */
+.stage { position: relative; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; overflow: hidden; }
+.stage svg { display: block; width: 100%; height: auto; }
+.clock { position: absolute; top: 10px; right: 12px; padding: 3px 10px;
+  border-radius: 999px; background: var(--flow); color: #fff; font-weight: 600;
+  font-size: 14px; font-variant-numeric: tabular-nums; opacity: 0;
+  transition: opacity .3s; }
+.clock.on { opacity: 1; }
+.clock.tag { top: auto; bottom: 10px; right: auto; left: 12px;
+  background: var(--cloud-stroke); }
+@media (max-width: 640px) {
+  .clock { top: 6px; right: 6px; padding: 1px 7px; font-size: 11px; }
+  .clock.tag { top: auto; bottom: 6px; left: 6px; }
+}
+
+/* Notes under a topic diagram. */
+.notes dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px;
+  margin: 10px 0 0; }
+.notes dt { font-weight: 650; }
+.notes dd { margin: 0; color: var(--muted); }
+@media (max-width: 640px) {
+  .notes dl { grid-template-columns: 1fr; gap: 2px; }
+  .notes dd { margin-bottom: 8px; }
+}
+
+/* Narration and controls. */
+.panel { margin-top: 12px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px 16px; }
+.step-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.step-num { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.step-title { margin: 0; font-size: 18px; }
+.step-text { margin: 6px 0 12px; min-height: 4.5em; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.controls button, .controls select {
+  font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  cursor: pointer; }
+.controls button.primary { background: var(--flow); border-color: var(--flow); color: #fff;
+  min-width: 90px; }
+.controls button:disabled { opacity: .4; cursor: default; }
+.dots { display: flex; flex-wrap: wrap; gap: 5px; margin-left: auto; }
+.dots button { width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  font-size: 12px; }
+.dots button.done { background: var(--flow-soft); }
+.dots button.here { background: var(--flow); border-color: var(--flow); color: #fff; }
+.hint { margin-top: 10px; color: var(--muted); font-size: 13px; }
+
+/* Legend. */
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 2px 0;
+  color: var(--muted); font-size: 13px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 18px; height: 12px; border-radius: 3px; border: 1.5px solid; }
+.legend i.k-new { background: var(--new-fill); border-color: var(--new-stroke); }
+.legend i.k-old { background: var(--old-fill); border-color: var(--old-stroke); }
+.legend i.k-retired { background: var(--ret-fill); border-color: var(--ret-stroke);
+  border-style: dashed; }
+.legend i.k-cloud { background: var(--cloud-fill); border-color: var(--cloud-stroke); }
+.legend i.k-actor { background: var(--actor-fill); border-color: var(--actor-stroke); }
+.legend i.k-flow { background: var(--flow); border-color: var(--flow); border-radius: 50%;
+  width: 12px; }
+
+/* SVG: nodes. */
+.node .shape { stroke-width: 1.6; transition: stroke-width .25s; }
+.node text { font-size: 12px; text-anchor: middle; pointer-events: none; }
+.node text .t { font-size: 14px; font-weight: 650; }
+.k-new .shape { fill: var(--new-fill); stroke: var(--new-stroke); }
+.k-new text { fill: var(--new-ink); }
+.k-old .shape { fill: var(--old-fill); stroke: var(--old-stroke); }
+.k-old text { fill: var(--old-ink); }
+.k-retired .shape { fill: var(--ret-fill); stroke: var(--ret-stroke); stroke-dasharray: 6 4; }
+.k-retired text { fill: var(--ret-ink); }
+.k-cloud .shape { fill: var(--cloud-fill); stroke: var(--cloud-stroke); }
+.k-cloud text { fill: var(--cloud-ink); }
+.k-actor .shape { fill: var(--actor-fill); stroke: var(--actor-stroke); }
+.k-actor text { fill: var(--actor-ink); }
+
+.node { animation: appear .5s ease-out both; transition: opacity .35s; }
+@keyframes appear { from { opacity: 0; transform: translateY(8px); } }
+
+.group rect { fill: none; stroke: var(--group); stroke-width: 1.4; stroke-dasharray: 5 5; }
+.group text { fill: var(--muted); font-size: 13px; font-weight: 600; }
+
+/* SVG: edges. */
+.edge path { fill: none; stroke: var(--edge); stroke-width: 1.6;
+  transition: stroke .25s, stroke-width .25s, opacity .35s; }
+.edge.dashed path { stroke-dasharray: 6 5; }
+.edge text { fill: var(--muted); font-size: 11.5px; text-anchor: middle;
+  paint-order: stroke; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round; }
+.edge.active path { stroke: var(--flow); stroke-width: 2.6; }
+.edge.active text { fill: var(--flow); font-weight: 600; }
+.arrow { fill: var(--edge); }
+.arrow-active { fill: var(--flow); }
+
+/* Focus: everything outside the current step fades back. */
+svg.has-focus .node:not(.focus) { opacity: .3; }
+svg.has-focus .edge:not(.active) { opacity: .2; }
+svg.has-focus .group { opacity: .6; }
+.node.focus .shape { stroke-width: 2.8; }
+.node.hit .shape { animation: hit .55s ease-out; }
+@keyframes hit {
+  0% { filter: none; }
+  35% { filter: drop-shadow(0 0 8px var(--flow)); }
+  100% { filter: none; }
+}
+
+/* SVG: the moving data tokens. */
+.token-dot { fill: var(--flow); stroke: var(--panel); stroke-width: 2.5; }
+.token-label { fill: #fff; font-size: 11px; font-weight: 650; }
+.token-bg { fill: var(--flow); }
+
+/* Index page. */
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  margin-top: 16px; }
+.card { display: block; padding: 14px 16px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--panel); color: var(--ink); text-decoration: none; }
+.card:hover { border-color: var(--flow); }
+.card b { display: block; font-size: 16px; margin-bottom: 4px; }
+.card span { color: var(--muted); font-size: 14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .node, .node.hit .shape { animation: none; }
+}
