@@ -1,0 +1,244 @@
+<!doctype html>
+<!-- premarket-ai: how RAG works, from increment 3 to increment 6. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How RAG works · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  kicker: 'concept across increments 3 to 6',
+  name: 'How RAG works',
+  title: 'How RAG works in premarket-ai',
+  intro: 'Retrieval-Augmented Generation: instead of trusting what a small ' +
+      'model remembers, the app finds the passages of trusted sources that ' +
+      'match the question and makes the model answer only from them, ' +
+      'citing each one. Increment 3 builds it; increments 4, 5 and 6 add ' +
+      'guards, a cache, agents and a hybrid pgvector store. The badge in ' +
+      'the bottom-left corner shows the increment of each step.',
+  width: 1220,
+  height: 710,
+  legend: {
+    new: 'RAG v1 (increment 3)',
+    cloud: 'added or changed later (increments 4–6)',
+    retired: 'replaced in increment 6',
+    old: 'trusted data',
+    actor: 'people'
+  },
+  groups: [
+    {id: 'INDEX', label: 'Indexing pipeline (offline, before the open)',
+     x: 8, y: 40, w: 700, h: 130},
+    {id: 'QUERY', label: 'Query pipeline: "Ask the News" (online, per question)',
+     x: 8, y: 400, w: 1204, h: 300}
+  ],
+  nodes: [
+    {id: 'SRC', x: 115, y: 115, kind: 'old',
+     lines: ['Trusted sources', 'SEC EDGAR 8-K + EX-99.1',
+       'XBRL facts · Fed / SEC RSS']},
+    {id: 'LOAD', x: 355, y: 115, kind: 'new',
+     lines: ['ai-api corpus', 'fetch · HTML → text · sha256']},
+    {id: 'CHUNK', x: 590, y: 115, kind: 'new',
+     lines: ['Chunking', '1500 chars · 200 overlap']},
+    {id: 'EMB', x: 690, y: 240, kind: 'new',
+     lines: ['Embeddings', 'nomic-embed-text · 768-d',
+       'LiteLLM → Ollama (GPU host)']},
+    {id: 'CHR', x: 1065, y: 110, kind: 'retired', shape: 'db',
+     lines: ['ChromaDB (inc 3–5)', 'trusted_corpus · HNSW cosine']},
+    {id: 'PGV', x: 1065, y: 290, kind: 'cloud', shape: 'db',
+     lines: ['PostgreSQL ai.chunk', 'text + metadata (inc 3)',
+       '+ pgvector HNSW + tsvector (inc 6)']},
+    {id: 'MCP', x: 330, y: 330, kind: 'cloud',
+     lines: ['MCP tool search_news', 'verify graph + chat agents (inc 4–5)']},
+    {id: 'T', x: 75, y: 480, kind: 'actor', lines: ['Trader']},
+    {id: 'ASK', x: 275, y: 480, kind: 'new',
+     lines: ['POST /chat (SSE)', 'sanitize · Llama Guard (inc 4)']},
+    {id: 'RET', x: 525, y: 480, kind: 'new',
+     lines: ['Retriever', 'LangChain VectorStore', 'top-k 20 · hybrid (inc 6)']},
+    {id: 'RR', x: 795, y: 480, kind: 'new',
+     lines: ['Reranker (cross-encoder)', 'bge-reranker-base · TEI · top 5']},
+    {id: 'PROMPT', x: 1065, y: 480, kind: 'new',
+     lines: ['Augmented prompt', 'numbered sources + question',
+       '+ vendor items (unverified)']},
+    {id: 'CACHE', x: 275, y: 635, kind: 'cloud', shape: 'db',
+     lines: ['Semantic cache (inc 5)', 'RedisVL · distance ≤ 0.05']},
+    {id: 'EVAL', x: 525, y: 645, kind: 'new',
+     lines: ['RAG eval (RAGAS)', 'faithfulness · context precision']},
+    {id: 'CHECK', x: 795, y: 645, kind: 'new',
+     lines: ['Answer checks', 'citations · no advice · guard']},
+    {id: 'LLM', x: 1065, y: 645, kind: 'new',
+     lines: ['Chat model via LiteLLM', 'Qwen3 4B (Ollama) or cloud']}
+  ],
+  edges: [
+    ['SRC', 'LOAD'],
+    ['LOAD', 'CHUNK'],
+    ['CHUNK', 'PGV', 'chunk text'],
+    ['CHUNK', 'EMB'],
+    ['EMB', 'CHR', 'vectors'],
+    ['EMB', 'PGV', 'vectors (inc 6)'],
+    ['CHR', 'PGV', 'migrate-vectors', {dashed: true}],
+    ['T', 'ASK', '', {bidir: true}],
+    ['ASK', 'CACHE', '', {bidir: true}],
+    ['ASK', 'RET'],
+    ['RET', 'EMB', 'query vector'],
+    ['RET', 'CHR'],
+    ['RET', 'PGV'],
+    ['MCP', 'RET', 'same corpus', {dashed: true}],
+    ['RET', 'RR'],
+    ['RR', 'PROMPT'],
+    ['PROMPT', 'LLM'],
+    ['LLM', 'CHECK'],
+    ['CHECK', 'ASK'],
+    ['EVAL', 'CHECK', 'scores', {dashed: true}]
+  ],
+  steps: [
+    {title: 'Two pipelines',
+     text: 'RAG has two halves. Indexing (top) prepares the trusted ' +
+         'sources once, before the open. The query pipeline (bottom) runs ' +
+         'for every question: retrieve the best passages, add them to the ' +
+         'prompt, generate an answer that cites them.',
+     focus: ['SRC', 'LOAD', 'CHUNK', 'EMB', 'RET', 'RR', 'PROMPT', 'LLM']},
+    {title: 'Load the trusted sources',
+     text: 'ai-api corpus fetches 12 months of primary sources: the newest ' +
+         '8 8-K filings per company with their EX-99.1 press releases, an ' +
+         'XBRL fact sheet per company, and Fed and SEC press releases. ' +
+         'HTML becomes plain text; a sha256 per document skips unchanged ' +
+         'ones. From increment 6 the scheduler runs it at 05:00 ET.',
+     tag: 'Increment 3',
+     clock: '05:00 ET',
+     flows: ['SRC>LOAD:filings + releases']},
+    {title: 'Split into chunks',
+     text: 'A filing is too long to embed or to give the model whole. ' +
+         'Paragraphs are packed into chunks of about 1,500 characters; each ' +
+         'chunk repeats the last 200 characters of the previous one, so a ' +
+         'fact that crosses a boundary is still found. The text and its ' +
+         'metadata (title, URL, source, ticker, date) go to ai.chunk.',
+     tag: 'Increment 3',
+     flows: ['LOAD>CHUNK:documents', 'CHUNK>PGV:ai.chunk rows']},
+    {title: 'Embed and index',
+     text: 'An embedding turns text into 768 numbers; texts with similar ' +
+         'meaning get vectors that are close (cosine distance). ' +
+         'nomic-embed-text runs on Ollama behind LiteLLM (LangChain ' +
+         'OpenAIEmbeddings, with the "search_document:" prefix). ' +
+         'langchain-chroma stores the vectors in ChromaDB, collection ' +
+         'trusted_corpus, with an HNSW index.',
+     tag: 'Increment 3',
+     flows: ['CHUNK>EMB:search_document: …', 'EMB>CHR:768-d vectors']},
+    {title: 'A trader asks',
+     text: 'POST /chat receives the question and streams the answer back ' +
+         'as server-sent events. The question is sanitized first; from ' +
+         'increment 4 Llama Guard refuses unsafe questions before any ' +
+         'retrieval.',
+     tag: 'Increment 3 (+4)',
+     flows: ['T>ASK:question']},
+    {title: 'Semantic cache',
+     text: 'A question close enough to one answered earlier the same day ' +
+         '(cosine distance of 0.05 or less, within 15 minutes) gets the ' +
+         'stored answer at once. RedisVL SemanticCache holds it; personal ' +
+         'questions ("my watchlist") are never cached.',
+     tag: 'Increment 5',
+     flows: ['ASK>CACHE:similar question?', 'CACHE>ASK:miss']},
+    {title: 'Retrieve: the R in RAG',
+     text: 'The question is embedded with the "search_query:" prefix and ' +
+         'the vector store returns the 20 nearest chunks. The code only ' +
+         'sees LangChain\'s VectorStore interface, which is what later lets ' +
+         'the store change without touching the chain.',
+     tag: 'Increment 3',
+     flows: ['ASK>RET:question', 'RET>EMB:search_query: …',
+       'EMB>RET:vector', 'RET>CHR:k = 20', 'CHR>RET:20 chunks']},
+    {title: 'Rerank',
+     text: 'Vector distance is fast but rough. A cross-encoder reads the ' +
+         'question and each candidate together and scores them properly; ' +
+         'it is too slow for the whole corpus, so it only reorders the 20 ' +
+         'candidates and keeps the best 5. bge-reranker-base runs on CPU ' +
+         'in Hugging Face TEI; if it is down, the vector order is used.',
+     tag: 'Increment 3',
+     flows: ['RET>RR:20 candidates', 'RR>PROMPT:top 5']},
+    {title: 'Augment: build the prompt',
+     text: 'The 5 passages become numbered sources, fenced as data so ' +
+         'their text cannot give orders (spotlighting). Today\'s vendor ' +
+         'items for the tickers in the question are added, marked ' +
+         'unverified. The rules: use only these sources, cite every fact ' +
+         'as [n], at most 150 words, no investment advice.',
+     tag: 'Increment 3',
+     focus: ['PROMPT'],
+     flows: ['RR>PROMPT:sources [1]…[5]']},
+    {title: 'Generate: the G in RAG',
+     text: 'A LangChain chat model streams the answer from Qwen3 4B on the ' +
+         'GPU host through LiteLLM; one setting switches it to OpenAI, ' +
+         'Claude or Gemini. Langfuse can trace every call.',
+     tag: 'Increment 3',
+     flows: ['PROMPT>LLM:prompt', 'LLM>CHECK:tokens']},
+    {title: 'Check, then answer',
+     text: 'Citations that point to no source are removed; an answer that ' +
+         'gives investment advice is replaced by a refusal; from increment ' +
+         '4 Llama Guard checks the answer too. The trader sees the answer ' +
+         'with its numbered, clickable sources, and (increment 5) the ' +
+         'cache keeps it.',
+     tag: 'Increment 3 (+4, +5)',
+     flows: ['CHECK>ASK:answer + [n]', ['ASK>T:answer + sources',
+       'ASK>CACHE:store']]},
+    {title: 'The same corpus for agents',
+     text: 'The verify graph (increment 4) and the chat\'s Fact-Checker ' +
+         '(increment 5) search the same corpus through the MCP tool ' +
+         'search_news, filtered by ticker and date. Their results become ' +
+         'extra numbered sources of the answer.',
+     tag: 'Increments 4–5',
+     flows: ['MCP>RET:search_news', 'RET>CHR', 'CHR>RET:chunks']},
+    {title: 'Vectors move into Postgres',
+     text: 'make -C python migrate-vectors writes the vectors into ' +
+         'ai.chunk.embedding (pgvector, HNSW, cosine) and compares the ' +
+         'results with ChromaDB. Text and vectors now live in one database: ' +
+         'one service less, one backup, transactions. ChromaDB becomes ' +
+         'opt-in.',
+     tag: 'Increment 6',
+     flows: ['CHR>PGV:migrate', 'EMB>PGV:new vectors']},
+    {title: 'Hybrid retrieval',
+     text: 'One SQL statement runs a vector search and a Postgres ' +
+         'full-text search (tsvector) and fuses the two rankings with ' +
+         'reciprocal rank fusion (k = 60). Keywords catch exact tickers, ' +
+         'numbers and names that embeddings blur; vectors catch the ' +
+         'paraphrases.',
+     tag: 'Increment 6',
+     flows: ['RET>EMB:query vector', 'RET>PGV:vector + full text',
+       'PGV>RET:fused top 20', 'RET>RR']},
+    {title: 'Measured, not guessed',
+     text: 'make -C python eval-rag asks a fixed question set through the ' +
+         'same chain and scores RAGAS faithfulness (is every statement in ' +
+         'the sources?) and context precision (are the useful sources ' +
+         'first?), plus trusted citations and advice refusals. pgvector ' +
+         'had to score at least as well as ChromaDB before the switch.',
+     tag: 'Increments 3 and 6',
+     flows: ['EVAL>CHECK:faithfulness · precision']}
+  ],
+  notes: {
+    title: 'Frameworks and services used',
+    items: [
+      ['LangChain', 'Embeddings, VectorStore and chat model interfaces ' +
+          '(langchain-core, langchain-openai against the LiteLLM endpoint).'],
+      ['LiteLLM', 'One OpenAI-compatible gateway for the embedding and ' +
+          'chat models, with task aliases per hardware profile.'],
+      ['Ollama', 'Runs nomic-embed-text and Qwen3 4B on the GPU host.'],
+      ['ChromaDB + langchain-chroma', 'The vector store in increments 3 ' +
+          'to 5 (HNSW, cosine).'],
+      ['PostgreSQL + pgvector', 'Chunk text and metadata from increment 3; ' +
+          'vectors (HNSW) and full-text search (tsvector) from increment 6, ' +
+          'fused with reciprocal rank fusion.'],
+      ['Hugging Face TEI', 'Serves the bge-reranker-base cross-encoder on ' +
+          'CPU.'],
+      ['RedisVL', 'SemanticCache for answers (increment 5).'],
+      ['FastMCP', 'Serves search_news to the verify graph and the agents.'],
+      ['RAGAS metrics', 'Faithfulness and context precision in the RAG ' +
+          'eval.'],
+      ['Langfuse', 'Traces every embedding and model call (observability ' +
+          'profile).']
+    ]
+  }
+});
+</script>
+</body>
+</html>

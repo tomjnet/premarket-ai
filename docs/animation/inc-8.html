@@ -1,0 +1,194 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 8 (Kubernetes on Minikube). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 8 · Kubernetes (Minikube) · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 8,
+  title: 'Increment 8: Kubernetes on Minikube',
+  intro: 'The increment 6 stack on a single-node Kubernetes cluster, with ' +
+      'no code changes: the images Podman builds are loaded into Minikube, ' +
+      '.env and podman/config become ConfigMaps and a Secret, and every ' +
+      'compose service becomes a Deployment plus a Service with the same ' +
+      'name. Ollama still runs on the GPU host.',
+  width: 1400,
+  height: 760,
+  legend: {new: 'new in increment 8 (Kubernetes)',
+      old: 'increment 6 service, now a Deployment',
+      cloud: 'outside the cluster', actor: 'people'},
+  groups: [
+    {id: 'WSL', label: 'Ubuntu WSL · Podman', x: 20, y: 20, w: 250, h: 640},
+    {id: 'MK', label: 'Minikube node · namespace premarket', x: 290, y: 20,
+     w: 900, h: 720}
+  ],
+  nodes: [
+    // Ubuntu WSL: build, config, access.
+    {id: 'BUILD', x: 145, y: 95, kind: 'old',
+     lines: ['make -C python build', 'Podman images']},
+    {id: 'LOAD', x: 145, y: 215, kind: 'new',
+     lines: ['load-images', 'podman save →', 'minikube image load']},
+    {id: 'SRC', x: 145, y: 345, kind: 'old', shape: 'doc',
+     lines: ['.env', 'podman/config · sql']},
+    {id: 'CONF', x: 145, y: 465, kind: 'new',
+     lines: ['make … up', 'config.sh + kustomize']},
+    {id: 'PF', x: 145, y: 590, kind: 'new',
+     lines: ['kubectl port-forward', 'localhost:8080']},
+    {id: 'T', x: 145, y: 712, kind: 'actor',
+     lines: ['Trader / Analyst / Admin']},
+    // The cluster: Kubernetes objects.
+    {id: 'REG', x: 420, y: 95, kind: 'new',
+     lines: ['containerd', '7 app images']},
+    {id: 'CFG', x: 420, y: 345, kind: 'new', shape: 'doc',
+     lines: ['ConfigMaps + Secret', 'settings · premarket-env']},
+    {id: 'INIT', x: 420, y: 470, kind: 'new',
+     lines: ['ai-api-init', 'Job: migrations · roles']},
+    {id: 'EDGE', x: 420, y: 640, kind: 'old',
+     lines: ['edge · nginx', 'Deployment + Service']},
+    // The cluster: the increment 6 services.
+    {id: 'VS', x: 640, y: 95, kind: 'old', lines: ['vendor-sim']},
+    {id: 'PG', x: 640, y: 300, kind: 'old', shape: 'db',
+     lines: ['postgres + pgvector', 'PVC pgdata']},
+    {id: 'API', x: 640, y: 500, kind: 'old',
+     lines: ['ai-api', 'auth · news · chat']},
+    {id: 'WEB', x: 640, y: 665, kind: 'old',
+     lines: ['web-1 · web-2', '2 Deployments']},
+    {id: 'ING', x: 860, y: 95, kind: 'old',
+     lines: ['ingest · C++20', 'cron 05:30 ET']},
+    {id: 'SCH', x: 860, y: 230, kind: 'old',
+     lines: ['scheduler', 'NYSE calendar · SLA']},
+    {id: 'RD', x: 860, y: 500, kind: 'old', shape: 'db',
+     lines: ['redis', 'job stream · cache']},
+    {id: 'GW', x: 860, y: 660, kind: 'old',
+     lines: ['llm-gateway', 'LiteLLM']},
+    {id: 'SX', x: 1070, y: 95, kind: 'old', lines: ['searxng']},
+    {id: 'MCP', x: 1070, y: 230, kind: 'old',
+     lines: ['mcp-server', 'read-only tools']},
+    {id: 'WRK', x: 1070, y: 400, kind: 'old',
+     lines: ['ai-worker', 'verify graph · brief']},
+    {id: 'RR', x: 1070, y: 560, kind: 'old',
+     lines: ['reranker', 'TEI · PVC hf-models']},
+    // Outside the cluster.
+    {id: 'GPU', x: 1300, y: 660, kind: 'cloud',
+     lines: ['Ollama', 'on the GPU host']}
+  ],
+  edges: [
+    ['BUILD', 'LOAD', 'podman save'],
+    ['LOAD', 'REG', 'image load'],
+    ['REG', 'VS', 'run pods', {dashed: true}],
+    ['SRC', 'CONF'],
+    ['CONF', 'CFG', 'apply'],
+    ['CFG', 'INIT', 'env'],
+    ['CFG', 'EDGE', 'edge template', {via: [345, 540]}],
+    ['INIT', 'PG', 'migrations · roles'],
+    ['VS', 'ING', 'feed'],
+    ['ING', 'PG', 'ingest.*'],
+    ['SCH', 'PG', 'rules → AI → verify'],
+    ['SCH', 'RD', 'jobs'],
+    ['T', 'PF'],
+    ['PF', 'EDGE', 'port-forward'],
+    ['EDGE', 'WEB', '/'],
+    ['EDGE', 'API', '/api/'],
+    ['API', 'PG', '', {bidir: true}],
+    ['API', 'RD', 'session'],
+    ['API', 'RR', 'rerank', {via: [860, 600]}],
+    ['API', 'GW', 'LLM calls'],
+    ['API', 'MCP', 'agent tools', {dashed: true}],
+    ['RD', 'WRK', 'Redis Stream'],
+    ['WRK', 'MCP'],
+    ['WRK', 'GW'],
+    ['MCP', 'SX', 'web search'],
+    ['MCP', 'PG', 'read-only', {via: [860, 330]}],
+    ['GW', 'GPU', 'OLLAMA_BASE_URL']
+  ],
+  steps: [
+    {title: 'Same stack, new orchestrator',
+     text: 'Nothing in the code, the Containerfiles or compose.yaml ' +
+         'changes. What is new is how the containers are started, ' +
+         'configured, connected and kept alive: Kubernetes, on a ' +
+         'single-node Minikube cluster in Ubuntu WSL.',
+     focus: 'new'},
+    {title: 'Build once, load into the cluster',
+     text: 'make -C python build builds the images with Podman, as for ' +
+         'compose. load-images exports each one (podman save) and imports ' +
+         'it into Minikube\'s containerd. No registry: the manifests use ' +
+         'the same names with imagePullPolicy: Never.',
+     tag: 'make -C minikube-kubernetes load-images',
+     flows: ['BUILD>LOAD:7 images', 'LOAD>REG:image load']},
+    {title: '.env becomes a Secret and ConfigMaps',
+     text: 'scripts/config.sh splits .env: passwords, keys and tokens go ' +
+         'to the Secret premarket-env, the tunables to the ConfigMap ' +
+         'premarket-settings (compose\'s defaults, .env wins). kustomize ' +
+         'turns podman/config and sql into ConfigMaps, read in place.',
+     tag: 'make -C minikube-kubernetes up',
+     flows: ['SRC>CONF:.env + configs', 'CONF>CFG:apply']},
+    {title: 'The init Job runs first',
+     text: 'compose\'s one-shot ai-api-init becomes a Job: Alembic ' +
+         'migrations, the least-privilege roles and the demo users. The ' +
+         'other pods wait in an initContainer until their own database ' +
+         'role can log in, like compose\'s service_completed_successfully.',
+     flows: ['CFG>INIT:env', 'INIT>PG:migrations · roles',
+       'REG>VS:pods start']},
+    {title: 'Same names, found by kube-dns',
+     text: 'Each service is a Deployment plus a ClusterIP Service with the ' +
+         'compose name, so postgres, redis and http://llm-gateway:4000 ' +
+         'still work. Only nginx needs full names: its template gets ' +
+         'ai-api.premarket.svc.cluster.local when it is loaded.',
+     flows: ['CFG>EDGE:edge.conf (full names)']},
+    {title: 'Ingest at 05:30 ET',
+     text: 'The C++20 ingester\'s own cron loads the vendor feed into ' +
+         'ingest.* in the Postgres pod, whose data lives on the ' +
+         'PersistentVolumeClaim pgdata.',
+     clock: '05:30 ET',
+     flows: ['VS>ING:feed', 'ING>PG:ingest.*']},
+    {title: 'The scheduler runs the morning',
+     text: 'On NYSE trading days the scheduler starts rules → AI → verify. ' +
+         'Verify jobs go on the Redis Stream; ai-worker gathers evidence ' +
+         'through the MCP server and asks the LLM gateway, which calls ' +
+         'Ollama on the GPU host at OLLAMA_BASE_URL.',
+     clock: '06:00 ET',
+     flows: ['SCH>PG:rules → AI', 'SCH>RD:verify jobs', 'RD>WRK:job',
+       ['WRK>MCP:evidence', 'WRK>GW:prompt'], ['MCP>SX:search',
+       'GW>GPU:model call']]},
+    {title: 'A trader opens the site',
+     text: 'kubectl port-forward keeps http://localhost:8080 working, so ' +
+         'the login origin check passes. The edge is still the only entry: ' +
+         '/ goes to web-1 or web-2, /api/ to ai-api, which keeps the ' +
+         'session in Redis.',
+     clock: '07:30 ET',
+     flows: ['T>PF:https request', 'PF>EDGE:port-forward',
+       ['EDGE>WEB:/', 'EDGE>API:/api/auth/login'], 'API>RD:session',
+       'API>PG:brief + feed']},
+    {title: '"Ask the News" through the cluster',
+     text: 'ai-api retrieves passages from pgvector, the reranker orders ' +
+         'them, the chat agents call MCP tools, and the gateway streams ' +
+         'the answer from the GPU host back through the edge.',
+     flows: ['EDGE>API:/api/chat', 'API>PG:hybrid search',
+       ['API>RR:rerank', 'API>MCP:tools'], 'API>GW:prompt',
+       'GW>GPU:generate', 'API>EDGE:streamed answer', 'EDGE>PF',
+       'PF>T']},
+    {title: 'Kubernetes keeps it running',
+     text: 'Probes restart a pod whose health check fails, ' +
+         'kubectl scale deploy/ai-worker --replicas=3 replaces compose\'s ' +
+         '--scale, and after a rebuild, load-images plus restart rolls one ' +
+         'Deployment without touching the others.',
+     focus: ['WRK', 'API', 'EDGE', 'REG'],
+     flows: [['RD>WRK:job', 'LOAD>REG:new image']]},
+    {title: 'Done when: the same check as compose',
+     text: 'make -C minikube-kubernetes demo runs the whole day and ends ' +
+         'with smoke through the edge: 55/55 checks passed, exactly as ' +
+         'with Podman compose.',
+     focus: ['SCH', 'EDGE', 'API', 'WEB', 'PG'],
+     flows: ['EDGE>API:smoke', 'API>PG']}
+  ]
+});
+</script>
+</body>
+</html>

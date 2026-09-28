@@ -1,0 +1,128 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 3 (first AI). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 3 · First AI · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 3,
+  title: 'Increment 3: First AI',
+  intro: 'Local LLMs on the GPU host through a gateway (switchable to ' +
+      'OpenAI), LangChain, dedup L3 on embeddings, and a first RAG on ' +
+      'ChromaDB with a reranker.',
+  width: 1200,
+  height: 690,
+  groups: [
+    {id: 'GPU', label: 'GPU host', x: 930, y: 30, w: 250, h: 120}
+  ],
+  nodes: [
+    {id: 'RULES', x: 110, y: 80, kind: 'old',
+     lines: ['rules L0-L2', '(increment 2)']},
+    {id: 'ENR', x: 400, y: 80, kind: 'new',
+     lines: ['ai-api enrich', 'guard · L3 · extract · summary · sentiment']},
+    {id: 'GW', x: 780, y: 220, kind: 'new',
+     lines: ['llm-gateway (LiteLLM)', 'task aliases per HW_PROFILE']},
+    {id: 'OL', x: 1055, y: 98, kind: 'new',
+     lines: ['Ollama', 'Qwen3 4B · nomic-embed-text']},
+    {id: 'OAI', x: 1055, y: 250, kind: 'new',
+     lines: ['OpenAI API', '(cloud switch)']},
+    {id: 'RD', x: 130, y: 230, kind: 'old', shape: 'db',
+     lines: ['Redis', 'dedup index + L3 vectors']},
+    {id: 'LF', x: 540, y: 230, kind: 'new',
+     lines: ['Langfuse traces', '(observability)']},
+    {id: 'CORP', x: 130, y: 390, kind: 'new',
+     lines: ['EDGAR 8-K + EX-99.1', 'XBRL facts', 'Fed / SEC releases']},
+    {id: 'PG', x: 400, y: 390, kind: 'old', shape: 'db',
+     lines: ['PostgreSQL', 'ai.news_ai · ai.chunk']},
+    {id: 'CH', x: 580, y: 400, kind: 'new', shape: 'db',
+     lines: ['ChromaDB', 'trusted_corpus']},
+    {id: 'RR', x: 1040, y: 440, kind: 'new',
+     lines: ['reranker', 'bge-reranker-base (CPU)']},
+    {id: 'ASK', x: 800, y: 520, kind: 'new',
+     lines: ['ai-api /chat', 'retrieve → rerank → cite']},
+    {id: 'WEB', x: 500, y: 630, kind: 'new',
+     lines: ['web: summaries, sentiment', '+ Ask the News']},
+    {id: 'T', x: 800, y: 640, kind: 'actor', lines: ['Trader']}
+  ],
+  edges: [
+    ['RULES', 'ENR'],
+    ['ENR', 'RD'],
+    ['ENR', 'GW'],
+    ['GW', 'OL'],
+    ['GW', 'OAI', '', {dashed: true}],
+    ['ENR', 'PG'],
+    ['CORP', 'PG'],
+    ['PG', 'CH'],
+    ['ASK', 'CH'],
+    ['ASK', 'RR'],
+    ['ASK', 'GW'],
+    ['ENR', 'LF', 'traces', {dashed: true}],
+    ['ASK', 'LF', '', {dashed: true}],
+    ['PG', 'WEB'],
+    ['ASK', 'WEB'],
+    ['WEB', 'T']
+  ],
+  steps: [
+    {title: 'The first AI',
+     text: 'Items that passed the rules now get an AI summary and ' +
+         'sentiment, and traders can ask questions answered from trusted ' +
+         'sources with citations. Models run locally on the GPU host.',
+     focus: 'new'},
+    {title: 'One gateway for every model',
+     text: 'ai-api never calls a model directly. It asks llm-gateway ' +
+         '(LiteLLM) for a task alias such as main-gpu4gb; the gateway maps ' +
+         'it to Ollama on the GPU host, or to OpenAI with one config change.',
+     flows: [['GW>OL:local', 'GW>OAI:or cloud']]},
+    {title: 'Enrich: guard and embed',
+     text: 'ai-api enrich takes the items the rules kept. Llama Guard ' +
+         'screens the text, then each item is embedded with ' +
+         'nomic-embed-text.',
+     flows: ['RULES>ENR:clean items', 'ENR>GW:guard + embed', 'GW>OL',
+       'OL>GW:vector', 'GW>ENR:vector']},
+    {title: 'Dedup L3: paraphrases',
+     text: 'The vector is compared with recent ones in Redis. Cosine ' +
+         'similarity of 0.90 or more means the same story rewritten in ' +
+         'other words, which SimHash (L2) could not see.',
+     flows: ['ENR>RD:vector', 'RD>ENR:nearest']},
+    {title: 'Extract, summarise, score',
+     text: 'Qwen3 4B extracts companies and tickers, writes a short ' +
+         'summary and scores sentiment. The results go to ai.news_ai.',
+     flows: ['ENR>GW:prompt', 'GW>OL', 'OL>GW:JSON', 'GW>ENR:summary',
+       'ENR>PG:ai.news_ai']},
+    {title: 'Build the trusted corpus',
+     text: '12 months of EDGAR 8-K filings with their EX-99.1 press ' +
+         'releases, XBRL facts, and Fed / SEC releases are chunked into ' +
+         'ai.chunk and indexed in ChromaDB. Only these sources are trusted.',
+     flows: ['CORP>PG:chunks', 'PG>CH:embeddings']},
+    {title: 'Ask the News: retrieve',
+     text: 'A question goes to /chat. Hybrid retrieval pulls the top 20 ' +
+         'chunks from ChromaDB; the CPU cross-encoder reranker keeps the ' +
+         'best 5.',
+     flows: ['T>WEB:question', 'WEB>ASK', 'ASK>CH:top 20', 'CH>ASK',
+       'ASK>RR:rerank', 'RR>ASK:top 5']},
+    {title: 'Ask the News: answer with citations',
+     text: 'The 5 passages and the question go to the model. The answer ' +
+         'must cite them; the web shows each source next to the answer.',
+     flows: ['ASK>GW:question + sources', 'GW>OL', 'OL>GW', 'GW>ASK:answer',
+       'ASK>WEB:answer + citations', 'WEB>T']},
+    {title: 'Every LLM call is traced',
+     text: 'With the observability profile on, Langfuse records each call: ' +
+         'prompt, answer, model, latency and tokens, so a bad answer can be ' +
+         'traced back to its inputs.',
+     flows: [['ENR>LF:trace', 'ASK>LF:trace']]},
+    {title: 'Summaries on the feed',
+     text: 'The news feed now shows the summary and sentiment of each item ' +
+         'next to its rule badges.',
+     flows: ['PG>WEB:summary + sentiment', 'WEB>T']}
+  ]
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- premarket-ai: index of the animated data-flow pages. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data-flow animations · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main class="page">
+  <div class="kicker">premarket-ai</div>
+  <h1>How each delivery increment works</h1>
+  <p class="intro">One animated page per increment, built from its
+    Architecture diagram in README.md. Press Play, or step through with the
+    arrow keys: the moving dots show where the data goes and what each part
+    does with it.</p>
+  <div class="cards">
+    <a class="card" href="inc-0.html"><b>0 · Legacy baseline</b>
+      <span>C++11 ingest, PostgreSQL and a PDF on NFS: the "before".</span></a>
+    <a class="card" href="inc-1.html"><b>1 · Web instead of PDF</b>
+      <span>nginx edge, two UI replicas, FastAPI and Redis sessions.</span></a>
+    <a class="card" href="inc-2.html"><b>2 · Rule-based checks</b>
+      <span>Dedup, entity and source rules; the C++20 shadow ingester.</span></a>
+    <a class="card" href="inc-3.html"><b>3 · First AI</b>
+      <span>LLM gateway, summaries, dedup L3 and RAG with citations.</span></a>
+    <a class="card" href="inc-4.html"><b>4 · AI verification</b>
+      <span>LangGraph verdicts, MCP evidence and the review queue.</span></a>
+    <a class="card" href="inc-5.html"><b>5 · Agents and skills</b>
+      <span>The brief, a supervisor with specialists; the PDF retires.</span></a>
+    <a class="card" href="inc-6.html"><b>6 · Production</b>
+      <span>NYSE scheduler, pgvector, SLAs, metrics and the scorecard.</span></a>
+    <a class="card" href="inc-7.html"><b>7 · Enterprise cloud (theory)</b>
+      <span>Each lab part mapped to Azure, AWS and GCP services.</span></a>
+    <a class="card" href="inc-8.html"><b>8 · Kubernetes (Minikube)</b>
+      <span>The same images and configs as Deployments, a Job and
+        ConfigMaps on a single-node cluster.</span></a>
+  </div>
+  <h2>Concepts across increments</h2>
+  <div class="cards">
+    <a class="card" href="rag.html"><b>How RAG works (increments 3–6)</b>
+      <span>Indexing and query pipelines, the frameworks behind them, and
+        what each increment added: guards, cache, agents, hybrid
+        pgvector.</span></a>
+    <a class="card" href="llm.html"><b>Inside the models</b>
+      <span>How Qwen3, Llama Guard, the cloud models, the embedding model,
+        the reranker and FinBERT / DistilBERT work inside: tokens,
+        attention, decoding and pooling.</span></a>
+  </div>
+</main>
+</body>
+</html>

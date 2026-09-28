@@ -1,0 +1,119 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 5 (agents and skills). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 5 · Agents and skills · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 5,
+  title: 'Increment 5: Agents and Skills (PDF retired)',
+  intro: 'The briefing agent writes Today\'s brief from verified news only; ' +
+      'a supervisor and three specialists answer the chat with MCP tools ' +
+      'and skills. After a 2-week parallel run, the PDF is switched off.',
+  width: 1220,
+  height: 680,
+  nodes: [
+    {id: 'REP', x: 160, y: 80, kind: 'retired',
+     lines: ['legacy report → PDF']},
+    {id: 'PG', x: 160, y: 270, kind: 'old', shape: 'db',
+     lines: ['PostgreSQL', 'verdicts · ai.brief']},
+    {id: 'BRIEF', x: 160, y: 470, kind: 'new',
+     lines: ['ai-worker: briefing agent', 'code picks VERIFIED + watch items',
+       '→ Brief Writer overview → checks']},
+    {id: 'SEMC', x: 430, y: 110, kind: 'new', shape: 'db',
+     lines: ['Redis', 'semantic cache']},
+    {id: 'CHAT', x: 430, y: 280, kind: 'old', lines: ['ai-api /chat']},
+    {id: 'MEM', x: 400, y: 560, kind: 'new', shape: 'db',
+     lines: ['Memory: LangGraph store', 'watchlists']},
+    {id: 'SUP', x: 650, y: 280, kind: 'new',
+     lines: ['Supervisor', '(LangGraph)']},
+    {id: 'SK', x: 650, y: 470, kind: 'new',
+     lines: ['Agent Skills', 'SKILL.md · load_skill']},
+    {id: 'BW', x: 880, y: 150, kind: 'new', lines: ['Brief Writer']},
+    {id: 'MA', x: 880, y: 280, kind: 'new', lines: ['Market Analyst']},
+    {id: 'FC', x: 880, y: 410, kind: 'new', lines: ['Fact-Checker']},
+    {id: 'MCP', x: 1100, y: 280, kind: 'old',
+     lines: ['mcp-server', '+ list_news · get_brief']},
+    {id: 'WEB', x: 650, y: 620, kind: 'new',
+     lines: ['web: Today\'s brief (SSE) ·', 'My watchlist · agent steps']},
+    {id: 'T', x: 1000, y: 620, kind: 'actor', lines: ['Trader']}
+  ],
+  edges: [
+    ['PG', 'BRIEF', '', {bidir: true}],
+    ['CHAT', 'SEMC', '', {bidir: true}],
+    ['CHAT', 'SUP'],
+    ['SUP', 'FC'],
+    ['SUP', 'MA'],
+    ['SUP', 'BW'],
+    ['FC', 'MCP', '', {bidir: true}],
+    ['MA', 'MCP', '', {bidir: true}],
+    ['BW', 'MCP', '', {bidir: true}],
+    ['SK', 'FC', 'guides', {dashed: true}],
+    ['SK', 'BRIEF', 'guides', {dashed: true}],
+    ['MEM', 'SUP'],
+    ['MEM', 'WEB'],
+    ['PG', 'WEB'],
+    ['WEB', 'T'],
+    ['PG', 'REP', 'switched off', {dashed: true}]
+  ],
+  steps: [
+    {title: 'Agents, skills and the end of the PDF',
+     text: 'Two new jobs for the AI: write the pre-market brief, and answer ' +
+         'the chat with a team of agents. After two weeks of running next ' +
+         'to the brief, the PDF is switched off.',
+     focus: 'new'},
+    {title: 'The briefing agent reads verified news',
+     text: 'Plain code, not the model, picks the items: only VERIFIED news ' +
+         'plus the items worth watching. The model never decides what goes ' +
+         'into the brief.',
+     clock: '07:15 ET',
+     flows: ['PG>BRIEF:VERIFIED items']},
+    {title: 'Writing guided by a skill',
+     text: 'The Brief Writer skill (a SKILL.md loaded on demand) tells the ' +
+         'agent how to write the overview. Checks then make sure every ' +
+         'sentence points to a verified item. The brief is saved in ai.brief.',
+     clock: '07:15 ET',
+     flows: ['SK>BRIEF:SKILL.md', 'BRIEF>PG:ai.brief']},
+    {title: 'Chat: the semantic cache first',
+     text: 'A question similar enough to a recent one (cosine distance of ' +
+         '0.05 or less, within 15 minutes) is answered from the Redis ' +
+         'cache without any model call.',
+     flows: ['T>WEB:question', 'CHAT>SEMC:similar?', 'SEMC>CHAT:miss']},
+    {title: 'The supervisor routes',
+     text: 'On a cache miss, the LangGraph supervisor reads the user\'s ' +
+         'long-term memory (the watchlist) and hands the question to the ' +
+         'right specialist.',
+     flows: ['CHAT>SUP:question', 'MEM>SUP:watchlist',
+       ['SUP>FC', 'SUP>MA', 'SUP>BW']]},
+    {title: 'Specialists use MCP tools',
+     text: 'Fact-Checker, Market Analyst and Brief Writer call the MCP ' +
+         'server\'s read-only tools, now including list_news and ' +
+         'get_brief. At most 3 tool calls per answer keep it fast.',
+     flows: [['FC>MCP:tool call', 'MA>MCP:tool call', 'BW>MCP:tool call'],
+       ['MCP>FC', 'MCP>MA', 'MCP>BW']]},
+    {title: 'Skills guide the Fact-Checker',
+     text: 'Agent Skills are instructions the agent loads only when it ' +
+         'needs them (load_skill), so the prompt stays small.',
+     flows: ['SK>FC:load_skill']},
+    {title: 'Brief and watchlist on the website',
+     text: 'Today\'s brief streams to the browser (SSE). Traders keep their ' +
+         'own watchlist and can see each agent step behind a chat answer.',
+     flows: [['PG>WEB:brief', 'MEM>WEB:watchlist'], 'WEB>T']},
+    {title: 'The PDF is retired',
+     text: 'LEGACY_PDF_ENABLED=false: the legacy report runs but writes ' +
+         'nothing. The website is now the only way traders read the news. ' +
+         'Setting it back to true brings the PDF back for a comparison.',
+     focus: ['REP'],
+     flows: ['PG>REP:off']}
+  ]
+});
+</script>
+</body>
+</html>

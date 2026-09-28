@@ -1,0 +1,88 @@
+<!doctype html>
+<!-- premarket-ai: animated data flow of increment 0 (legacy baseline). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Increment 0 · Legacy baseline · premarket-ai</title>
+<link rel="stylesheet" href="anim.css">
+</head>
+<body>
+<main id="app"></main>
+<script src="anim.js"></script>
+<script>
+PremarketAnim.run({
+  inc: 0,
+  title: 'Increment 0: Legacy baseline',
+  intro: 'The "before": a synthetic vendor feed, a multithreaded C++11 ' +
+      'ingester, PostgreSQL, and a PDF on an NFS share. Nothing checks ' +
+      'whether a story is real.',
+  width: 1200,
+  height: 540,
+  legend: {new: 'part of the legacy system', actor: 'people'},
+  nodes: [
+    {id: 'VS', x: 140, y: 280, kind: 'new',
+     lines: ['vendor-sim', '100 synthetic items/day', '(real + fake + duplicates)']},
+    {id: 'CRON', x: 440, y: 100, kind: 'new',
+     lines: ['supercronic', '05:30 ET']},
+    {id: 'ING', x: 440, y: 280, kind: 'new',
+     lines: ['legacy ingest (C++11)', 'std::thread pool · libcurl · RapidJSON']},
+    {id: 'PG', x: 780, y: 280, kind: 'new', shape: 'db',
+     lines: ['PostgreSQL 17', 'legacy.vendor_news_raw', 'legacy.ingest_run']},
+    {id: 'REP', x: 780, y: 450, kind: 'new',
+     lines: ['legacy report (C++11)', 'libharu']},
+    {id: 'PDF', x: 1030, y: 450, kind: 'new', shape: 'doc',
+     lines: ['PDF on NFS volume']},
+    {id: 'T', x: 1080, y: 280, kind: 'actor', lines: ['Trader']}
+  ],
+  edges: [
+    ['CRON', 'ING'],
+    ['VS', 'ING', 'JSON feed'],
+    ['ING', 'PG', 'COPY (libpq)'],
+    ['PG', 'REP'],
+    ['REP', 'PDF'],
+    ['PDF', 'T']
+  ],
+  steps: [
+    {title: 'The legacy pipeline',
+     text: 'Five parts, one batch job per morning. The vendor is paid for ' +
+         '100 items a day, so it pads the feed with duplicates, stale ' +
+         'stories, fake news and even fake companies.',
+     focus: 'new'},
+    {title: 'Cron wakes the ingester',
+     text: 'At 05:30 New York time on weekdays, supercronic starts the ' +
+         'C++11 ingester inside its container. It knows nothing about NYSE ' +
+         'holidays, so it also runs when the market is closed.',
+     clock: '05:30 ET',
+     flows: ['CRON>ING:start']},
+    {title: 'Download the vendor feed',
+     text: 'libcurl fetches the JSON feed from vendor-sim: about 100 items, ' +
+         'a mix of real news, fakes and duplicates, all labelled ' +
+         '[SYNTHETIC].',
+     clock: '05:30 ET',
+     flows: ['VS>ING:JSON']},
+    {title: 'Parse and load',
+     text: 'A mutex/condition-variable queue feeds a std::thread pool; each ' +
+         'worker parses items with RapidJSON. The rows go into ' +
+         'legacy.vendor_news_raw with one COPY through libpq, and the run ' +
+         'is logged in legacy.ingest_run.',
+     clock: '05:31 ET',
+     flows: ['ING>PG:COPY rows']},
+    {title: 'Render the PDF',
+     text: 'As soon as the ingest succeeds, the same cron line runs the ' +
+         'report: it reads the stored rows and prints them with libharu ' +
+         'into a PDF on the NFS share. Everything the vendor sent is ' +
+         'printed, fakes included.',
+     clock: '05:32 ET',
+     flows: ['PG>REP:rows', 'REP>PDF:PDF']},
+    {title: 'The trader reads it',
+     text: 'Before the open, traders open the PDF. Duplicates, stale ' +
+         'stories and fake companies look exactly like real news. This is ' +
+         'the problem the next increments solve.',
+     clock: '08:30 ET',
+     flows: ['PDF>T:read']}
+  ]
+});
+</script>
+</body>
+</html>
