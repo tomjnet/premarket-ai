@@ -46,6 +46,8 @@ minikube-kubernetes/
 The project's WSL setup is assumed: `.wslconfig` with 16 GB (`scripts/windows/01_setup-wslconfig.ps1`), systemd, and rootless Podman (`scripts/wsl/02_setup-podman.sh`). No Docker.
 
 ```bash
+sudo apt install -y make curl git
+
 # kubectl (the latest stable release)
 curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
 sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
@@ -74,17 +76,46 @@ minikube config set rootless true
 minikube config set container-runtime containerd
 ```
 
-## 2. Start the cluster
+## 2. Get the code and prepare `.env`
+All commands run from the repo root in Ubuntu WSL (`~/src/premarket-ai`), never from `/mnt/c` or `/mnt/d`.
+```bash
+git clone https://github.com/tomjnet/premarket-ai.git ~/src/premarket-ai
+cd ~/src/premarket-ai
+git switch inc-8-minikube-kubernetes
+ls                                   # compose.yaml cpp docs minikube-kubernetes podman python scripts sql ui
+```
+Then create `.env`, the same file compose uses:
+```bash
+cp .env.example .env
+make -C python env                   # prints "generated REDIS_PASSWORD", "generated JWT_SECRET", ...
+scripts/wsl/03_check-ollama.sh       # prints the OLLAMA_BASE_URL to use (the GPU host's LAN address)
+```
+Put the printed address in `.env`, for example:
+```bash
+sed -i 's#^OLLAMA_BASE_URL=.*#OLLAMA_BASE_URL=http://10.0.0.156:11434#' .env
+grep -c . .env                       # well over 100 lines; 22 means the wrong branch
+```
+Two rules that `make -C minikube-kubernetes up` checks before it deploys anything:
+- **Every secret must be filled in.** Otherwise the error is `empty in .env: REDIS_PASSWORD ...`. Run `make -C python env` on this branch; older branches' `env` task doesn't generate secrets.
+- **`OLLAMA_BASE_URL` can't be `host.containers.internal`.** That name only exists in Podman; pods can't resolve it. Use the LAN address that `03_check-ollama.sh` prints. It's a DHCP address, so rerun the script if LLM calls stop working after a reboot.
+
+For the demo day, also set **`SEC_USER_AGENT`** (a name and a contact email, which SEC requires on every download). Without it, `corpus` stops the demo and the FAKE_COMPANY / FAKE_TICKER checks are skipped:
+```bash
+sed -i 's#^SEC_USER_AGENT=.*#SEC_USER_AGENT=Jane Doe jane@example.com#' .env
+```
+
+`.env` is read when `up` runs. After changing it later, run `make -C minikube-kubernetes up restart`.
+
+## 3. Start the cluster
 ```bash
 make -C minikube-kubernetes start      # minikube start --driver=podman --container-runtime=containerd --cpus=6 --memory=12g --disk-size=60g
 kubectl get nodes                      # minikube   Ready
 ```
 12 GB fits the stack (the reranker alone may use 4 GB, the worker 3 GB) and leaves about 4 GB for WSL itself. With the observability overlay as well, stop other containers first. For a smaller demo, use `make -C minikube-kubernetes start MEMORY=10g`.
 
-## 3. Build and load the images
+## 4. Build and load the images
 The images are the ones Podman compose uses:
 ```bash
-cp -n .env.example .env && make -C python env     # once, as for compose
 make -C python build                              # the images, in Podman
 make -C minikube-kubernetes load-images           # podman save | minikube image load, for all 7 app images
 ```
@@ -94,7 +125,7 @@ make -C python build && make -C minikube-kubernetes load-images && make -C minik
 ```
 Public images (pgvector, Redis, LiteLLM, text-embeddings-inference, SearXNG, nginx, Langfuse, ...) are pulled by the cluster, with the same pinned tags as `compose.yaml`.
 
-## 4. Run
+## 5. Run
 ```bash
 make -C minikube-kubernetes up         # config + apply base (+ chroma) + re-run ai-api-init, wait until ready
 make -C minikube-kubernetes ps         # pods, the init Job (Completed) and the volumes
@@ -123,7 +154,7 @@ The first `up` takes a while: it pulls the public images and downloads the reran
 
 **The vector store.** While `VECTOR_STORE=chroma` (the default), `up` also applies `chroma/`. After `make -C python migrate-vectors` sets `VECTOR_STORE=pgvector` in `.env`, it doesn't.
 
-## 5. Observability (optional)
+## 6. Observability (optional)
 ```bash
 make -C minikube-kubernetes obs-up     # Langfuse, OTel Collector, Prometheus, Grafana
 make -C minikube-kubernetes grafana    # http://localhost:3001  (admin / GRAFANA_ADMIN_PASSWORD)
@@ -132,7 +163,7 @@ make -C minikube-kubernetes obs-down   # remove it; the volumes are kept
 ```
 For metrics, set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` in `.env`. For traces, set `LANGFUSE_TRACING=true`. Then run `make -C minikube-kubernetes up`.
 
-## 6. Test (the "done when" check)
+## 7. Test (the "done when" check)
 ```bash
 make -C minikube-kubernetes up
 make -C minikube-kubernetes demo DATE=2026-09-25     # ends with `ai-api smoke` through the edge: must pass
@@ -142,7 +173,10 @@ kubectl kustomize --load-restrictor LoadRestrictionsNone minikube-kubernetes/bas
 Unit tests, lint and sanitizers are unchanged: they run in the Containerfile stages with `make -C python test lint sanitizers`.
 
 ## Troubleshooting
+- **`502 Bad Gateway`, pods stuck in `Init:0/1`, DNS `connection timed out`** (even a pod IP times out): the Minikube node image also starts a Docker daemon, which sets the node's iptables `FORWARD` policy to `DROP`, so pods can't reach each other. `make -C minikube-kubernetes node-net` allows the pod network (`10.244.0.0/16`); `start` and `up` run it for you. After a `minikube stop`/`start` done by hand, run `node-net` (or `up`) again.
 - **`ErrImageNeverPull`**: the image isn't in the node. Run `make -C minikube-kubernetes load-images`, then check `minikube image ls | grep premarket-ai`.
+- **`redis.exceptions.AuthenticationError` or `password authentication failed` after re-creating `.env`**: `make -C python env` generated new secrets, but pods that haven't restarted still use the old ones. Run `make -C minikube-kubernetes up restart`: `up` re-runs `ai-api-init`, which sets the database roles to the new passwords, and `restart` rolls every pod. Wait until it returns before running tasks.
+- **A namespace from an earlier try** (`kubectl get ns premarket`): its `pgdata` volume keeps the old `POSTGRES_PASSWORD`. `make -C minikube-kubernetes reset` starts clean.
 - **A pod stays in `Init:0/1`**: it waits for `ai-api-init`. Check with `kubectl -n premarket logs job/ai-api-init` (a wrong password in `.env`, or a `pgdata` volume created with another `POSTGRES_PASSWORD`: `make ... reset` starts clean).
 - **LLM calls fail**: the gateway calls `OLLAMA_BASE_URL` from `.env` (the GPU host's LAN address from `scripts/wsl/03_check-ollama.sh`). Test it from inside the cluster: `kubectl -n premarket exec deploy/llm-gateway -- python3 -c "import urllib.request,os;print(urllib.request.urlopen(os.environ['OLLAMA_BASE_URL']+'/api/tags').status)"`.
 - **OOMKilled / Pending pods**: give Minikube more memory (`minikube delete && make ... start MEMORY=14g`, within `.wslconfig`), or stop the observability overlay.

@@ -31,10 +31,15 @@ APPLY = $(KUBECTL) apply --server-side --force-conflicts -f -
 # ai-api ...` in python/Makefile) run in the scheduler pod: same image
 # base, same env.
 AI_API = $(K) exec deploy/scheduler -- ai-api
+# Waits until every Deployment has finished rolling out (old pods gone).
+# `wait --for=condition=available` is already true while an old pod still
+# serves, and `kubectl exec deploy/...` could then pick the old pod.
+ROLLOUT_WAIT = $(K) get deploy -o name \
+  | xargs -n1 $(K) rollout status --timeout=15m
 PSQL = $(K) exec -i deploy/postgres -- psql -U premarket -d premarket
 
 .DEFAULT_GOAL := help
-.PHONY: help start stop delete-cluster load-images config up obs-up \
+.PHONY: help start stop delete-cluster load-images config up obs-up node-net \
         obs-down down reset ps logs web grafana langfuse mcp psql demo \
         ingest rules registry enrich corpus reindex llm-status verify \
         brief scorecard smoke demo-open retention schedule-plan sla \
@@ -48,6 +53,18 @@ help: ## List the tasks
 start: ## Start Minikube (Podman driver, containerd), CPUS/MEMORY/DISK
 	$(MINIKUBE) start --driver=podman --container-runtime=containerd \
 	  --cpus=$(CPUS) --memory=$(MEMORY) --disk-size=$(DISK)
+	@$(MAKE) --no-print-directory node-net
+
+# The node image also starts a Docker daemon, which sets the legacy iptables
+# FORWARD policy to DROP; kube-proxy only accepts replies there, so every new
+# pod-to-pod connection (DNS, Services, pod IPs) is dropped. Allow the pod
+# network (10.244.0.0/16) only. Idempotent; the rule is lost on minikube
+# stop/start, so `start` and `up` apply it.
+POD_CIDR ?= 10.244.0.0/16
+node-net: ## Let pods reach each other (the node's Docker sets FORWARD DROP)
+	$(MINIKUBE) ssh -- 'for d in -s -d; do \
+	  sudo iptables-legacy -C FORWARD $$d $(POD_CIDR) -j ACCEPT 2>/dev/null \
+	  || sudo iptables-legacy -I FORWARD 1 $$d $(POD_CIDR) -j ACCEPT; done'
 
 stop: ## Stop Minikube (everything is kept)
 	$(MINIKUBE) stop
@@ -66,24 +83,23 @@ render: ## Print the manifests (base; + chroma while VECTOR_STORE=chroma)
 	@$(RENDER) $(HERE)/base
 	@$(if $(filter chroma,$(VECTOR_STORE)),echo ---; $(RENDER) $(HERE)/chroma)
 
-up: config ## Start everything (profile ai): re-runs ai-api-init, waits until ready
+up: config node-net ## Start everything (profile ai): re-runs ai-api-init, waits until ready
 	$(K) delete job ai-api-init --ignore-not-found
 	$(RENDER) $(HERE)/base | $(APPLY)
 	$(if $(filter chroma,$(VECTOR_STORE)),$(RENDER) $(HERE)/chroma | $(APPLY))
 	# The edge reads its template at start (config may have changed it).
 	$(K) rollout restart deploy/edge
 	$(K) wait --for=condition=complete job/ai-api-init --timeout=15m
-	$(K) wait --for=condition=available deploy --all --timeout=20m
+	$(ROLLOUT_WAIT)
 	@$(MAKE) --no-print-directory ps
 
 restart: ## Roll SVC=<name> (after load-images), or every Deployment (.env changed)
 	$(K) rollout restart deploy$(if $(SVC),/$(SVC))
-	$(if $(SVC),$(K) rollout status deploy/$(SVC) --timeout=10m,$(K) wait \
-	  --for=condition=available deploy --all --timeout=20m)
+	$(if $(SVC),$(K) rollout status deploy/$(SVC) --timeout=10m,$(ROLLOUT_WAIT))
 
 obs-up: config ## Start Langfuse, OTel Collector, Prometheus, Grafana
 	$(RENDER) $(HERE)/observability | $(APPLY)
-	$(K) wait --for=condition=available deploy --all --timeout=20m
+	$(ROLLOUT_WAIT)
 	@echo "Grafana:  make -C minikube-kubernetes grafana   (admin / GRAFANA_ADMIN_PASSWORD)"
 	@echo "Langfuse: make -C minikube-kubernetes langfuse  (LANGFUSE_INIT_USER_EMAIL)"
 

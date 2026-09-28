@@ -400,7 +400,7 @@ The first `up` takes 10–20 minutes (public images and the reranker model). The
 
 The one config adaptation: nginx re-resolves the edge's upstreams at runtime through its own `resolver`, which ignores DNS search domains. So when `podman/config/edge/templates/edge.conf.template` is loaded, its three `server` names (`web-1`, `web-2`, `ai-api`) become `<name>.premarket.svc.cluster.local`. The file in the repo is unchanged.
 
-**If it fails:** `ErrImageNeverPull` means the image isn't loaded: run `make -C minikube-kubernetes load-images`. A pod stuck in `Init:0/1` waits for `kubectl -n premarket logs job/ai-api-init`. `OOMKilled` or `Pending` pods need more memory (`minikube delete`, then `make -C minikube-kubernetes start MEMORY=14g`) or `obs-down`.
+**If it fails:** a `502 Bad Gateway` with pods stuck in `Init:0/1` means pods can't reach each other: the node's own Docker daemon sets the iptables `FORWARD` policy to `DROP`, and `make -C minikube-kubernetes node-net` allows the pod network (`start` and `up` already run it). `ErrImageNeverPull` means the image isn't loaded: run `make -C minikube-kubernetes load-images`. A pod stuck in `Init:0/1` waits for `kubectl -n premarket logs job/ai-api-init`. `OOMKilled` or `Pending` pods need more memory (`minikube delete`, then `make -C minikube-kubernetes start MEMORY=14g`) or `obs-down`.
 
 ### Test
 ```bash

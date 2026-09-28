@@ -81,6 +81,12 @@ if grep -q '^OLLAMA_BASE_URL=.*host\.containers\.internal' "$tmp/settings"; then
   exit 1
 fi
 
+# Not required to start, but the demo day needs it (SEC downloads).
+if ! grep -q '^SEC_USER_AGENT=.' "$tmp/settings"; then
+  echo "warning: SEC_USER_AGENT is empty: corpus and the FAKE_* checks need" \
+    "it (a name and contact email, e.g. SEC_USER_AGENT=Jane Doe jane@example.com)" >&2
+fi
+
 # The edge's site config, from the one compose uses.
 sed -E "s/^([[:space:]]*server[[:space:]]+)(web-1|web-2|ai-api):/\1\2.$ns.svc.cluster.local:/" \
   "$root/podman/config/edge/templates/edge.conf.template" > "$tmp/edge.conf.template"
