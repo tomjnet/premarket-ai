@@ -1,0 +1,123 @@
+# mcp-server | Python 3, FastMCP (MCP streamable HTTP), psycopg
+# Read-only MCP tools for the verify graph and the chat agents. Every
+# client needs MCP_SERVICE_TOKEN. compose publishes it on loopback; here:
+#   kubectl -n premarket port-forward svc/mcp-server 8765:8000
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-server
+  template:
+    metadata:
+      labels:
+        app: mcp-server
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-init
+          image: docker.io/pgvector/pgvector:0.8.0-pg17
+          command:
+            - bash
+            - -c
+            - |
+              until PGPASSWORD="$MCP_DB_PASSWORD" psql -h postgres -U premarket_mcp -d premarket -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for ai-api-init"; sleep 3
+              done
+              until (exec 3<>/dev/tcp/redis/6379) 2>/dev/null; do sleep 2; done
+          env:
+            - name: MCP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: MCP_DB_PASSWORD}
+          securityContext:
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: mcp-server
+          image: localhost/premarket-ai/mcp-server:dev
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          # HW_PROFILE, VECTOR_STORE, WEB_SEARCH_PER_MIN, PRICES_PER_MIN.
+          envFrom:
+            - configMapRef:
+                name: premarket-settings
+          env:
+            - name: TZ
+              value: UTC
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: premarket
+            - name: MCP_DB_USER
+              value: premarket_mcp
+            - name: MCP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: MCP_DB_PASSWORD}
+            - name: MCP_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: MCP_SERVICE_TOKEN}
+            - name: MCP_ALLOWED_HOSTS
+              value: mcp-server:8000,localhost:*,127.0.0.1:*
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: REDIS_PASSWORD}
+            - name: LLM_GATEWAY_KEY_RAW
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LLM_GATEWAY_KEY}
+            - name: LLM_GATEWAY_URL
+              value: http://llm-gateway:4000/v1
+            - name: LLM_GATEWAY_KEY
+              value: sk-$(LLM_GATEWAY_KEY_RAW)
+            - name: CHROMA_HOST
+              value: chroma
+            - name: CHROMA_PORT
+              value: "8000"
+            - name: SEARXNG_URL
+              value: http://searxng:8080
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            exec:
+              command: ["mcp-server", "health"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["mcp-server", "health"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests: {memory: 128Mi, cpu: 50m}
+            limits: {memory: 512Mi}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+spec:
+  selector:
+    app: mcp-server
+  ports:
+    - port: 8000
+      targetPort: 8000

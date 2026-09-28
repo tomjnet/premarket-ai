@@ -219,6 +219,11 @@ premarket-ai/
 │       ├── otel/config.yaml      # OpenTelemetry Collector: OTLP in, Prometheus exporter out
 │       ├── prometheus/           # scrape config (collector, scheduler)
 │       └── grafana/              # provisioning (data source, alert rules -> ai-api webhook) + the operations dashboard
+├── minikube-kubernetes/      # optional: the same images, configs and .env on Minikube (Kubernetes manifests, Makefile, install guide)
+│   ├── base/                 #   profile "ai": a Deployment/Job + Service (+ PVC) per service
+│   ├── chroma/               #   ChromaDB while VECTOR_STORE=chroma
+│   ├── observability/        #   Langfuse, OTel Collector, Prometheus, Grafana
+│   └── scripts/              #   .env -> ConfigMap + Secret; Podman images -> Minikube
 ├── scripts/                  # one-time setup for the GPU host and Ubuntu WSL
 └── docs/                     # project documents, the Google C++ Style Guide, benchmarks/ (models, RAG, legacy vs C++20 ingest, vector migration)
     └── enterprise/           # increment 7 (theory): reference architecture, Azure / AWS / GCP, service mapping, security, MLOps, build vs buy, AI glossary, AI vs ML engineer
@@ -237,6 +242,7 @@ Increment 3 and later need **the GPU host** with Ollama and the models. Incremen
 8. Increment 5: run `make -C python env` once more. It adds `LEGACY_PDF_ENABLED=false`, `BRIEF_MODEL`, and the chat agent and cache settings; nothing new to install. The brief is written by OpenAI when `OPENAI_API_KEY` is set (about a tenth of a cent per edition), else by the local model; `BRIEF_MODEL=` (empty) keeps it local.
 9. Increment 6: run `make -C python env` again. It adds `LEGACY_INGEST=false`, `RUN_MODE=demo`, `RETENTION_DAYS`, the SLA and scheduler settings, `VENDOR_CONTRACT_ITEMS`, the observability settings, and generates `ALERT_WEBHOOK_TOKEN` and `GRAFANA_ADMIN_PASSWORD`. Then, once: `make -C python up` (migrations 0006–0009: the views read the C++20 tables, the pgvector column) and `make -C python migrate-vectors` (re-embeds the corpus into pgvector, about 20 minutes on the GTX 1650, and sets `VECTOR_STORE=pgvector` in `.env`), then `make -C python up` again. A new install from `.env.example` starts on pgvector directly. For metrics, set `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` and run `make -C python obs-up`. For the unattended day, set `RUN_MODE=production` (the GPU host must be on from 05:00 to 09:35 ET).
 10. Increment 7: nothing to install or configure. The pages are plain Markdown with Mermaid diagrams, which GitHub renders.
+11. Optional, **Kubernetes**: kubectl and Minikube (rootless Podman driver), installed as shown under **Run on Minikube** below. Nothing else changes: the same images, configs and `.env`.
 
 The first `up` downloads the gateway (about 2 GB), ChromaDB, text-embeddings-inference and the reranker model (about 1 GB, into the `hf-models` volume). Increment 4 adds SearXNG (about 200 MB) and builds the worker image with CPU-only PyTorch (about 1.5 GB); the worker downloads FinBERT (about 440 MB) into the `ml-models` volume the first time it runs, and `ml-train` downloads DistilBERT (about 260 MB). The first `corpus` downloads about 600 documents from SEC and the Fed (about 20 minutes, most of it embedding 5,000 chunks on the GPU host).
 
@@ -333,6 +339,62 @@ make -C ui dev VITE_API_MODE=live         # UI dev server against the running st
 grep '^DEMO_USER_PASSWORD=' .env
 ```
 To change it, edit `DEMO_USER_PASSWORD` in `.env` and run `make -C python up`: every `up` resets the three users to that password. After 5 wrong passwords a username is locked for 15 minutes ("Too many attempts"); wait, or log in as another demo user meanwhile.
+
+### Run on Minikube (optional)
+The same stack also runs on a single-node **Kubernetes** cluster (Minikube, rootless Podman driver, containerd) instead of `podman compose`. It uses the **same images** (built by `make -C python build`, then loaded into the cluster), the **same config files** under `podman/config/` and `sql/`, and the **same `.env`**. No code, Containerfile or `compose.yaml` changes. The manifests, the scripts and a `Makefile` live in `minikube-kubernetes/`. Don't run compose and Minikube at the same time: together they need more memory than WSL has (`make -C python down` first).
+
+**Install (once, in Ubuntu WSL).** You need kubectl, Minikube, and cgroup v2 with the CPU and memory controllers delegated to your user (rootless Podman driver):
+```bash
+curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
+curl -LO https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64
+stat -fc %T /sys/fs/cgroup     # must print cgroup2fs
+cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers   # must list cpu and memory
+# if not: delegate them, then `wsl --shutdown` and reopen Ubuntu
+sudo mkdir -p /etc/systemd/system/user@.service.d
+printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+minikube config set driver podman && minikube config set rootless true && minikube config set container-runtime containerd
+```
+
+**`.env` for Kubernetes.** It's the same file, with two things to check. Run `make -C python env` on this branch so every secret is filled in. `OLLAMA_BASE_URL` must be the GPU host's LAN address that `scripts/wsl/03_check-ollama.sh` prints: pods can't resolve `host.containers.internal`, and `make -C minikube-kubernetes up` refuses to start with it.
+
+**Build, load and run:**
+```bash
+make -C minikube-kubernetes start          # minikube start --driver=podman --container-runtime=containerd --cpus=6 --memory=12g
+make -C python build                       # the images, as for compose
+make -C minikube-kubernetes load-images    # podman save | minikube image load (7 app images, no registry)
+make -C minikube-kubernetes up             # .env -> ConfigMap + Secret, apply, re-run the ai-api-init Job, wait until ready
+make -C minikube-kubernetes web            # kubectl port-forward: http://localhost:8080 (keep it running)
+make -C minikube-kubernetes demo           # the demo day, ending with the smoke check through the edge
+make -C minikube-kubernetes obs-up         # optional: Langfuse, OTel Collector, Prometheus, Grafana
+make -C minikube-kubernetes grafana        # http://localhost:3001 (port-forward); `langfuse` -> http://localhost:3000
+```
+The first `up` takes 10–20 minutes (public images and the reranker model). The demo logins are the same. `make -C minikube-kubernetes help` lists every task. `rules`, `enrich`, `verify`, `brief`, `smoke`, `sla`, `mcp-tools`, `psql`, `logs SVC=...` and the rest work as in `make -C python`. After rebuilding an image, run `load-images` and `restart SVC=<name>`. After changing `.env`, run `up restart`. `down` keeps the volumes; `reset` deletes the namespace and its data.
+
+| compose.yaml | Kubernetes (`minikube-kubernetes/`) |
+|---|---|
+| a service | a Deployment plus a ClusterIP Service with the **same name**, so every URL in the config still works |
+| profiles `ai` / `chroma` / `observability` | kustomize `base/` / `chroma/` (while `VECTOR_STORE=chroma`) / `observability/` |
+| `ai-api-init` (one-shot) | Job `ai-api-init`; the pods that waited for it wait in an initContainer until their DB role can log in |
+| `depends_on`, `healthcheck` | initContainers; readiness, liveness and startup probes |
+| `.env`, `${VAR:-default}` | Secret `premarket-env` + ConfigMap `premarket-settings` (`settings.env` defaults, `.env` wins) |
+| config files mounted read-only | ConfigMaps generated from `podman/config/*` and `sql/*.sql`, read in place |
+| named volumes, `tmpfs`, `mem_limit` | PersistentVolumeClaims, `emptyDir` (Memory), `resources.limits` |
+| `read_only`, `cap_drop: ALL`, `no-new-privileges` | `securityContext`: `readOnlyRootFilesystem`, `drop: [ALL]`, `allowPrivilegeEscalation: false` |
+| published port `127.0.0.1:8080` (edge) | `kubectl port-forward svc/edge 8080:8080` |
+| `podman compose run ai-api-init ai-api <cmd>` | `kubectl exec deploy/scheduler -- ai-api <cmd>` (same image base, same database-owner env) |
+| `--scale ai-worker=3` | `kubectl -n premarket scale deploy/ai-worker --replicas=3` |
+
+The one config adaptation: nginx re-resolves the edge's upstreams at runtime through its own `resolver`, which ignores DNS search domains. So when `podman/config/edge/templates/edge.conf.template` is loaded, its three `server` names become `web-1` / `web-2` / `ai-api.premarket.svc.cluster.local`. The file in the repo is unchanged.
+
+**Done when** (Kubernetes): the Minikube stack passes the same check as compose.
+1. `make -C minikube-kubernetes up` ends with every Deployment available and the `ai-api-init` Job `Complete`.
+2. `make -C minikube-kubernetes demo DATE=2026-09-25` ends with **`55/55 checks passed`** from `smoke`, run through the edge (`http://edge:8080`).
+3. With `make -C minikube-kubernetes web` running, `curl -s http://localhost:8080/edge-health` prints `ok`, and the three demo logins work in the browser.
+4. `kubectl kustomize --load-restrictor LoadRestrictionsNone minikube-kubernetes/base | kubectl apply --dry-run=server -f -` passes.
+
+**If it fails:** `ErrImageNeverPull` means the image isn't loaded: run `make -C minikube-kubernetes load-images`. A pod stuck in `Init:0/1` waits for `kubectl -n premarket logs job/ai-api-init`. `OOMKilled` or `Pending` pods need more memory (`minikube delete`, then `make -C minikube-kubernetes start MEMORY=14g`) or `obs-down`.
 
 ### Test
 ```bash
@@ -686,6 +748,82 @@ flowchart LR
   LAB -.-> KEEP -.-> ENT
 ```
 
+### Kubernetes: the same stack on Minikube (optional)
+The same architecture as increment 6, orchestrated by Kubernetes instead of Podman compose. The images are the ones Podman builds. The config files and `.env` become ConfigMaps and a Secret. Each compose service becomes a Deployment plus a Service with the same name, and the one-shot init becomes a Job. The edge is still the only entry, and Ollama still runs on the GPU host, outside the cluster.
+
+```mermaid
+flowchart LR
+  classDef k8s fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+  classDef data fill:#fef3c7,stroke:#d97706,color:#78350f
+  classDef cfg fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+  classDef ext fill:#f3f4f6,stroke:#9ca3af,color:#374151
+  classDef opt fill:#ffffff,stroke:#9ca3af,color:#374151,stroke-dasharray: 5 5
+
+  T(["Trader / Analyst / Admin<br/>browser"]):::ext
+  GPU["Ollama<br/>on the GPU host"]:::ext
+
+  subgraph WSL["Ubuntu WSL"]
+    BUILD["Podman<br/>make -C python build"]:::ext
+    SRC[".env · podman/config · sql"]:::ext
+    PF["kubectl port-forward<br/>localhost:8080"]:::ext
+
+    subgraph MK["Minikube node · Podman driver · containerd"]
+      subgraph NS["namespace premarket"]
+        CFG["ConfigMaps + Secret<br/>premarket-settings · premarket-env<br/>edge · litellm · searxng · sql"]:::cfg
+        EDGE["edge · nginx<br/>rate limits · headers"]:::k8s
+        W1["web-1"]:::k8s
+        W2["web-2"]:::k8s
+        API["ai-api<br/>auth · news · chat agents"]:::k8s
+        INIT["ai-api-init<br/>Job: migrations · roles"]:::cfg
+        WRK["ai-worker<br/>verify graph · brief"]:::k8s
+        MCP["mcp-server<br/>read-only tools"]:::k8s
+        SX["searxng"]:::k8s
+        GW["llm-gateway<br/>LiteLLM"]:::k8s
+        RR["reranker<br/>TEI · PVC hf-models"]:::k8s
+        SCH["scheduler<br/>NYSE calendar · SLA"]:::k8s
+        ING["ingest · C++20<br/>cron 05:30 ET"]:::k8s
+        VS["vendor-sim<br/>PVC vendor-data"]:::k8s
+        PG[("postgres + pgvector<br/>PVC pgdata")]:::data
+        RD[("redis<br/>sessions · job stream · cache")]:::data
+        CH[("chroma<br/>while VECTOR_STORE=chroma")]:::opt
+        subgraph OBS["overlay observability · optional"]
+          OT["otel-collector"]:::opt
+          PR["prometheus"]:::opt
+          GR["grafana"]:::opt
+          LF["langfuse"]:::opt
+        end
+      end
+    end
+  end
+
+  T --> PF --> EDGE
+  EDGE -- "/" --> W1 & W2
+  EDGE -- "/api/" --> API
+  API --> PG & RD & RR & MCP & GW
+  API -.-> CH
+  RD -- "Redis Stream jobs" --> WRK
+  WRK --> MCP & GW & PG
+  MCP --> SX & PG
+  SCH -- "ai-api commands" --> PG
+  SCH --> RD
+  INIT --> PG
+  VS --> ING --> PG
+  GW -- "OLLAMA_BASE_URL" --> GPU
+  BUILD -- "podman save → minikube image load" --> MK
+  SRC -- "config.sh · kustomize" --> CFG
+  API -. metrics .-> OT --> PR --> GR
+  SCH -. metrics .-> PR
+  GR -. "alert webhook" .-> API
+  API -. traces .-> LF
+```
+
+| In the diagram | Kubernetes objects |
+|---|---|
+| blue boxes | a Deployment plus a ClusterIP Service each (ingest and ai-worker have no Service) |
+| yellow | stateful: Postgres on a PersistentVolumeClaim, Redis in memory (`emptyDir`) |
+| purple | the `ai-api-init` Job, and the ConfigMaps and Secret made from `.env`, `podman/config/` and `sql/` |
+| dashed | optional: ChromaDB while `VECTOR_STORE=chroma`, and the observability overlay (`make -C minikube-kubernetes obs-up`) |
+
 ## Tech stack
 | Area | Technologies |
 |---|---|
@@ -699,6 +837,7 @@ flowchart LR
 | Observability | Langfuse, OpenTelemetry (GenAI semantic conventions), Prometheus, Grafana |
 | Operations | APScheduler + exchange_calendars (NYSE), gitleaks, Renovate |
 | Runtime | Podman (rootless) in Ubuntu 24.04 on WSL2 · Ollama on a host with an NVIDIA GPU |
+| Kubernetes (optional) | Minikube (rootless Podman driver, containerd), kubectl, kustomize: Deployments, Services, a Job, ConfigMaps, a Secret, PersistentVolumeClaims |
 
 ## Full setup (including the GPU host, needed from increment 3)
 The setup is one-time and scripted:

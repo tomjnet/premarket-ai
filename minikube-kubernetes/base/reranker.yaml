@@ -1,0 +1,80 @@
+# reranker | Hugging Face text-embeddings-inference (CPU), bge-reranker
+# Cross-encoder reranker that orders the RAG passages for the LLM. The
+# model is downloaded into the hf-models volume on the first start.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-models
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reranker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: reranker
+  template:
+    metadata:
+      labels:
+        app: reranker
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: reranker
+          image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4
+          # A small batch budget keeps the warm-up within the memory limit.
+          args: ["--model-id", "$(RERANKER_MODEL)", "--max-client-batch-size", "32", "--max-batch-tokens", "2048", "--auto-truncate", "--hostname", "0.0.0.0", "--port", "8080"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RERANKER_MODEL
+              valueFrom:
+                configMapKeyRef: {name: premarket-settings, key: RERANKER_MODEL}
+            - name: RAYON_NUM_THREADS
+              valueFrom:
+                configMapKeyRef: {name: premarket-settings, key: RERANKER_THREADS}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: hf-models
+              mountPath: /data
+          # The first start downloads the model (about 1 GB).
+          startupProbe:
+            httpGet: {path: /health, port: 8080}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 90
+          readinessProbe:
+            httpGet: {path: /health, port: 8080}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests: {memory: 1Gi, cpu: 250m}
+            # compose RERANKER_MEM (4g); raise it for bge-reranker-v2-m3.
+            limits: {memory: 4Gi}
+      volumes:
+        - name: hf-models
+          persistentVolumeClaim:
+            claimName: hf-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reranker
+spec:
+  selector:
+    app: reranker
+  ports:
+    - port: 8080
+      targetPort: 8080

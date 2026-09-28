@@ -1,0 +1,75 @@
+# ingest | C++20, Abseil, simdjson, lock-free queue, libpq, cron
+# Modern low-latency ingester: vendor feed -> Postgres schema `ingest`
+# (supercronic, weekdays 05:30 ET). `make -C minikube-kubernetes ingest`
+# runs it by hand.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingest
+  template:
+    metadata:
+      labels:
+        app: ingest
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      initContainers:
+        # compose: depends_on postgres and vendor-sim healthy.
+        - name: wait-deps
+          image: docker.io/pgvector/pgvector:0.8.0-pg17
+          command:
+            - bash
+            - -c
+            - |
+              until pg_isready -q -h postgres -U premarket; do sleep 2; done
+              until (exec 3<>/dev/tcp/vendor-sim/8080) 2>/dev/null; do sleep 2; done
+          securityContext:
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: ingest
+          image: localhost/premarket-ai/ingest:dev
+          imagePullPolicy: Never
+          # INGEST_WORKERS, INGEST_QUEUE_CAPACITY, INGEST_DEDUP_WINDOW_DAYS,
+          # INGEST_CPU_AFFINITY.
+          envFrom:
+            - configMapRef:
+                name: premarket-settings
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: premarket
+            - name: PGUSER
+              value: premarket
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: POSTGRES_PASSWORD}
+            - name: TZ
+              value: America/New_York
+            - name: VENDOR_FEED_URL
+              value: http://vendor-sim:8080/feed
+          volumeMounts:
+            - name: ingest-config
+              mountPath: /etc/premarket/crontab
+              subPath: crontab
+              readOnly: true
+            - name: ingest-config
+              mountPath: /etc/premarket/ingest-schema.sql
+              subPath: ingest-schema.sql
+              readOnly: true
+          resources:
+            requests: {memory: 64Mi, cpu: 50m}
+      volumes:
+        - name: ingest-config
+          configMap:
+            name: ingest-config

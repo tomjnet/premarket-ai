@@ -1,0 +1,72 @@
+# vendor-sim | Python 3, FastAPI, Uvicorn
+# Simulated news vendor: serves the daily feed and its ground-truth labels.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vendor-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vendor-sim
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vendor-sim
+  template:
+    metadata:
+      labels:
+        app: vendor-sim
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: vendor-sim
+          image: localhost/premarket-ai/vendor-sim:dev
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          # VENDOR_SEED, VENDOR_MIX, LAB_UNIVERSE_SIZE.
+          envFrom:
+            - configMapRef:
+                name: premarket-settings
+          volumeMounts:
+            # labels.jsonl per day (ground truth for the eval harness).
+            - name: vendor-data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["vendor-sim", "health"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["vendor-sim", "health"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            requests: {memory: 128Mi, cpu: 50m}
+      volumes:
+        - name: vendor-data
+          persistentVolumeClaim:
+            claimName: vendor-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vendor-sim
+spec:
+  selector:
+    app: vendor-sim
+  ports:
+    - port: 8080
+      targetPort: 8080

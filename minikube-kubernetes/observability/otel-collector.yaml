@@ -1,0 +1,58 @@
+# otel-collector | OpenTelemetry Collector (contrib)
+# Receives OTLP metrics from the Python services (set
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 in .env) and
+# exposes them to Prometheus on :8889.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: otel-collector
+          image: docker.io/otel/opentelemetry-collector-contrib:0.160.0
+          args: ["--config=/etc/otelcol/config.yaml"]
+          ports:
+            - {name: otlp-http, containerPort: 4318}
+            - {name: prometheus, containerPort: 8889}
+            - {name: health, containerPort: 13133}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet: {path: /, port: 13133}
+            periodSeconds: 10
+          resources:
+            requests: {memory: 64Mi, cpu: 50m}
+            limits: {memory: 256Mi}
+      volumes:
+        - name: config
+          configMap:
+            name: otel-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - {name: otlp-http, port: 4318, targetPort: 4318}
+    - {name: prometheus, port: 8889, targetPort: 8889}

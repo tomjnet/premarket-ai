@@ -1,0 +1,43 @@
+# The compose profile `observability`: Langfuse (traces of every LLM call)
+# and OpenTelemetry Collector -> Prometheus -> Grafana (dashboard, alerts to
+# ai-api's banner). Heavy, so it is applied on its own:
+#   make -C minikube-kubernetes obs-up
+# Configs are read in place from podman/config (render with
+# --load-restrictor LoadRestrictionsNone).
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: premarket
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: premarket-ai
+    includeSelectors: false
+    includeTemplates: true
+
+resources:
+  - langfuse.yaml
+  - otel-collector.yaml
+  - prometheus.yaml
+  - grafana.yaml
+
+configMapGenerator:
+  - name: otel-config
+    files:
+      - ../../podman/config/otel/config.yaml
+  - name: prometheus-config
+    files:
+      - ../../podman/config/prometheus/prometheus.yml
+  - name: grafana-datasources
+    files:
+      - ../../podman/config/grafana/provisioning/datasources/prometheus.yaml
+  - name: grafana-dashboard-providers
+    files:
+      - ../../podman/config/grafana/provisioning/dashboards/premarket.yaml
+  - name: grafana-alerting
+    files:
+      - ../../podman/config/grafana/provisioning/alerting/premarket.yaml
+  - name: grafana-dashboards
+    files:
+      - ../../podman/config/grafana/dashboards/premarket-operations.json

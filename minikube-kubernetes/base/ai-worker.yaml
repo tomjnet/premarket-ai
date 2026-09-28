@@ -1,0 +1,139 @@
+# ai-worker | Python 3, taskiq on Redis Streams, LangGraph, PyTorch CPU
+# Background worker: news verification graph and the pre-market brief.
+# compose's `--scale ai-worker=3` becomes:
+#   kubectl -n premarket scale deploy/ai-worker --replicas=3
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ml-models
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-worker
+  template:
+    metadata:
+      labels:
+        app: ai-worker
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # Lets taskiq finish the running jobs (--shutdown-timeout 30).
+      terminationGracePeriodSeconds: 45
+      initContainers:
+        # compose: postgres, redis, llm-gateway and mcp-server healthy,
+        # ai-api-init completed.
+        - name: wait-init
+          image: docker.io/pgvector/pgvector:0.8.0-pg17
+          command:
+            - bash
+            - -c
+            - |
+              until PGPASSWORD="$WORKER_DB_PASSWORD" psql -h postgres -U premarket_worker -d premarket -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for ai-api-init"; sleep 3
+              done
+              for hp in redis/6379 llm-gateway/4000 mcp-server/8000; do
+                until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do echo "waiting for $hp"; sleep 3; done
+              done
+          env:
+            - name: WORKER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: WORKER_DB_PASSWORD}
+          securityContext:
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: ai-worker
+          image: localhost/premarket-ai/ai-api:worker
+          imagePullPolicy: Never
+          command: ["taskiq", "worker", "ai_api.worker.app:build_broker", "--workers", "1", "--max-async-tasks", "$(WORKER_CONCURRENCY)", "--ack-type", "when_executed", "--shutdown-timeout", "30"]
+          # HITL_CONFIDENCE_MIN, JUDGE_CLOUD_MODEL, LLM_MONTHLY_BUDGET_USD,
+          # GUARD_NEWS_REVIEW, ML_BASELINE, BRIEF_MODEL, WORKER_CONCURRENCY
+          # and the x-ai-env tunables.
+          envFrom:
+            - configMapRef:
+                name: premarket-settings
+          env:
+            - name: TZ
+              value: UTC
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: premarket
+            - name: WORKER_DB_USER
+              value: premarket_worker
+            - name: WORKER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: WORKER_DB_PASSWORD}
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: REDIS_PASSWORD}
+            - name: MCP_URL
+              value: http://mcp-server:8000/mcp
+            - name: MCP_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: MCP_SERVICE_TOKEN}
+            - name: ML_MODEL_DIR
+              value: /models
+            # x-ai-env
+            - name: LLM_GATEWAY_KEY_RAW
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LLM_GATEWAY_KEY}
+            - name: LLM_GATEWAY_URL
+              value: http://llm-gateway:4000/v1
+            - name: LLM_GATEWAY_KEY
+              value: sk-$(LLM_GATEWAY_KEY_RAW)
+            - name: CHROMA_HOST
+              value: chroma
+            - name: CHROMA_PORT
+              value: "8000"
+            - name: RERANKER_URL
+              value: http://reranker:8080
+            - name: LANGFUSE_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_KEY_ID, optional: true}
+            - name: LANGFUSE_SECRET
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_SECRET, optional: true}
+            - name: LANGFUSE_HOST
+              value: http://langfuse-web:3000
+            - name: LANGFUSE_PUBLIC_KEY
+              value: pk-lf-$(LANGFUSE_KEY_ID)
+            - name: LANGFUSE_SECRET_KEY
+              value: sk-lf-$(LANGFUSE_SECRET)
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            # FinBERT's download cache and the trained DistilBERT.
+            - name: ml-models
+              mountPath: /models
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests: {memory: 512Mi, cpu: 250m}
+            # compose WORKER_MEM (3g).
+            limits: {memory: 3Gi}
+      volumes:
+        - name: ml-models
+          persistentVolumeClaim:
+            claimName: ml-models
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}

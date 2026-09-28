@@ -1,0 +1,67 @@
+# chroma | ChromaDB 1.5
+# Vector store for RAG (an index only: `ai-api reindex` rebuilds it from
+# ai.chunk).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chromadata
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chroma
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: chroma
+  template:
+    metadata:
+      labels:
+        app: chroma
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: chroma
+          image: docker.io/chromadb/chroma:1.5.9
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ANONYMIZED_TELEMETRY
+              value: "False"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: chromadata
+              mountPath: /data
+          readinessProbe:
+            tcpSocket: {port: 8000}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests: {memory: 256Mi, cpu: 50m}
+            limits: {memory: 1Gi}
+      volumes:
+        - name: chromadata
+          persistentVolumeClaim:
+            claimName: chromadata
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chroma
+spec:
+  selector:
+    app: chroma
+  ports:
+    - port: 8000
+      targetPort: 8000

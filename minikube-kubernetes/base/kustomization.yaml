@@ -1,0 +1,66 @@
+# premarket-ai on Minikube: the compose profile `ai` as Kubernetes objects.
+# Render with (the config files live outside this folder):
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone minikube-kubernetes/base
+# `make -C minikube-kubernetes up` does that and applies it.
+#
+# Not here (created by scripts/config.sh from .env, before this is applied):
+#   configmap premarket-settings  tunables (compose ${VAR:-default} values)
+#   secret    premarket-env       passwords, keys, tokens
+#   configmap edge-templates      podman/config/edge/templates with the
+#                                 upstream names made fully qualified
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: premarket
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: premarket-ai
+    includeSelectors: false
+    includeTemplates: true
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - vendor-sim.yaml
+  - ingest.yaml
+  - redis.yaml
+  - ai-api-init-job.yaml
+  - ai-api.yaml
+  - llm-gateway.yaml
+  - reranker.yaml
+  - searxng.yaml
+  - mcp-server.yaml
+  - ai-worker.yaml
+  - scheduler.yaml
+  - web.yaml
+  - edge.yaml
+
+# The same files compose mounts, read in place (nothing is copied).
+configMapGenerator:
+  - name: sql-init
+    files:
+      - ../../sql/01_legacy_schema.sql
+      - ../../sql/02_legacy_seed.sql
+      - ../../sql/03_ingest_schema.sql
+  - name: ingest-config
+    files:
+      - ../../podman/config/ingest/crontab
+      - ingest-schema.sql=../../sql/03_ingest_schema.sql
+  - name: litellm-config
+    files:
+      - ../../podman/config/litellm/config.yaml
+  - name: searxng-config
+    files:
+      - ../../podman/config/searxng/settings.yml
+  - name: web-config
+    files:
+      - ../../podman/config/web/default.conf
+  - name: edge-nginx
+    files:
+      - ../../podman/config/edge/nginx.conf
+  - name: edge-snippets
+    files:
+      - ../../podman/config/edge/snippets/proxy.conf
+      - ../../podman/config/edge/snippets/security-headers.conf

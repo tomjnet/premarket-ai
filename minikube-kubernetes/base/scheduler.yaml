@@ -1,0 +1,137 @@
+# scheduler | Python 3, APScheduler, exchange_calendars, Prometheus
+# Runs the AI side's day on the NYSE calendar, SLA checks and retention.
+# It has the database owner's batch env (compose x-owner-jobs-env), so the
+# Makefile of this folder runs `ai-api rules|enrich|verify|brief|smoke...`
+# in it, where `make -C python` used `podman compose run ai-api-init`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scheduler
+  template:
+    metadata:
+      labels:
+        app: scheduler
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      initContainers:
+        # compose: postgres and redis healthy, ai-api-init completed.
+        - name: wait-init
+          image: docker.io/pgvector/pgvector:0.8.0-pg17
+          command:
+            - bash
+            - -c
+            - |
+              until PGPASSWORD="$AI_DB_PASSWORD" psql -h postgres -U premarket_ai -d premarket -tAc 'SELECT 1' >/dev/null 2>&1; do
+                echo "waiting for ai-api-init"; sleep 3
+              done
+              until (exec 3<>/dev/tcp/redis/6379) 2>/dev/null; do sleep 2; done
+          env:
+            - name: AI_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: AI_DB_PASSWORD}
+          securityContext:
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: scheduler
+          image: localhost/premarket-ai/scheduler:dev
+          imagePullPolicy: Never
+          ports:
+            - name: metrics
+              containerPort: 9464
+          envFrom:
+            - configMapRef:
+                name: premarket-settings
+          env:
+            # x-owner-jobs-env: the database owner, Redis, ai-env.
+            - name: TZ
+              value: UTC
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: premarket
+            - name: PGUSER
+              value: premarket
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: POSTGRES_PASSWORD}
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: REDIS_PASSWORD}
+            - name: LLM_GATEWAY_KEY_RAW
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LLM_GATEWAY_KEY}
+            - name: LLM_GATEWAY_URL
+              value: http://llm-gateway:4000/v1
+            - name: LLM_GATEWAY_KEY
+              value: sk-$(LLM_GATEWAY_KEY_RAW)
+            - name: CHROMA_HOST
+              value: chroma
+            - name: CHROMA_PORT
+              value: "8000"
+            - name: RERANKER_URL
+              value: http://reranker:8080
+            - name: LANGFUSE_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_KEY_ID, optional: true}
+            - name: LANGFUSE_SECRET
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_SECRET, optional: true}
+            - name: LANGFUSE_HOST
+              value: http://langfuse-web:3000
+            - name: LANGFUSE_PUBLIC_KEY
+              value: pk-lf-$(LANGFUSE_KEY_ID)
+            - name: LANGFUSE_SECRET_KEY
+              value: sk-lf-$(LANGFUSE_SECRET)
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            exec:
+              command: ["scheduler", "health"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: ["scheduler", "health"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests: {memory: 256Mi, cpu: 100m}
+            # compose SCHEDULER_MEM (1536m): the AI step runs in a
+            # subprocess of this container.
+            limits: {memory: 1536Mi}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+---
+# Metrics on :9464 for Prometheus (observability overlay).
+apiVersion: v1
+kind: Service
+metadata:
+  name: scheduler
+spec:
+  selector:
+    app: scheduler
+  ports:
+    - name: metrics
+      port: 9464
+      targetPort: 9464

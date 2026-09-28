@@ -1,0 +1,95 @@
+# edge | nginx (unprivileged)
+# Reverse proxy, the only entry: rate limits, security headers, JSON errors,
+# the load balancer for web-1/web-2 and the /api/ route to ai-api.
+#
+# The site config is podman/config/edge/templates/edge.conf.template.
+# scripts/config.sh loads it into the ConfigMap edge-templates with the
+# upstream names made fully qualified (web-1 ->
+# web-1.premarket.svc.cluster.local): nginx's runtime resolver doesn't use
+# the DNS search domains, and kube-dns needs the full name.
+#
+# Reach it from WSL / Windows with (make -C minikube-kubernetes web):
+#   kubectl -n premarket port-forward svc/edge 8080:8080
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: edge
+  template:
+    metadata:
+      labels:
+        app: edge
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: edge
+          image: docker.io/nginxinc/nginx-unprivileged:1.30.5-alpine
+          ports:
+            - containerPort: 8080
+          env:
+            # The entrypoint exports the pod's DNS server (kube-dns) and
+            # renders templates/edge.conf.template into /tmp/edge.conf with
+            # only that variable replaced.
+            - name: NGINX_ENTRYPOINT_LOCAL_RESOLVERS
+              value: "1"
+            - name: NGINX_ENVSUBST_OUTPUT_DIR
+              value: /tmp
+            - name: NGINX_ENVSUBST_FILTER
+              value: ^NGINX_LOCAL_RESOLVERS$
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: nginx
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: templates
+              mountPath: /etc/nginx/templates
+              readOnly: true
+            - name: snippets
+              mountPath: /etc/nginx/snippets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet: {path: /edge-health, port: 8080}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /edge-health, port: 8080}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests: {memory: 16Mi, cpu: 10m}
+            limits: {memory: 64Mi}
+      volumes:
+        - name: nginx
+          configMap:
+            name: edge-nginx
+        - name: templates
+          configMap:
+            name: edge-templates
+        - name: snippets
+          configMap:
+            name: edge-snippets
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 32Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge
+spec:
+  selector:
+    app: edge
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

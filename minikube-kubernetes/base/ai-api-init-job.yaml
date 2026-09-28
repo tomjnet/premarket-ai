@@ -1,0 +1,119 @@
+# ai-api-init | Python 3, Alembic, SQLAlchemy (ai-api image)
+# One-shot, as the database owner: Alembic migrations (ai, graph, memory),
+# the least-privilege roles (premarket_ai, _worker, _mcp) and the demo
+# users. compose's `service_completed_successfully` becomes a Job; the
+# services that waited for it log in with their role in an initContainer
+# (the roles are created at the end of the init).
+# `make -C minikube-kubernetes up` deletes and re-creates it, so every `up`
+# applies new migrations, like `podman compose up`.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ai-api-init
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: ai-api-init
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-postgres
+          image: docker.io/pgvector/pgvector:0.8.0-pg17
+          command:
+            - bash
+            - -c
+            - until pg_isready -q -h postgres -U premarket; do sleep 2; done
+          securityContext:
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: ai-api-init
+          image: localhost/premarket-ai/ai-api:dev
+          imagePullPolicy: Never
+          command: ["ai-api", "init"]
+          envFrom:
+            - configMapRef:
+                name: premarket-settings
+          env:
+            # x-owner-jobs-env: the database owner, Redis, ai-env.
+            - name: TZ
+              value: UTC
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: premarket
+            - name: PGUSER
+              value: premarket
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: POSTGRES_PASSWORD}
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: REDIS_PASSWORD}
+            - name: LLM_GATEWAY_KEY_RAW
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LLM_GATEWAY_KEY}
+            - name: LLM_GATEWAY_URL
+              value: http://llm-gateway:4000/v1
+            - name: LLM_GATEWAY_KEY
+              value: sk-$(LLM_GATEWAY_KEY_RAW)
+            - name: CHROMA_HOST
+              value: chroma
+            - name: CHROMA_PORT
+              value: "8000"
+            - name: RERANKER_URL
+              value: http://reranker:8080
+            - name: LANGFUSE_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_KEY_ID, optional: true}
+            - name: LANGFUSE_SECRET
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_SECRET, optional: true}
+            - name: LANGFUSE_HOST
+              value: http://langfuse-web:3000
+            - name: LANGFUSE_PUBLIC_KEY
+              value: pk-lf-$(LANGFUSE_KEY_ID)
+            - name: LANGFUSE_SECRET_KEY
+              value: sk-lf-$(LANGFUSE_SECRET)
+            # The roles and the demo users it creates.
+            - name: AI_DB_USER
+              value: premarket_ai
+            - name: AI_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: AI_DB_PASSWORD}
+            - name: WORKER_DB_USER
+              value: premarket_worker
+            - name: WORKER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: WORKER_DB_PASSWORD}
+            - name: MCP_DB_USER
+              value: premarket_mcp
+            - name: MCP_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: MCP_DB_PASSWORD}
+            - name: DEMO_USER_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: DEMO_USER_PASSWORD}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests: {memory: 128Mi, cpu: 100m}
+            limits: {memory: 768Mi}
+      volumes:
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}

@@ -1,0 +1,17 @@
+# ChromaDB, the RAG vector store until `make -C python migrate-vectors`
+# switches to pgvector. Like the compose profile chroma, the Makefile of
+# this folder applies it only while VECTOR_STORE=chroma (the default).
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: premarket
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: premarket-ai
+    includeSelectors: false
+    includeTemplates: true
+
+resources:
+  - chroma.yaml

@@ -1,0 +1,535 @@
+# Langfuse 4: traces of every LLM call (set LANGFUSE_TRACING=true in .env
+# and run `make -C minikube-kubernetes config` again). Its own Postgres,
+# ClickHouse, Redis and MinIO. The project and its API keys are created from
+# .env on the first start (headless init). Open it with:
+#   kubectl -n premarket port-forward svc/langfuse-web 3000:3000
+
+# --- langfuse-db | PostgreSQL 17: Langfuse's metadata database ---------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-db
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-db
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-db
+  template:
+    metadata:
+      labels:
+        app: langfuse-db
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:17.6
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: langfuse
+            - name: POSTGRES_USER
+              value: langfuse
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_DB_PASSWORD}
+            - name: TZ
+              value: UTC
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "langfuse", "-d", "langfuse"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests: {memory: 128Mi, cpu: 50m}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-db
+spec:
+  selector:
+    app: langfuse-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+# --- langfuse-clickhouse | ClickHouse 25: traces and observations -----------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-clickhouse
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-clickhouse
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-clickhouse
+  template:
+    metadata:
+      labels:
+        app: langfuse-clickhouse
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+      containers:
+        - name: clickhouse
+          image: docker.io/clickhouse/clickhouse-server:25.12
+          ports:
+            - {name: http, containerPort: 8123}
+            - {name: native, containerPort: 9000}
+          env:
+            - name: CLICKHOUSE_DB
+              value: default
+            - name: CLICKHOUSE_USER
+              value: clickhouse
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_CLICKHOUSE_PASSWORD}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+          readinessProbe:
+            httpGet: {path: /ping, port: 8123}
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            requests: {memory: 512Mi, cpu: 100m}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-clickhouse
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-clickhouse
+spec:
+  selector:
+    app: langfuse-clickhouse
+  ports:
+    - {name: http, port: 8123, targetPort: 8123}
+    - {name: native, port: 9000, targetPort: 9000}
+---
+# --- langfuse-minio | MinIO (S3-compatible): raw events and media -----------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-minio
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-minio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: langfuse-minio
+  template:
+    metadata:
+      labels:
+        app: langfuse-minio
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      containers:
+        - name: minio
+          image: cgr.dev/chainguard/minio:latest
+          # Creates the 'langfuse' bucket before starting the server.
+          command: ["sh"]
+          args: ["-c", "mkdir -p /data/langfuse && minio server --address :9000 --console-address :9001 /data"]
+          ports:
+            - containerPort: 9000
+          env:
+            - name: MINIO_ROOT_USER
+              value: minio
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_MINIO_PASSWORD}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: {path: /minio/health/ready, port: 9000}
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            requests: {memory: 128Mi, cpu: 50m}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-minio
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-minio
+spec:
+  selector:
+    app: langfuse-minio
+  ports:
+    - port: 9000
+      targetPort: 9000
+---
+# --- langfuse-redis | Redis 8: Langfuse's queue and cache (BullMQ) ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-redis
+  template:
+    metadata:
+      labels:
+        app: langfuse-redis
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: redis
+          image: docker.io/library/redis:8.10.2-alpine
+          env:
+            - name: LANGFUSE_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_REDIS_PASSWORD}
+            - name: REDISCLI_AUTH
+              value: $(LANGFUSE_REDIS_PASSWORD)
+          # Langfuse's queue (BullMQ) needs noeviction.
+          args: ["redis-server", "--requirepass", "$(LANGFUSE_REDIS_PASSWORD)", "--maxmemory-policy", "noeviction", "--save", "", "--appendonly", "no"]
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests: {memory: 32Mi, cpu: 20m}
+      volumes:
+        - name: data
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-redis
+spec:
+  selector:
+    app: langfuse-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# --- langfuse-worker | Langfuse 4 worker: ingestion queues -> ClickHouse ----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-worker
+  template:
+    metadata:
+      labels:
+        app: langfuse-worker
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-deps
+          image: docker.io/library/postgres:17.6
+          command:
+            - bash
+            - -c
+            - |
+              for hp in langfuse-db/5432 langfuse-clickhouse/8123 langfuse-minio/9000 langfuse-redis/6379; do
+                until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do echo "waiting for $hp"; sleep 3; done
+              done
+          securityContext:
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: langfuse-worker
+          image: docker.io/langfuse/langfuse-worker:4.46.0
+          env:
+            - name: LANGFUSE_PORT
+              valueFrom:
+                configMapKeyRef: {name: premarket-settings, key: LANGFUSE_PORT}
+            - name: LANGFUSE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_DB_PASSWORD}
+            - name: LANGFUSE_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_CLICKHOUSE_PASSWORD}
+            - name: LANGFUSE_MINIO_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_MINIO_PASSWORD}
+            - name: NEXTAUTH_URL
+              value: http://localhost:$(LANGFUSE_PORT)
+            - name: DATABASE_URL
+              value: postgresql://langfuse:$(LANGFUSE_DB_PASSWORD)@langfuse-db:5432/langfuse
+            - name: SALT
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_SALT}
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_ENCRYPTION_KEY}
+            - name: TELEMETRY_ENABLED
+              value: "false"
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: clickhouse://langfuse-clickhouse:9000
+            - name: CLICKHOUSE_URL
+              value: http://langfuse-clickhouse:8123
+            - name: CLICKHOUSE_USER
+              value: clickhouse
+            - name: CLICKHOUSE_PASSWORD
+              value: $(LANGFUSE_CLICKHOUSE_PASSWORD)
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: auto
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              value: minio
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              value: $(LANGFUSE_MINIO_PASSWORD)
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
+              value: events/
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              value: auto
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              value: minio
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              value: $(LANGFUSE_MINIO_PASSWORD)
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX
+              value: media/
+            - name: REDIS_HOST
+              value: langfuse-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_AUTH
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_REDIS_PASSWORD}
+          resources:
+            requests: {memory: 256Mi, cpu: 50m}
+---
+# --- langfuse-web | Langfuse 4 web: the tracing UI and API ------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-web
+  template:
+    metadata:
+      labels:
+        app: langfuse-web
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-deps
+          image: docker.io/library/postgres:17.6
+          command:
+            - bash
+            - -c
+            - |
+              for hp in langfuse-db/5432 langfuse-clickhouse/8123 langfuse-minio/9000 langfuse-redis/6379; do
+                until (exec 3<>/dev/tcp/$hp) 2>/dev/null; do echo "waiting for $hp"; sleep 3; done
+              done
+          securityContext:
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: langfuse-web
+          image: docker.io/langfuse/langfuse:4.46.0
+          ports:
+            - containerPort: 3000
+          env:
+            - name: LANGFUSE_PORT
+              valueFrom:
+                configMapKeyRef: {name: premarket-settings, key: LANGFUSE_PORT}
+            - name: LANGFUSE_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_DB_PASSWORD}
+            - name: LANGFUSE_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_CLICKHOUSE_PASSWORD}
+            - name: LANGFUSE_MINIO_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_MINIO_PASSWORD}
+            - name: NEXTAUTH_URL
+              value: http://localhost:$(LANGFUSE_PORT)
+            - name: DATABASE_URL
+              value: postgresql://langfuse:$(LANGFUSE_DB_PASSWORD)@langfuse-db:5432/langfuse
+            - name: SALT
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_SALT}
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_ENCRYPTION_KEY}
+            - name: TELEMETRY_ENABLED
+              value: "false"
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: clickhouse://langfuse-clickhouse:9000
+            - name: CLICKHOUSE_URL
+              value: http://langfuse-clickhouse:8123
+            - name: CLICKHOUSE_USER
+              value: clickhouse
+            - name: CLICKHOUSE_PASSWORD
+              value: $(LANGFUSE_CLICKHOUSE_PASSWORD)
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              value: "false"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              value: auto
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              value: minio
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              value: $(LANGFUSE_MINIO_PASSWORD)
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
+              value: events/
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              value: langfuse
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              value: auto
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              value: minio
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              value: $(LANGFUSE_MINIO_PASSWORD)
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: http://langfuse-minio:9000
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              value: "true"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX
+              value: media/
+            - name: REDIS_HOST
+              value: langfuse-redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_AUTH
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_REDIS_PASSWORD}
+            # langfuse-web only.
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_NEXTAUTH_SECRET}
+            - name: LANGFUSE_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_KEY_ID}
+            - name: LANGFUSE_SECRET
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_SECRET}
+            - name: LANGFUSE_INIT_ORG_ID
+              value: premarket
+            - name: LANGFUSE_INIT_ORG_NAME
+              value: premarket-ai
+            - name: LANGFUSE_INIT_PROJECT_ID
+              value: premarket-ai
+            - name: LANGFUSE_INIT_PROJECT_NAME
+              value: premarket-ai
+            - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+              value: pk-lf-$(LANGFUSE_KEY_ID)
+            - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+              value: sk-lf-$(LANGFUSE_SECRET)
+            - name: LANGFUSE_INIT_USER_EMAIL
+              valueFrom:
+                configMapKeyRef: {name: premarket-settings, key: LANGFUSE_INIT_USER_EMAIL}
+            - name: LANGFUSE_INIT_USER_NAME
+              value: admin
+            - name: LANGFUSE_INIT_USER_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: premarket-env, key: LANGFUSE_INIT_USER_PASSWORD}
+          resources:
+            requests: {memory: 256Mi, cpu: 50m}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+spec:
+  selector:
+    app: langfuse-web
+  ports:
+    - port: 3000
+      targetPort: 3000
