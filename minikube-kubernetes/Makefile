@@ -14,6 +14,10 @@ ENV_FILE ?= $(ROOT)/.env
 DATE ?= $(shell TZ=America/New_York date +%F)
 HISTORY_DAYS ?= 5
 EDITION ?= morning
+# CORPUS=false: `demo` skips the corpus download + embedding (~20 min the
+# first time; later runs only embed new documents). Without a corpus, "Ask
+# the News" has no trusted sources and smoke's citation check fails.
+CORPUS ?= true
 # Minikube VM size: fits the 16 GB WSL limit of scripts/windows/wslconfig.example.
 CPUS ?= 6
 MEMORY ?= 12g
@@ -146,7 +150,8 @@ demo: ## Whole day: history + DATE (ingest, rules, AI, verify, brief), check
 	  echo "== history $$d"; \
 	  $(MAKE) --no-print-directory ingest rules DATE=$$d || exit 1; \
 	done
-	$(MAKE) --no-print-directory corpus
+	$(if $(filter true,$(CORPUS)),$(MAKE) --no-print-directory corpus,\
+	  @echo "== corpus skipped (CORPUS=false)")
 	$(MAKE) --no-print-directory ingest rules enrich verify brief scorecard \
 	  smoke DATE=$(DATE)
 	@echo "Open the site: make -C minikube-kubernetes web"
@@ -181,8 +186,14 @@ brief: ## Pre-market brief of DATE (EDITION=morning|refresh), after verify
 scorecard: ## DATE's vendor scorecard (billable vs contracted items)
 	$(AI_API) scorecard --date $(DATE)
 
+# smoke logs in as the demo users: compose runs it in ai-api-init, which has
+# DEMO_USER_PASSWORD. The scheduler doesn't, so the password comes from the
+# Secret on stdin, for this one command only (never on a command line).
 smoke: ## Website check for DATE through the edge (the "done when" check)
-	$(AI_API) smoke --base-url http://edge:8080 --date $(DATE)
+	$(K) get secret premarket-env -o jsonpath='{.data.DEMO_USER_PASSWORD}' \
+	  | base64 -d | $(K) exec -i deploy/scheduler -- sh -c \
+	  'read -r DEMO_USER_PASSWORD; export DEMO_USER_PASSWORD; \
+	  exec ai-api smoke --base-url http://edge:8080 --date $(DATE)'
 
 demo-open: ## Market open for DATE: pending reviews expire (verdicts stand)
 	$(AI_API) expire --date $(DATE)

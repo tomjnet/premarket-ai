@@ -135,6 +135,12 @@ Keep `make ... web` running in its own terminal. WSL forwards `localhost`, so th
 
 The first `up` takes a while: it pulls the public images and downloads the reranker model (about 1 GB) into the `hf-models` volume.
 
+**A faster demo.** The first `demo` spends about 20 minutes in `corpus`: it downloads about 600 SEC and Fed documents and embeds about 5,000 chunks on the GPU host. This happens once:
+- **Later runs are incremental.** `corpus` embeds only chunks that aren't indexed yet, so the next `demo` takes seconds there.
+- **Ctrl+C is safe.** Progress is saved every 32 chunks. Finish it later with `make -C minikube-kubernetes corpus`, then run the rest of the day with `make -C minikube-kubernetes ingest rules enrich verify brief scorecard smoke DATE=...`.
+- **`make -C minikube-kubernetes demo CORPUS=false` skips it.** "Ask the News" then has no trusted sources to cite, so `smoke`'s citation check fails until a corpus exists.
+- **A smaller corpus, on a fresh database:** set `CORPUS_MONTHS=3`, `CORPUS_MAX_FILINGS=2` and `CORPUS_MAX_RELEASES=10` in `.env` (the defaults are 12, 8 and 40), then run `make -C minikube-kubernetes up restart`. Chunks already downloaded are still embedded, so this only helps before the first `corpus` or after `reset`.
+
 | Task | What it does |
 |---|---|
 | `make -C minikube-kubernetes demo DATE=YYYY-MM-DD` | the whole day: history ingest + rules, corpus, ingest, rules, enrich, verify, brief, scorecard, smoke |
