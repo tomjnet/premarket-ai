@@ -135,6 +135,12 @@ Keep `make ... web` running in its own terminal. WSL forwards `localhost`, so th
 
 The first `up` takes a while: it pulls the public images and downloads the reranker model (about 1 GB) into the `hf-models` volume.
 
+**Fresh data every day.** Every task defaults to **today's date in New York** (`DATE ?= $(shell TZ=America/New_York date +%F)`, as in `python/Makefile`). vendor-sim generates a new feed for any date (the same seed and date always give the same 100 items). So each day, just run:
+```bash
+make -C minikube-kubernetes demo
+```
+That day's run ingests the 5 previous days as history plus today, runs the rules and the AI, verifies, writes the brief and runs `smoke` for today. `corpus` only adds the new SEC and Fed documents since the last run. Run a day once: to see an older or fixed day, pass it, for example `DATE=2026-09-25` (the evals' golden-set day). With `RUN_MODE=production`, the scheduler runs the same timeline by itself on NYSE trading days; in `demo` mode (the default) you start it.
+
 **A faster demo.** The first `demo` spends about 20 minutes in `corpus`: it downloads about 600 SEC and Fed documents and embeds about 5,000 chunks on the GPU host. This happens once:
 - **Later runs are incremental.** `corpus` embeds only chunks that aren't indexed yet, so the next `demo` takes seconds there.
 - **Ctrl+C is safe.** Progress is saved every 32 chunks. Finish it later with `make -C minikube-kubernetes corpus`, then run the rest of the day with `make -C minikube-kubernetes ingest rules enrich verify brief scorecard smoke DATE=...`.
@@ -143,8 +149,8 @@ The first `up` takes a while: it pulls the public images and downloads the reran
 
 | Task | What it does |
 |---|---|
-| `make -C minikube-kubernetes demo DATE=YYYY-MM-DD` | the whole day: history ingest + rules, corpus, ingest, rules, enrich, verify, brief, scorecard, smoke |
-| `ingest`, `rules`, `enrich`, `corpus`, `verify`, `brief`, `scorecard`, `smoke`, `demo-open`, `retention` | the same commands as `make -C python` (`DATE=...`) |
+| `make -C minikube-kubernetes demo` | the whole day for **today** (New York date): history ingest + rules, corpus, ingest, rules, enrich, verify, brief, scorecard, smoke. `DATE=YYYY-MM-DD` runs another day |
+| `ingest`, `rules`, `enrich`, `corpus`, `verify`, `brief`, `scorecard`, `smoke`, `demo-open`, `retention` | the same commands as `make -C python`, for today unless `DATE=...` is given |
 | `schedule-plan`, `sla`, `mcp-tools`, `feed-summary`, `llm-status` | as in `make -C python` |
 | `logs SVC=ai-worker` | follow one service (no SVC: every pod) |
 | `psql` | psql on the premarket database |

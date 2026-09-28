@@ -378,7 +378,7 @@ make -C python build                       # the images, as for compose
 make -C minikube-kubernetes load-images    # podman save | minikube image load (7 app images, no registry)
 make -C minikube-kubernetes up             # .env -> ConfigMap + Secret, apply, re-run the ai-api-init Job, wait until ready
 make -C minikube-kubernetes web            # kubectl port-forward: http://localhost:8080 (keep it running)
-make -C minikube-kubernetes demo           # the demo day, ending with the smoke check through the edge
+make -C minikube-kubernetes demo           # today's demo day (New York date; DATE=YYYY-MM-DD for another), ending with smoke
 make -C minikube-kubernetes obs-up         # optional: Langfuse, OTel Collector, Prometheus, Grafana
 make -C minikube-kubernetes grafana        # http://localhost:3001 (port-forward); `langfuse` -> http://localhost:3000
 ```

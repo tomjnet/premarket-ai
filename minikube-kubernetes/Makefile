@@ -144,7 +144,8 @@ psql: ## Open psql on the premarket database
 	$(K) exec -it deploy/postgres -- psql -U premarket -d premarket
 
 # --- the demo day (the same commands as make -C python) ---------------------
-demo: ## Whole day: history + DATE (ingest, rules, AI, verify, brief), check
+demo: ## Whole day: history + DATE (default today, ET), AI, verify, brief, check
+	@echo "== demo day $(DATE) (default: today in America/New_York; DATE=YYYY-MM-DD for another day)"
 	@for i in $$(seq $(HISTORY_DAYS) -1 1); do \
 	  d=$$(date -d "$(DATE) -$$i day" +%F); \
 	  echo "== history $$d"; \
